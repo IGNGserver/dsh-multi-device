@@ -1,0 +1,138 @@
+# dsh-multi-device — DeepSeek Harness (DSH) 多设备管理插件
+
+面向拥有多台开发机、希望通过一个 **DSH Desktop / Web** 统一管理所有设备的用户。遵循 DSH **Everything is a Plugin (Cordis)** 扩展架构，零侵入核心代码，远端设备无需安装任何插件。
+
+---
+
+## 核心特性
+
+### 1. 多设备连接与系统 SSH 深度复用
+- **SSH 隧道（默认推荐）**：远端 `dsh web` 保持默认环回监听（`127.0.0.1:3080`），无需暴露公网端口。插件自动在本地分配回环端口、建立隧道、探活保活并按指数退避 + 抖动自动重连。
+- **100% 复用 `~/.ssh/config`**：
+  - 内置 `~/.ssh/config`（含 `Include` 指令、通配符、`!negation`、`HostName`、`User`、`Port`、`IdentityFile`、`ProxyJump`、`ProxyCommand`、`%h/%p/%r/%u` 占位符）解析器。
+  - UI 支持**一键从 `~/.ssh/config` 导入主机别名**。
+  - 支持双引擎：`system-ssh`（默认调用系统 `ssh -N -L`，原生支持 `ProxyJump`、macOS Keychain `UseKeychain`、`SSH_AUTH_SOCK` / 1Password Agent）与 `ssh2` 内置库回退。
+- **HTTP(S) 直连**：支持已配置外部隧道或 TLS 的远端 `http(s)://host:port` 直接接入。
+- **自动鉴权与持久登录**：
+  - **SSH 自动鉴权（Auto）**：通过 SSH 连接时可自动只读提取远端 `$DSH_HOME/.credentials.yaml` 的 `client-connection/browser-session` 签名密钥，在本地签发 30 天有效期的 `dsh-auth-*` Cookie，免去手动复制启动 Token。
+  - **Token / 启动链接兑换**：支持粘贴 `dsh web` 启动输出的 `http://127.0.0.1:3080/?token=...`，自动兑换并持久化签名 Cookie（`0600` 权限原子写入），跨远端重启持久有效。
+  - 同时支持自定义 Cookie、Bearer Token 与无鉴权模式（兼容 DSH 0.1.x）。
+
+### 2. 双模式界面（聚合模式 + 原生模式，互不依赖）
+- **聚合模式（Aggregated Mode）**：
+  - 将所有设备的逻辑工作区与会话无缝整合进 DSH 官方左侧边栏工作区树与官方对话区。
+  - 原生支持跨设备新建会话、发送提示词、实时流式输出（`assistant-stream`）、工具调用卡片、取消生成、重命名、Fork、归档/取消归档、置顶、全文搜索，以及跨设备**工具越权审批（`approval/request`）**与**交互式提问（`user-questions/request`）**。
+  - 会话行显示设备徽标，悬停卡片展示所属设备、状态、目录路径与 Git 仓库，会话 `...` 菜单支持一键跳转至所属设备的原生模式。
+- **原生模式（Native Mode）与页面保活（Keep-Alive）**：
+  - 在 DSH Desktop / Web 内直接加载指定设备完整的远端 DSH Web 页面，100% 保留远端自己的 DSH 版本、主题、已装插件与界面效果。
+  - 每个设备拥有独立的本地环回反向代理（自动完成 `Host`/`Origin` 归一化、Cookie 注入、WebSocket `/api/remote.mux` 升级转发与 `X-Frame-Options` / `frame-ancestors` 剥离），同时适配 Electron Desktop `<webview>`（`dshDesktop.browser`）与标准 `<iframe>`。
+  - **DOM 级后台保活**：已打开的设备页面在切换模式或切换设备时常驻 DOM（`display: none`），实现 **0ms 瞬时切换**，不丢失滚动位置、未发送草稿与实时流连接。
+- **双向故障隔离**：
+  - 聚合模式网关（`AggregatedGateway`）与原生模式代理/控制面（`NativeProxyManager` + `/multi-device/api`）完全解耦。即使远端 DSH 版本升级导致 `/api` 聚合接口不兼容，原生模式与设备管理中枢依然 100% 可用；反之亦然。
+  - 支持右上角悬浮胶囊栏一键切换或快捷键 `Cmd/Ctrl + Shift + M` 快速切换。
+
+### 3. Git Remote 自动工作区聚合
+- **自动识别同一仓库**：默认读取本地与远端工作区的 Git remote（支持标准 `.git/config` 与 `git worktree` 的 `.git` 指针文件），将不同格式 URL（如 `git@github.com:org/repo.git`、`https://github.com/org/repo.git`、`ssh://git@.../org/repo`）归一化为统一仓库标识（`github.com/org/repo`），自动将多台设备上的对应目录合并为一个**逻辑工作区（Logical Workspace）**。
+- **灵活的手动控制**：
+  - 可随时关闭自动聚合，或将特定设备的目录从自动聚合中拆分/恢复。
+  - 支持创建自定义手动聚合规则（将任意跨设备目录绑定为一个逻辑工作区）。
+  - 支持为每个逻辑工作区指定点击 `+ 新建会话` 时的默认目标设备。
+- **严格边界**：仅聚合工作区视图与会话列表，**绝不触碰、修改或同步任何项目文件**。
+
+### 4. 设备独立性与跨版本兼容
+- 每台远端设备独立运行自己的 `dsh web`，本插件不接管远端 Agent 循环、模型配置、工具执行或沙箱环境。
+- 远端零插件要求，自动探测并同时兼容 **DSH 0.2.x**（`/api/<ns>/<method>` + `/api/remote.mux`）与 **DSH 0.1.x**（`/api/<domain>.<method>` + `/api/events.mux`）。
+
+---
+
+## 安装与使用
+
+### 1. 构建并安装到 DSH Profile
+
+```bash
+# 安装依赖并构建
+pnpm install
+pnpm run check
+
+# 安装到 DSH web 或 desktop profile
+dsh plugin --profile web add file:$(pwd)
+# 若使用 DSH Desktop（先完全退出 Desktop 应用后执行）：
+dsh plugin --profile desktop add file:$(pwd)
+```
+
+重启 `dsh web` 或重新打开 **DSH Desktop**。
+
+### 2. 快速上手
+
+1. **打开多设备中枢**：
+   - 点击左侧边栏导航图标 **「多设备中枢 (Multi-Device Hub)」**，或点击窗口右上角悬浮切换栏的 `⚙` 按钮，或前往 **设置 → 内置插件 → 多设备管理**。
+2. **添加远端设备**：
+   - 点击 **「+ 添加设备」**。
+   - 若系统已有 `~/.ssh/config`，直接在右上角下拉框 **「从 ~/.ssh/config 快速导入」** 选择主机别名即可自动填充；也可手动填写 `host`、端口、用户名与远端 DSH 端口（默认 `3080`）。
+   - 点击 **「测试连接」** 验证连通性、远端 DSH 版本与延迟，然后点击 **「保存设备」**。
+3. **使用双模式与 Git 聚合**：
+   - **聚合模式**：直接在官方左侧边栏查看自动按 Git 仓库聚合的逻辑工作区与跨机セッション，点击任意会话即可在官方对话区流式对话、审批工具调用。
+   - **原生模式**：点击右上角悬浮栏的 **「原生模式」** 或设备胶囊按钮（或按 `Cmd/Ctrl + Shift + M`），即刻切入该设备完整的远端 DSH 界面。
+
+---
+
+## 插件配置（`cordis.yml` / `cordis.patch.yml`）
+
+所有配置项均可选，默认开箱即用：
+
+```yaml
+- id: dsh-multi-device
+  name: dsh-multi-device
+  config:
+    # 设备与聚合规则持久化路径（默认 $DSH_HOME/plugins/dsh-multi-device.json）
+    dataFile: ~/.dsh/plugins/dsh-multi-device.json
+    # 鉴权凭据持久化路径（默认 $DSH_HOME/plugins/dsh-multi-device-secrets.json，权限 0600）
+    secretsFile: ~/.dsh/plugins/dsh-multi-device-secrets.json
+    features:
+      aggregatedMode: true    # 启用聚合模式网关
+      nativeMode: true        # 启用原生模式本地反向代理与保活视图
+      sshTunnel: true         # 启用 SSH 隧道托管
+      autoGitAggregate: true  # 默认开启 Git Remote 自动工作区聚合
+```
+
+---
+
+## 目录结构
+
+```text
+├── cordis.patch.yml                 # DSH bundle 挂载声明
+├── package.json                     # 插件包配置（导出 Host `.` 与 Browser `./client`）
+├── build.mjs                        # esbuild + tsc 构建脚本
+├── src/
+│   ├── index.ts                     # Host 插件入口（Cordis apply）
+│   ├── contract.ts                  # 前后端共享类型契约、碰撞安全 ID 编解码与 Git URL 归一化
+│   ├── runtime.ts                   # 控制面 HTTP (/multi-device/api) 与实时 SSE (/multi-device/events)
+│   ├── host/
+│   │   ├── ssh-config.ts            # ~/.ssh/config 解析器与参数决议
+│   │   ├── tunnel.ts                # 双引擎 SSH 本地端口转发与退避重连 (system-ssh + ssh2)
+│   │   ├── auth.ts                  # DSH 0.2/0.1 鉴权管理、Token 兑换与 SSH 自动密钥引导
+│   │   ├── native-proxy.ts          # 原生模式独立本地反向代理（HTTP + WebSocket 升级转发）
+│   │   ├── git-aggregator.ts        # Git Remote 自动探测（含 worktree）与逻辑工作区聚合引擎
+│   │   ├── remote-client.ts         # 跨版本（0.2.x / 0.1.x）远端 DSH 客户端与多路复用流泵
+│   │   ├── registry.ts              # 设备与工作区聚合注册表及持久化
+│   │   └── gateway.ts               # 聚合模式 Host 服务桥接（Session / Workspace / $events Waterfall）
+│   └── client/
+│       ├── index.tsx                # Browser 插件入口（注册 Slots、快捷键与多语言）
+│       ├── state.ts                 # 前端响应式状态存储、SSE 同步与保活 LRU 管理
+│       ├── NativeViewport.tsx       # 原生模式 Keep-Alive 容器（支持 Electron <webview> 与 <iframe>）
+│       ├── MultiDeviceHubPanel.tsx  # 多设备中枢主面板（设备管理 / Git 聚合 / 原生视图）
+│       ├── ModeSwitcherOverlay.tsx  # 顶部悬浮模式切换器与侧边栏会话行增强组件
+│       ├── locales.ts               # 中英双语词典
+│       └── styles.ts                # 样式注入（卸载时自动清理）
+└── tests/
+    └── multi-device.spec.ts         # 单元与端到端集成测试套件
+```
+
+## 开发与测试
+
+```bash
+pnpm run typecheck   # TypeScript 严格类型检查
+pnpm run build       # 构建 lib/index.js、lib/client.js、lib/contract.js 与 lib/types/
+pnpm run test        # 运行 Vitest 单元与端到端集成测试
+pnpm run check       # 依次执行 typecheck + build + test
+```

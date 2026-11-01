@@ -1,0 +1,4 @@
+# dsh-multi-device bundle patch: mount the multi-device host plugin in web/desktop profiles.
+- insert:
+    - id: dsh-multi-device
+      name: dsh-multi-device

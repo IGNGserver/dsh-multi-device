@@ -1,0 +1,143 @@
+name: Build and publish release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: 'Release channel; test publishes a prerelease, stable publishes a formal release'
+        required: true
+        type: choice
+        options:
+          - test
+          - stable
+        default: test
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DSH_RELEASE_CHANNEL: ${{ github.event.inputs.channel || 'test' }}
+
+jobs:
+  release:
+    name: Verify, package and publish GitHub Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Validate release tag and channel
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          [[ "$GITHUB_REF_TYPE" == "tag" ]] || { echo "Release builds must run from a version tag." >&2; exit 1; }
+          [[ "$GITHUB_REF_NAME" == "v${version}" ]] || { echo "Tag $GITHUB_REF_NAME does not match VERSION $version." >&2; exit 1; }
+          [[ "$DSH_RELEASE_CHANNEL" == "test" || "$DSH_RELEASE_CHANNEL" == "stable" ]] || { echo "Invalid release channel: $DSH_RELEASE_CHANNEL" >&2; exit 1; }
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 10.33.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Rebuild esbuild binary
+        run: pnpm rebuild esbuild
+
+      - name: Verify version, typecheck, build and test
+        run: |
+          pnpm run verify:version
+          pnpm run typecheck
+          pnpm run build
+          pnpm run test
+
+      - name: Package release assets and SHA-256 checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          mkdir -p release-assets
+
+          # 1. Standard npm/pnpm plugin tarball (for `dsh plugin add`)
+          npm pack --pack-destination release-assets
+          mv "release-assets/dsh-multi-device-${version}.tgz" "release-assets/dsh-multi-device-v${version}.tgz"
+
+          # 2. Full standalone bundle archive
+          tar -czf "release-assets/dsh-multi-device-bundle-v${version}.tar.gz" \
+            package.json cordis.patch.yml VERSION README.md RELEASE.md LICENSE lib src stubs
+
+          # 3. Generate SHA-256 checksums
+          (
+            cd release-assets
+            sha256sum "dsh-multi-device-v${version}.tgz" > "dsh-multi-device-v${version}.tgz.sha256"
+            sha256sum "dsh-multi-device-bundle-v${version}.tar.gz" > "dsh-multi-device-bundle-v${version}.tar.gz.sha256"
+          )
+          ls -lh release-assets
+
+      - name: Generate release notes and metadata
+        id: release_meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          if [[ "$DSH_RELEASE_CHANNEL" == "stable" ]]; then
+            echo "name=DSH Multi-Device Plugin v${version}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "make_latest=true" >> "$GITHUB_OUTPUT"
+            channel_label="正式版 (Stable)"
+          else
+            echo "name=DSH Multi-Device Plugin v${version} (测试版)" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "make_latest=false" >> "$GITHUB_OUTPUT"
+            channel_label="测试版 (Prerelease)"
+          fi
+
+          cat <<EOF > release-notes.md
+          ## DSH Multi-Device Plugin ${GITHUB_REF_NAME} · ${channel_label}
+
+          面向拥有多台开发机、通过一个 **DSH Desktop / Web** 统一管理所有设备的插件。
+
+          ### 核心能力
+          - **多设备连接**：支持 SSH 隧道（默认推荐）与 HTTP(S) 直连，100% 复用系统 \`~/.ssh/config\`（支持一键导入主机别名），自动鉴权与断线指数退避重连。
+          - **双模式界面（互不依赖）**：
+            - **聚合模式**：跨设备工作区与会话统一整合至官方侧边栏，支持流式输出、跨机新建会话与工具审批/提问应答。
+            - **原生模式**：内置独立环回认证反向代理与 DOM 级 Keep-Alive 保活容器，0ms 瞬时切换远端完整 DSH Web 页面。
+          - **Git Remote 自动工作区聚合**：自动将不同设备上指向同一 Git 仓库的目录合并为逻辑工作区，支持手动调整与拆分，不做文件同步。
+          - **设备独立与跨版本兼容**：远端零插件要求，兼容 DSH 0.2.x 与 0.1.x。
+
+          ### 快速安装
+          \`\`\`bash
+          # 安装至 DSH Desktop profile（请先退出 DSH Desktop）
+          dsh plugin --profile desktop add https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/dsh-multi-device-v${version}.tgz
+
+          # 或安装至 DSH Web profile
+          dsh plugin --profile web add https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/dsh-multi-device-v${version}.tgz
+          \`\`\`
+          EOF
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ steps.release_meta.outputs.name }}
+          body_path: release-notes.md
+          prerelease: ${{ steps.release_meta.outputs.prerelease }}
+          make_latest: ${{ steps.release_meta.outputs.make_latest }}
+          overwrite_files: true
+          files: release-assets/*

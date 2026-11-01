@@ -1,0 +1,878 @@
+/**
+ * Comprehensive unit and integration tests for `dsh-multi-device`:
+ * 1. Deterministic identity mapping (`SessionId`, `WorkspaceId`, `LogicalWorkspaceId`, `EventId`) & Git URL normalization.
+ * 2. System `~/.ssh/config` parser (`Host` wildcards, negation `!`, `Include`, `%h`/`%p`/`%r` tokens, CLI arg builder).
+ * 3. Persistent authentication (`dshCookieName`, `mintDshBrowserCookie`, launch token exchange, `.credentials.yaml` parser).
+ * 4. Git Remote Auto-Discovery (`.git/config` + worktree `.git` gitdir pointers) & `WorkspaceAggregator`
+ *    (auto Git aggregation, manual merge rules, member exclusion/splitting, preferred target device).
+ * 5. End-to-end integration with simulated remote DSH 0.2 & DSH 0.1 servers:
+ *    - `RemoteDeviceClient` handshake, live WebSocket `/api/remote.mux` (`workspace/follow`, `session/control`, `$events`),
+ *      session list/history/prompt/cancel/rename/fork, and `approval/request` waterfall round-trip.
+ *    - `NativeDeviceProxy` authenticated HTTP + WebSocket reverse proxy (header rewriting, X-Frame-Options stripping).
+ *    - `AggregatedGateway` + `MultiDeviceControlPlane` mode independence & fallback verification.
+ */
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
+import { WebSocket, WebSocketServer } from 'ws'
+import {
+  decodeLogicalWorkspaceId,
+  decodeRemoteEventId,
+  decodeRemoteWorkspaceId,
+  decodeSessionId,
+  DeviceId,
+  encodeLogicalWorkspaceId,
+  encodeRemoteEventId,
+  encodeRemoteSessionId,
+  encodeRemoteWorkspaceId,
+  LOCAL_DEVICE_ID,
+  normalizeGitRemote,
+  normalizeWorkspacePath,
+} from '../src/contract.ts'
+import {
+  DeviceAuthManager,
+  dshCookieName,
+  extractLaunchToken,
+  mintDshBrowserCookie,
+  parseSigningSecretFromCredentialsYaml,
+} from '../src/host/auth.ts'
+import {
+  discoverLocalGitRemote,
+  parseGitConfigRemoteUrl,
+  WorkspaceAggregator,
+} from '../src/host/git-aggregator.ts'
+import {
+  installAggregatedGateway02,
+  type SessionControllerLike,
+  type TypertGatewayLike,
+  type WorkspaceControllerLike,
+} from '../src/host/gateway.ts'
+import { NativeDeviceProxy } from '../src/host/native-proxy.ts'
+import { DeviceRegistry } from '../src/host/registry.ts'
+import {
+  buildSystemSshArgs,
+  parseSshConfigText,
+  parseSshTargetSpec,
+  resolveSshConfigForTransport,
+} from '../src/host/ssh-config.ts'
+import { buildSystemSshArgs as buildTunnelSshArgs } from '../src/host/tunnel.ts'
+import { MultiDeviceControlPlane } from '../src/runtime.ts'
+
+const tempDirs: string[] = []
+function makeTempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix))
+  tempDirs.push(dir)
+  return dir
+}
+
+afterEach(() => {
+  while (tempDirs.length > 0) {
+    const dir = tempDirs.pop()
+    if (dir !== undefined) {
+      try { rmSync(dir, { recursive: true, force: true }) } catch { /* ignore */ }
+    }
+  }
+})
+
+describe('1. Identity Mapping & Git Remote URL Normalization', () => {
+  it('losslessly encodes and decodes remote SessionIds, WorkspaceIds, LogicalWorkspaceIds, and EventIds', () => {
+    const devId = DeviceId('ubuntu~gpu%1')
+    const rawSid = 'session-9f8e7d6c-1234'
+    const encodedSid = encodeRemoteSessionId(devId, rawSid)
+    expect(encodedSid).toBe('md~ubuntu%7Egpu%251~session-9f8e7d6c-1234')
+
+    const decodedSid = decodeSessionId(encodedSid)
+    expect(decodedSid).toEqual({
+      deviceId: devId,
+      rawSessionId: rawSid,
+      isRemote: true,
+    })
+
+    expect(decodeSessionId('session-local-123')).toEqual({
+      deviceId: LOCAL_DEVICE_ID,
+      rawSessionId: 'session-local-123',
+      isRemote: false,
+    })
+
+    const encodedWs = encodeRemoteWorkspaceId(devId, 'ws-abc')
+    expect(decodeRemoteWorkspaceId(encodedWs)).toEqual({
+      deviceId: devId,
+      rawWorkspaceId: 'ws-abc',
+      isRemote: true,
+    })
+
+    const encodedLogical = encodeLogicalWorkspaceId('git', 'github.com/deepseek-ai/deepseek-harness')
+    expect(decodeLogicalWorkspaceId(encodedLogical)).toEqual({
+      kind: 'git',
+      key: 'github.com/deepseek-ai/deepseek-harness',
+    })
+
+    const encodedEv = encodeRemoteEventId(devId, 'ev-42')
+    expect(decodeRemoteEventId(encodedEv)).toEqual({
+      deviceId: devId,
+      remoteEventId: 'ev-42',
+    })
+  })
+
+  it('normalizes SSH, SCP, HTTPS, and custom-port Git remote URLs to a canonical repo key', () => {
+    const expected = 'github.com/deepseek-ai/deepseek-harness'
+    expect(normalizeGitRemote('git@github.com:deepseek-ai/deepseek-harness.git')).toBe(expected)
+    expect(normalizeGitRemote('https://github.com/DeepSeek-AI/DeepSeek-Harness.git')).toBe(expected)
+    expect(normalizeGitRemote('https://token@github.com/deepseek-ai/deepseek-harness/')).toBe(expected)
+    expect(normalizeGitRemote('ssh://git@github.com:22/deepseek-ai/deepseek-harness.git')).toBe(expected)
+    expect(normalizeGitRemote('git://github.com/deepseek-ai/deepseek-harness')).toBe(expected)
+    expect(normalizeGitRemote('C:\\Users\\me\\repo')).toBeUndefined()
+    expect(normalizeGitRemote('')).toBeUndefined()
+  })
+
+  it('normalizes POSIX and Windows workspace paths consistently', () => {
+    expect(normalizeWorkspacePath('/Users/lvziw/project///')).toBe('/Users/lvziw/project')
+    expect(normalizeWorkspacePath('C:\\Users\\Dev\\Project\\')).toBe('c:/users/dev/project')
+  })
+})
+
+describe('2. System ~/.ssh/config Parser & Tunnel Argument Builder', () => {
+  it('parses Host blocks, wildcards, negated patterns, tokens, and resolves first-match-wins', () => {
+    const sampleConfig = `
+# Global defaults
+Host gpu-* !gpu-deprecated
+  User ubuntu
+  Port 2222
+  ProxyJump bastion.internal
+
+Host gpu-node1
+  HostName 10.20.30.40
+  IdentityFile ~/.ssh/id_%r_%h
+
+Host *
+  User defaultuser
+  Port 22
+  ServerAliveInterval 20
+`
+    const blocks = parseSshConfigText(sampleConfig, '/home/test/.ssh/config')
+    const resolved1 = resolveSshConfigForTransport(
+      { kind: 'ssh', host: 'gpu-node1', remotePort: 3080 },
+      blocks,
+      '/home/test',
+    )
+    expect(resolved1.hostName).toBe('10.20.30.40')
+    expect(resolved1.user).toBe('ubuntu')
+    expect(resolved1.port).toBe(2222)
+    expect(resolved1.proxyJump).toBe('bastion.internal')
+    expect(resolved1.identityFiles[0]).toBe('/home/test/.ssh/id_ubuntu_10.20.30.40')
+    expect(resolved1.serverAliveInterval).toBe(20)
+
+    const resolvedDeprecated = resolveSshConfigForTransport(
+      { kind: 'ssh', host: 'gpu-deprecated' },
+      blocks,
+      '/home/test',
+    )
+    expect(resolvedDeprecated.user).toBe('defaultuser')
+    expect(resolvedDeprecated.port).toBe(22)
+
+    const cliArgs = buildTunnelSshArgs(
+      { kind: 'ssh', host: 'gpu-node1', remotePort: 3080 },
+      resolved1,
+      54321,
+    )
+    expect(cliArgs).toContain('-L')
+    expect(cliArgs).toContain('127.0.0.1:54321:127.0.0.1:3080')
+    expect(cliArgs.at(-1)).toBe('gpu-node1')
+  })
+
+  it('parses user@host:port and ssh:// shorthand specs', () => {
+    expect(parseSshTargetSpec('root@192.168.1.50:22022')).toEqual({
+      username: 'root',
+      host: '192.168.1.50',
+      port: 22022,
+    })
+    expect(parseSshTargetSpec('ssh://dev@10.0.0.8:2222')).toEqual({
+      username: 'dev',
+      host: '10.0.0.8',
+      port: 2222,
+    })
+  })
+})
+
+describe('3. Persistent Authentication & Cookie Minting', () => {
+  it('extracts launch tokens, parses .credentials.yaml, and mints valid DSH 0.2 signed cookies', () => {
+    expect(extractLaunchToken('http://127.0.0.1:3080/?token=my_launch_token_123')).toBe(
+      'my_launch_token_123',
+    )
+    expect(extractLaunchToken('plain_token_xyz')).toBe('plain_token_xyz')
+
+    const sampleYaml = `
+version: 1
+records:
+  client-connection/browser-session:
+    kind: grant
+    payload:
+      version: 1
+      secret: Lmbm2Ybqc9aKKkxPULPgyA0SbQBUlKtboujV41nWgJw
+`
+    const secret = parseSigningSecretFromCredentialsYaml(sampleYaml)
+    expect(secret).toBe('Lmbm2Ybqc9aKKkxPULPgyA0SbQBUlKtboujV41nWgJw')
+
+    const cookie = mintDshBrowserCookie('127.0.0.1:3080', secret!)
+    expect(cookie).toBeDefined()
+    expect(cookie!.startsWith(`${dshCookieName('127.0.0.1:3080')}=v1.`)).toBe(true)
+  })
+})
+
+describe('4. Git Remote Discovery & WorkspaceAggregator', () => {
+  it('discovers Git remotes from both standard .git/config and worktree .git pointer files', () => {
+    const root = makeTempDir('dsh-md-git-')
+    const repoDir = join(root, 'main-repo')
+    mkdirSync(join(repoDir, '.git', 'worktrees', 'feat-1'), { recursive: true })
+    writeFileSync(
+      join(repoDir, '.git', 'config'),
+      `[core]\n\trepositoryformatversion = 0\n[remote "origin"]\n\turl = git@github.com:acme/platform.git\n`,
+    )
+    expect(discoverLocalGitRemote(repoDir)).toBe('git@github.com:acme/platform.git')
+
+    const wtDir = join(root, 'wt-feat-1')
+    mkdirSync(wtDir, { recursive: true })
+    writeFileSync(join(wtDir, '.git'), `gitdir: ${join(repoDir, '.git', 'worktrees', 'feat-1')}\n`)
+    writeFileSync(join(repoDir, '.git', 'worktrees', 'feat-1', 'commondir'), '../..\n')
+    expect(discoverLocalGitRemote(wtDir)).toBe('git@github.com:acme/platform.git')
+  })
+
+  it('aggregates workspaces sharing a Git remote across devices, and honors manual rules & exclusions', () => {
+    const agg = new WorkspaceAggregator({ autoGitAggregate: true, prefixUnmatchedWithDevice: true })
+    const devUbuntu = DeviceId('dev-ubuntu')
+    const devMac = DeviceId('dev-mac')
+
+    agg.noteGitRemote(LOCAL_DEVICE_ID, '/Users/me/platform', 'https://github.com/acme/platform.git')
+    agg.noteGitRemote(devUbuntu, '/home/ubuntu/platform', 'git@github.com:acme/platform.git')
+    agg.noteGitRemote(devMac, '/Users/mac/other-tool', 'git@github.com:acme/other-tool.git')
+
+    const { logicalWorkspaces } = agg.aggregate(
+      [
+        {
+          deviceId: LOCAL_DEVICE_ID,
+          deviceName: 'Local',
+          workspaceId: 'ws-local-1',
+          path: '/Users/me/platform',
+          title: 'platform',
+          sessionIds: ['s-local-1'],
+          runningSessionCount: 0,
+          createdAt: '2026-10-01T00:00:00.000Z',
+          updatedAt: '2026-10-02T00:00:00.000Z',
+        },
+        {
+          deviceId: devUbuntu,
+          deviceName: 'ubuntu-gpu',
+          workspaceId: 'ws-rem-1',
+          path: '/home/ubuntu/platform',
+          title: 'platform-ubuntu',
+          sessionIds: ['s-rem-1'],
+          runningSessionCount: 1,
+          createdAt: '2026-10-01T00:00:00.000Z',
+          updatedAt: '2026-10-03T00:00:00.000Z',
+        },
+        {
+          deviceId: devMac,
+          deviceName: 'mac-mini',
+          workspaceId: 'ws-rem-2',
+          path: '/Users/mac/other-tool',
+          title: 'other-tool',
+          sessionIds: ['s-rem-2'],
+          runningSessionCount: 0,
+          createdAt: '2026-10-01T00:00:00.000Z',
+          updatedAt: '2026-10-01T00:00:00.000Z',
+        },
+      ],
+      new Map([
+        ['s-local-1', 100],
+        [encodeRemoteSessionId(devUbuntu, 's-rem-1'), 200],
+      ]),
+    )
+
+    expect(logicalWorkspaces).toHaveLength(2)
+    const mergedPlatform = logicalWorkspaces.find(w => w.kind === 'git')!
+    expect(mergedPlatform).toBeDefined()
+    expect(mergedPlatform.gitRemote).toBe('github.com/acme/platform')
+    expect(mergedPlatform.members).toHaveLength(2)
+    expect(mergedPlatform.sessionIds).toEqual([
+      encodeRemoteSessionId(devUbuntu, 's-rem-1'),
+      's-local-1',
+    ])
+
+    const singleMac = logicalWorkspaces.find(w => w.kind === 'single')!
+    expect(singleMac.title).toBe('[mac-mini] other-tool')
+
+    // Excluding a member splits the auto-merged workspace back into single workspaces
+    agg.setMemberExcluded(`${devUbuntu}:/home/ubuntu/platform`, true)
+    const afterSplit = agg.aggregate([
+      {
+        deviceId: LOCAL_DEVICE_ID,
+        deviceName: 'Local',
+        workspaceId: 'ws-local-1',
+        path: '/Users/me/platform',
+        title: 'platform',
+        sessionIds: ['s-local-1'],
+        runningSessionCount: 0,
+        createdAt: '2026-10-01T00:00:00.000Z',
+        updatedAt: '2026-10-02T00:00:00.000Z',
+      },
+      {
+        deviceId: devUbuntu,
+        deviceName: 'ubuntu-gpu',
+        workspaceId: 'ws-rem-1',
+        path: '/home/ubuntu/platform',
+        title: 'platform-ubuntu',
+        sessionIds: ['s-rem-1'],
+        runningSessionCount: 1,
+        createdAt: '2026-10-01T00:00:00.000Z',
+        updatedAt: '2026-10-03T00:00:00.000Z',
+      },
+    ])
+    expect(afterSplit.logicalWorkspaces).toHaveLength(2)
+    expect(afterSplit.logicalWorkspaces.every(w => w.kind === 'single')).toBe(true)
+  })
+})
+
+describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, & Native Proxy', () => {
+  it('connects to a simulated remote DSH 0.2 server, aggregates sessions & workspaces, routes prompts/approvals, and serves Native Mode via reverse proxy', async () => {
+    const dir = makeTempDir('dsh-md-e2e-')
+
+    // Spin up a mock remote DSH 0.2 HTTP + WebSocket server
+    const remotePrompts: unknown[] = []
+    const remoteApprovalResults: unknown[] = []
+    let pushRemoteEvent: ((frame: unknown) => void) | undefined
+
+    const wss = new WebSocketServer({ noServer: true })
+    wss.on('connection', (ws) => {
+      ws.on('message', (raw) => {
+        const msg = JSON.parse(raw.toString()) as {
+          type: string
+          streamId: string
+          endpoint?: string
+          payload?: { args?: Record<string, unknown> }
+        }
+        if (msg.type === 'open') {
+          if (msg.endpoint === '$events') {
+            ws.send(
+              JSON.stringify({
+                type: 'item',
+                streamId: msg.streamId,
+                value: {
+                  type: 'ready',
+                  clientId: 'remote-client-1',
+                  host: { home: '/home/remoteuser' },
+                },
+              }),
+            )
+            pushRemoteEvent = (frame) => {
+              ws.send(JSON.stringify({ type: 'item', streamId: msg.streamId, value: frame }))
+            }
+          } else if (msg.endpoint === 'workspace/follow') {
+            ws.send(
+              JSON.stringify({
+                type: 'item',
+                streamId: msg.streamId,
+                value: {
+                  type: 'baseline',
+                  value: {
+                    items: [
+                      {
+                        workspaceId: 'rws-1',
+                        path: '/home/remoteuser/shared-repo',
+                        title: 'shared-repo',
+                        sessionIds: ['rsess-1'],
+                        createdAt: '2026-10-01T00:00:00.000Z',
+                        updatedAt: '2026-10-02T00:00:00.000Z',
+                      },
+                    ],
+                    archivedSessionIds: [],
+                    pinnedSessionIds: [],
+                  },
+                },
+              }),
+            )
+          } else if (msg.endpoint === 'session/control') {
+            ws.send(
+              JSON.stringify({
+                type: 'item',
+                streamId: msg.streamId,
+                value: {
+                  type: 'baseline',
+                  value: {
+                    projections: {
+                      'rsess-1': {
+                        asOfSeq: 2,
+                        values: { title: 'Remote Task 1' },
+                      },
+                    },
+                  },
+                },
+              }),
+            )
+          } else if (msg.endpoint === 'session/follow') {
+            ws.send(
+              JSON.stringify({
+                type: 'item',
+                streamId: msg.streamId,
+                value: {
+                  type: 'snapshot',
+                  header: { version: 2, id: 'rsess-1', createdAt: 1000, cwd: '/home/remoteuser/shared-repo', isSeeded: false },
+                  cursor: 1,
+                  records: [],
+                  hasMore: false,
+                  projections: { asOfSeq: 1, values: { title: 'Remote Task 1' } },
+                  assistantStream: { revision: 0 },
+                },
+              }),
+            )
+          }
+        }
+      })
+    })
+
+    const remoteServer: Server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+      if (req.url === '/' && req.method === 'GET') {
+        res.writeHead(200, {
+          'content-type': 'text/html; charset=utf-8',
+          'x-frame-options': 'DENY',
+          'content-security-policy': "default-src 'self'; frame-ancestors 'none'",
+        })
+        res.end('<html><body>Remote DSH Native Web UI</body></html>')
+        return
+      }
+
+      const chunks: Buffer[] = []
+      for await (const c of req) chunks.push(c as Buffer)
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
+        rpcId: string
+        method: string
+        payload: { args: Record<string, unknown> }
+      }
+
+      const reply = (value: unknown): void => {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(
+          JSON.stringify({
+            type: 'server-response',
+            rpcId: body.rpcId,
+            result: { ok: true, value },
+          }),
+        )
+      }
+
+      if (body.method === 'session/list') {
+        reply({
+          items: [
+            {
+              sessionId: 'rsess-1',
+              updatedAt: 5000,
+              agentAvailable: true,
+              running: true,
+              blank: false,
+              cwd: '/home/remoteuser/shared-repo',
+              projections: { kind: 'sequenced', asOfSeq: 2, values: { title: 'Remote Task 1' } },
+            },
+          ],
+        })
+        return
+      }
+
+      if (body.method === 'session/prompt') {
+        remotePrompts.push(body.payload.args.request)
+        reply({ accepted: true })
+        return
+      }
+
+      if (body.method === '$events/result') {
+        remoteApprovalResults.push(body.payload.args)
+        reply(undefined)
+        return
+      }
+
+      reply({})
+    })
+
+    remoteServer.on('upgrade', (req, socket, head) => {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        wss.emit('connection', ws, req)
+      })
+    })
+
+    await new Promise<void>(r => remoteServer.listen(0, '127.0.0.1', () => r()))
+    const remotePort = (remoteServer.address() as { port: number }).port
+    const remoteBaseUrl = `http://127.0.0.1:${remotePort}`
+
+    try {
+      const registry = new DeviceRegistry(
+        join(dir, 'devices.json'),
+        join(dir, 'secrets.json'),
+        {
+          localPort: () => 3080,
+          localWorkspaces: () => [
+            {
+              deviceId: LOCAL_DEVICE_ID,
+              deviceName: 'Local',
+              workspaceId: 'lws-1',
+              path: '/Users/local/shared-repo',
+              title: 'shared-repo',
+              sessionIds: ['lsess-1'],
+              runningSessionCount: 0,
+              createdAt: '2026-10-01T00:00:00.000Z',
+              updatedAt: '2026-10-01T00:00:00.000Z',
+            },
+          ],
+          localSessionUpdatedAt: () => new Map([['lsess-1', 1000]]),
+        },
+      )
+
+      // Add the remote device
+      const added = await registry.upsertDevice({
+        id: 'dev-remote1',
+        name: 'remote-box',
+        transport: { kind: 'direct', baseUrl: remoteBaseUrl },
+        auth: { mode: 'none' },
+      })
+      expect(added.ok).toBe(true)
+
+      // Wait for RemoteDeviceClient to connect and receive workspace/follow + session/control baselines
+      for (let i = 0; i < 40; i++) {
+        const view = registry.client(DeviceId('dev-remote1'))?.toView()
+        if (view?.state === 'connected' && view.workspaceCount > 0) break
+        await new Promise(r => setTimeout(r, 50))
+      }
+
+      const devId = DeviceId('dev-remote1')
+      registry.aggregator.noteGitRemote(LOCAL_DEVICE_ID, '/Users/local/shared-repo', 'git@github.com:org/shared-repo.git')
+      registry.aggregator.noteGitRemote(devId, '/home/remoteuser/shared-repo', 'https://github.com/org/shared-repo.git')
+
+      // Verify Git Auto-Aggregation merges local and remote workspaces into one Logical Workspace
+      const snap = registry.snapshot()
+      expect(snap.logicalWorkspaces).toHaveLength(1)
+      expect(snap.logicalWorkspaces[0]?.kind).toBe('git')
+      expect(snap.logicalWorkspaces[0]?.gitRemote).toBe('github.com/org/shared-repo')
+      expect(snap.logicalWorkspaces[0]?.sessionIds).toEqual([
+        encodeRemoteSessionId(devId, 'rsess-1'),
+        'lsess-1',
+      ])
+
+      // Verify Native Mode Reverse Proxy serves remote HTML and strips X-Frame-Options & CSP frame-ancestors
+      const proxyUrl = snap.devices[0]?.nativeProxyUrl
+      expect(proxyUrl).toBeDefined()
+      const proxyRes = await fetch(proxyUrl!)
+      expect(proxyRes.status).toBe(200)
+      expect(proxyRes.headers.get('x-frame-options')).toBeNull()
+      expect(proxyRes.headers.get('content-security-policy') ?? '').not.toContain('frame-ancestors')
+      const html = await proxyRes.text()
+      expect(html).toContain('Remote DSH Native Web UI')
+
+      // Install AggregatedGateway over mock local controllers and test session.list, session.prompt, and approval waterfall
+      const mockSessionController: SessionControllerLike = {
+        list: async () => ({
+          items: [
+            {
+              sessionId: 'lsess-1',
+              updatedAt: 1000,
+              agentAvailable: true,
+              running: false,
+              blank: false,
+              cwd: '/Users/local/shared-repo',
+            },
+          ],
+        }),
+        search: async () => ({ items: [], hasMore: false }),
+        create: async () => ({ sessionId: 'lsess-new' }),
+        selectModel: async () => ({ selected: {} }),
+        modelCatalog: async () => ({}),
+        rename: async () => ({ title: 'renamed', seq: 1 }),
+        fork: async () => ({ sessionId: 'lsess-fork' }),
+        prompt: async () => ({ accepted: true }),
+        attachment: async () => ({}),
+        updateQueue: async () => ({ accepted: true }),
+        cancel: () => ({ accepted: true }),
+        page: async () => ({ records: [], hasMore: false }),
+        follow: async function* () {},
+        projections: async () => null,
+        control: async function* () {
+          yield { type: 'baseline', value: { projections: {} } }
+        },
+      }
+
+      const mockWorkspaceController: WorkspaceControllerLike = {
+        create: async () => ({ workspace: {}, created: true }),
+        rename: async () => ({ workspace: {} }),
+        delete: async () => ({ deleted: true }),
+        insertBefore: async () => ({ workspaceIds: [] }),
+        insertSessionBefore: async () => ({ workspace: {} }),
+        archiveSession: async () => ({ archivedSessionIds: [] }),
+        unarchiveSession: async () => ({ archivedSessionIds: [] }),
+        pinSession: async () => ({ pinnedSessionIds: [] }),
+        unpinSession: async () => ({ pinnedSessionIds: [] }),
+        follow: async function* () {
+          yield {
+            type: 'baseline',
+            value: { items: [], archivedSessionIds: [], pinnedSessionIds: [] },
+          }
+        },
+      }
+
+      const mockGateway: TypertGatewayLike = {
+        wireStream: {
+          open: async () =>
+            (async function* () {
+              yield { type: 'ready', clientId: 'local-client-1', host: { home: '/Users/local' } }
+            })(),
+          failure: () => ({ code: 'internal', message: 'err', details: {} }),
+        },
+        dispatchRpc: async () => ({ ok: true, value: undefined }),
+      }
+
+      const disposeGateway = installAggregatedGateway02(
+        registry,
+        mockSessionController,
+        mockWorkspaceController,
+        mockGateway,
+      )
+
+      // 1) Merged session.list
+      const listed = await mockSessionController.list({}, new AbortController().signal)
+      expect(listed.items.map(i => i.sessionId)).toEqual([
+        encodeRemoteSessionId(devId, 'rsess-1'),
+        'lsess-1',
+      ])
+
+      // 2) Routed session.prompt to remote device
+      await mockSessionController.prompt(
+        {
+          requestId: 'req-1',
+          sessionId: encodeRemoteSessionId(devId, 'rsess-1'),
+          mode: 'queue',
+          content: [{ type: 'text', text: 'Hello remote DSH' }],
+        },
+        new AbortController().signal,
+      )
+      expect(remotePrompts).toHaveLength(1)
+      expect((remotePrompts[0] as { sessionId: string }).sessionId).toBe('rsess-1')
+
+      // 3) Remote approval waterfall -> answered via $events/result
+      pushRemoteEvent?.({
+        type: 'waterfall',
+        event: 'approval/request',
+        eventId: 'rem-ev-99',
+        agentId: 'rsess-1',
+        request: { toolName: 'bash', reason: 'Run build' },
+      })
+      await new Promise(r => setTimeout(r, 60))
+
+      const namespacedEvId = encodeRemoteEventId(devId, 'rem-ev-99')
+      const resultRes = await mockGateway.dispatchRpc!(
+        '$events/result',
+        {
+          args: {
+            clientId: 'local-client-1',
+            eventId: namespacedEvId,
+            outcome: { kind: 'result', value: 'allowed-once' },
+          },
+        },
+        new AbortController().signal,
+        undefined,
+      )
+      expect(resultRes.ok).toBe(true)
+      expect(remoteApprovalResults).toHaveLength(1)
+      expect((remoteApprovalResults[0] as { eventId: string }).eventId).toBe('rem-ev-99')
+
+      disposeGateway()
+      registry.dispose()
+    } finally {
+      for (const client of wss.clients) client.terminate()
+      wss.close()
+      remoteServer.closeAllConnections()
+      await new Promise<void>(r => remoteServer.close(() => r()))
+    }
+  })
+
+  it('supports DSH 0.1.x legacy protocol servers, WebSocket native proxy upgrades, self-loop protection, and mode independence', async () => {
+    const dir = makeTempDir('dsh-md-compat-')
+
+    // Simulated DSH 0.1.x server + WebSocket echo for Native Proxy test
+    const wss01 = new WebSocketServer({ noServer: true })
+    let wsUpgradeHeaders: Record<string, unknown> = {}
+    wss01.on('connection', (ws, req) => {
+      wsUpgradeHeaders = req.headers
+      ws.on('message', (data) => {
+        ws.send(`echo:${data.toString()}`)
+      })
+    })
+
+    const server01 = createServer(async (req, res) => {
+      if (req.url?.startsWith('/?token=')) {
+        res.writeHead(303, {
+          'location': './',
+          'set-cookie': `${dshCookieName(req.headers.host ?? '127.0.0.1')}=v1.mockcookie; Path=/; HttpOnly; SameSite=Strict`,
+        })
+        res.end()
+        return
+      }
+
+      const chunks: Buffer[] = []
+      for await (const c of req) chunks.push(c as Buffer)
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as {
+        rpcId?: string
+        method?: string
+        payload?: Record<string, unknown>
+      }
+
+      const reply = (ok: boolean, valueOrErr: unknown): void => {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(
+          JSON.stringify({
+            type: 'server-response',
+            rpcId: body.rpcId ?? '1',
+            result: ok ? { ok: true, value: valueOrErr } : { ok: false, error: valueOrErr },
+          }),
+        )
+      }
+
+      if (req.url === '/api/session/list') {
+        res.writeHead(404)
+        res.end('not found')
+        return
+      }
+      if (req.url === '/api/host.describe') {
+        reply(true, { version: '0.1.0-rc.6', cwd: '/root/legacy' })
+        return
+      }
+      if (req.url === '/api/session.list') {
+        reply(true, {
+          items: [
+            {
+              sessionId: 'legacy-s1',
+              updatedAt: 3000,
+              running: false,
+              blank: false,
+              cwd: '/root/legacy/app',
+            },
+          ],
+        })
+        return
+      }
+      if (req.url === '/api/workspace.list') {
+        reply(true, {
+          items: [
+            {
+              workspaceId: 'legacy-ws1',
+              path: '/root/legacy/app',
+              title: 'legacy-app',
+              sessionIds: ['legacy-s1'],
+              createdAt: '2026-08-01T00:00:00.000Z',
+              updatedAt: '2026-08-01T00:00:00.000Z',
+            },
+          ],
+          archivedSessionIds: ['legacy-archived-1'],
+        })
+        return
+      }
+      if (req.url === '/api/session.history') {
+        reply(true, {
+          events: [{ type: 'event', event: { type: 'user/message', seq: 0, time: 1000, data: {} } }],
+          hasMore: false,
+        })
+        return
+      }
+      reply(true, {})
+    })
+
+    server01.on('upgrade', (req, socket, head) => {
+      wss01.handleUpgrade(req, socket, head, (ws) => {
+        wss01.emit('connection', ws, req)
+      })
+    })
+
+    await new Promise<void>(r => server01.listen(0, '127.0.0.1', () => r()))
+    const port01 = (server01.address() as { port: number }).port
+    const url01 = `http://127.0.0.1:${port01}`
+
+    try {
+      const registry = new DeviceRegistry(
+        join(dir, 'devices.json'),
+        join(dir, 'secrets.json'),
+        {
+          localPort: () => 4080,
+          localWorkspaces: () => [],
+          localSessionUpdatedAt: () => new Map(),
+        },
+      )
+
+      // 1) Self-loop rejection check
+      const selfLoopRes = await registry.upsertDevice({
+        name: 'self-host',
+        transport: { kind: 'direct', baseUrl: 'http://127.0.0.1:4080' },
+      })
+      expect(selfLoopRes.ok).toBe(false)
+      if (!selfLoopRes.ok) {
+        expect(selfLoopRes.error).toContain('Self-loop')
+      }
+
+      // 2) Add DSH 0.1.x server with launch token URL exchange
+      const added01 = await registry.upsertDevice({
+        id: 'dev-legacy',
+        name: 'legacy-node',
+        transport: { kind: 'direct', baseUrl: url01 },
+        auth: { mode: 'token', credential: `${url01}/?token=secret_launch_tok` },
+      })
+      expect(added01.ok).toBe(true)
+
+      for (let i = 0; i < 40; i++) {
+        const v = registry.client(DeviceId('dev-legacy'))?.toView()
+        if (v?.state === 'connected' && v.workspaceCount > 0) break
+        await new Promise(r => setTimeout(r, 50))
+      }
+
+      const legacyClient = registry.client(DeviceId('dev-legacy'))!
+      expect(legacyClient.toView().protocolVersion).toBe('0.1')
+      expect(legacyClient.toView().remoteDshVersion).toBe('0.1.0-rc.6')
+      expect(legacyClient.sessionSummaries()).toHaveLength(1)
+
+      // 3) Mode Independence: Simulate Aggregated Gateway failure; verify ControlPlane & Native Proxy WS still work!
+      registry.setGatewayStatus(false, 'Simulated schema mismatch')
+      const cp = new MultiDeviceControlPlane(registry, () => true)
+      const cpSnap = await cp.dispatch({ action: 'snapshot' })
+      expect(cpSnap.ok).toBe(true)
+
+      const nativeProxyUrl = legacyClient.toView().nativeProxyUrl!
+      expect(nativeProxyUrl).toBeDefined()
+      const wsProxyUrl = nativeProxyUrl.replace(/^http:/, 'ws:') + 'api/events.mux'
+      const wsClient = new WebSocket(wsProxyUrl)
+      const echoed = await new Promise<string>((resolve, reject) => {
+        wsClient.once('open', () => wsClient.send('ping-native'))
+        wsClient.once('message', d => resolve(d.toString()))
+        wsClient.once('error', reject)
+      })
+      expect(echoed).toBe('echo:ping-native')
+      // Verify Native Proxy injected the exchanged cookie and rewrote Host authority on WebSocket upgrade
+      expect(wsUpgradeHeaders.host).toBe(`127.0.0.1:${port01}`)
+      expect(String(wsUpgradeHeaders.cookie ?? '')).toContain('v1.mockcookie')
+      wsClient.close()
+
+      // 4) Persistence reload check
+      registry.dispose()
+      const reloadedRegistry = new DeviceRegistry(
+        join(dir, 'devices.json'),
+        join(dir, 'secrets.json'),
+        {
+          localPort: () => 4080,
+          localWorkspaces: () => [],
+          localSessionUpdatedAt: () => new Map(),
+        },
+      )
+      expect(reloadedRegistry.deviceConfig(DeviceId('dev-legacy'))?.name).toBe('legacy-node')
+      reloadedRegistry.dispose()
+    } finally {
+      for (const client of wss01.clients) client.terminate()
+      wss01.close()
+      server01.closeAllConnections()
+      await new Promise<void>(r => server01.close(() => r()))
+    }
+  })
+})
+

@@ -1,0 +1,83 @@
+name: CI
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'src/**'
+      - 'stubs/**'
+      - 'tests/**'
+      - 'scripts/**'
+      - 'lib/**'
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/release.yml'
+      - 'build.mjs'
+      - 'cordis.patch.yml'
+      - '.npmrc'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'tsconfig.json'
+      - 'VERSION'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'stubs/**'
+      - 'tests/**'
+      - 'scripts/**'
+      - 'lib/**'
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/release.yml'
+      - 'build.mjs'
+      - 'cordis.patch.yml'
+      - '.npmrc'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'tsconfig.json'
+      - 'VERSION'
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify plugin typecheck, build and tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 10.33.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Rebuild esbuild binary
+        run: pnpm rebuild esbuild
+
+      - name: Verify version synchronization
+        run: pnpm run verify:version
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Build host and client bundles
+        run: pnpm run build
+
+      - name: Run unit and integration tests
+        run: pnpm run test
