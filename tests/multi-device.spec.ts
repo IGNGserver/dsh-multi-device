@@ -12,7 +12,7 @@
  *    - `AggregatedGateway` + `MultiDeviceControlPlane` mode independence & fallback verification.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -80,7 +80,12 @@ import {
 } from '../src/host/remote-client.ts'
 import { BoundedStreamQueue } from '../src/host/stream-queue.ts'
 import { buildForwardHeaders } from '../src/host/native-proxy.ts'
-import { admitControlPlaneRequest, MultiDeviceControlPlane } from '../src/runtime.ts'
+import {
+  admitControlPlaneRequest,
+  admitMultiDeviceRequest,
+  connectionRequestRejection,
+  MultiDeviceControlPlane,
+} from '../src/runtime.ts'
 
 const tempDirs: string[] = []
 function makeTempDir(prefix: string): string {
@@ -1175,6 +1180,74 @@ describe('6. Stability guards', () => {
       { host: '127.0.0.1:3080' },
       () => 403,
     )).toBe(false)
+  })
+
+  it('calls connection.requestRejection as a method on the Cordis proxy', async () => {
+    // Cordis is a host peer, not a plugin dependency. CI has no copy; a local
+    // DSH install (or DSH_CORDIS_MODULE) runs the real proxy regression.
+    const cordisPath = process.env.DSH_CORDIS_MODULE
+      ?? [
+        '/Users/lvziw/.npm-global/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis/lib/index.js',
+        '/home/lvziw/.npm-global/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis/lib/index.js',
+      ].find((candidate) => existsSync(candidate))
+    if (cordisPath === undefined || !existsSync(cordisPath)) return
+    const cordis = await import(cordisPath) as {
+      Context: new () => {
+        plugin(plugin: object): Promise<unknown>
+        get(name: string): ConnectionFence
+      }
+      Service: new (ctx: object, name: string) => object
+    }
+    const { Context, Service } = cordis
+
+    class ConnectionFence extends Service {
+      constructor(ctx: object) {
+        super(ctx, 'connection')
+      }
+      requestRejection(request: { headers: { host?: string } }): number | undefined {
+        return this.admit(request)
+      }
+      admit(request: { headers: { host?: string } }): number | undefined {
+        if (request.headers.host === 'boom.example') throw new Error('connection fence failed')
+        if (request.headers.host === 'denied.example') return 401
+        return undefined
+      }
+    }
+
+    const root = new Context()
+    let consumer: { get(name: string): ConnectionFence } | undefined
+    await root.plugin({
+      apply(ctx: object) {
+        new ConnectionFence(ctx)
+      },
+    })
+    await root.plugin({
+      apply(ctx: { get(name: string): ConnectionFence }) {
+        consumer = ctx
+      },
+    })
+    if (consumer === undefined) throw new Error('consumer plugin did not run')
+
+    const connection = consumer.get('connection')
+    const headers = { host: '127.0.0.1:3080' }
+    const detached = connection.requestRejection
+    expect(() => detached({ headers })).toThrow(/reading 'admit'/)
+
+    expect(connectionRequestRejection(consumer as never, headers)).toBeUndefined()
+
+    const denied = { host: 'denied.example' }
+    expect(connectionRequestRejection(consumer as never, denied)).toBe(401)
+    expect(admitMultiDeviceRequest(consumer as never, { headers: denied } as IncomingMessage)).toBe(false)
+
+    const admitted = { headers } as IncomingMessage
+    expect(admitMultiDeviceRequest(consumer as never, admitted)).toBe(true)
+    expect(admitMultiDeviceRequest(consumer as never, {
+      headers: { host: '10.0.0.8:3080' },
+    } as IncomingMessage)).toBe(false)
+
+    const boom = { host: 'boom.example' }
+    expect(connectionRequestRejection(consumer as never, boom)).toBe(403)
+    expect(admitMultiDeviceRequest(consumer as never, { headers: boom } as IncomingMessage)).toBe(false)
   })
 
   it('does not forward the browser cookie or authorization to the upstream', () => {

@@ -27,7 +27,7 @@ import {
 } from './host/gateway.ts'
 import { DeviceRegistry } from './host/registry.ts'
 import {
-  admitControlPlaneRequest,
+  admitMultiDeviceRequest,
   MULTI_DEVICE_API_PATH,
   MULTI_DEVICE_EVENTS_PATH,
   MultiDeviceControlPlane,
@@ -194,21 +194,11 @@ export function apply(ctx: Context, config?: Config): void {
   }
 
   // 1. Mount Control Plane HTTP + SSE routes (independent of Aggregated Mode!)
-  const admitRequest = (req: import('node:http').IncomingMessage): boolean => {
-    let extraRejection: ((headers: import('node:http').IncomingHttpHeaders) => number | undefined) | undefined
-    try {
-      const connection = (ctx as unknown as { get?: (k: string) => unknown }).get?.('connection') as
-        | { requestRejection?: (r: { headers: import('node:http').IncomingHttpHeaders }) => number | undefined }
-        | undefined
-      if (connection?.requestRejection !== undefined) {
-        const reject = connection.requestRejection
-        extraRejection = (headers) => reject({ headers })
-      }
-    } catch {
-      return false
-    }
-    return admitControlPlaneRequest(req.headers, extraRejection)
-  }
+  // Re-read `connection` per request and call `requestRejection` as a method.
+  // Detaching it (`const reject = connection.requestRejection; reject(...)`)
+  // drops Cordis's traceable receiver and crashes the desktop host.
+  const admitRequest = (req: import('node:http').IncomingMessage): boolean =>
+    admitMultiDeviceRequest(ctx, req)
 
   const controlPlane = new MultiDeviceControlPlane(registry, admitRequest)
 
