@@ -1,4 +1,4 @@
-<!-- wt anchor 生成，请勿直接编辑。正文逐字来自 origin/main 的 AGENTS.md（sha256 c5ce432b4ce5）。刷新: wt anchor DSH多设备插件 --run -->
+<!-- wt anchor 生成，请勿直接编辑。正文逐字来自 origin/main 的 AGENTS.md（sha256 93310e2aa339）。刷新: wt anchor DSH多设备插件 --run -->
 
 > **本目录没有代码，这是设计如此（见全局规范 1c）。** 它只是仓库身份锚点：`.git` 完整 + 本文件。
 > 要读代码：`wt view DSH多设备插件`，看完 `wt done DSH多设备插件 _view-<sha>`。要改代码：`wt new DSH多设备插件 <slug>`，只在生成的 `.wt/DSH多设备插件/<slug>/` 里动手。
@@ -18,7 +18,7 @@ Worktree: `~/项目/.wt/DSH多设备插件/<slug>`
 
 ## 这是什么
 
-DeepSeek Harness（DSH）多设备管理插件：支持 SSH 隧道与 HTTP(S) 直连、系统 `~/.ssh/config` 复用、Git Remote 自动工作区聚合，以及聚合模式与原生模式（Keep-Alive 保活）双模式切换。`main` 是开发线，不代表稳定版。
+DeepSeek Harness（DSH）多设备管理插件：以 SSH 隧道连接远端 DSH（HTTP(S) direct 仅保留为默认关闭的高级兼容开关），复用系统 `~/.ssh/config` 与本机私钥，支持 Git Remote 自动工作区聚合，以及聚合模式与原生模式（Keep-Alive 保活）双模式切换。`main` 是开发线，不代表稳定版。
 
 ## 开工与工作区纪律（主目录无代码 + 从远端 `origin/main` 拉取）
 
@@ -40,7 +40,7 @@ DeepSeek Harness（DSH）多设备管理插件：支持 SSH 隧道与 HTTP(S) �
 - 类型检查：`pnpm run typecheck`
 - 构建：`pnpm run build`
 - 单元与集成测试：`pnpm run test`
-- 全量一键校验：`pnpm run check`（依次执行 `verify:version`、`typecheck`、`build`、`test`）
+- 全量一键校验：`pnpm run check`（依次执行 `verify:version`、`build`、`test`；`build` 内部会跑 `tsc`，不再单独重复 `typecheck`）
 - CI workflow：`.github/workflows/ci.yml`（在 push `main` 与 `pull_request` 时自动运行全套校验）。
 
 ## 与全局规范的差异（本仓库特有约束）
@@ -65,5 +65,5 @@ DeepSeek Harness（DSH）多设备管理插件：支持 SSH 隧道与 HTTP(S) �
 ## 环境事实（不含凭据）
 
 - 远端仓库：`https://github.com/IGNGserver/dsh-multi-device`
-- 运行方式：作为 Cordis 插件安装于本地 DSH Desktop（`$DSH_HOME/profiles/desktop`）或 DSH Web（`$DSH_HOME/profiles/web`）中，通过 SSH 隧道或 HTTP(S) 连接多台远端 `dsh web` 开发机。
+- 运行方式：作为 Cordis 插件安装于本地 DSH Desktop（`$DSH_HOME/profiles/desktop`）或 DSH Web（`$DSH_HOME/profiles/web`）中，通过 SSH 隧道连接多台远端 `dsh web` 开发机（HTTP(S) direct 仅默认关闭的高级兼容）。
 - CI/发布触发器：`ci.yml` 由 push `main` 与所有 PR 触发；`release.yml` 由 `v*.*.*` tag 推送触发（默认 `test` 渠道 prerelease），亦支持在 tag 上手动 `workflow_dispatch` 指定 `test` / `stable` 渠道。
