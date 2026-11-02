@@ -12,7 +12,7 @@
  *    - `AggregatedGateway` + `MultiDeviceControlPlane` mode independence & fallback verification.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -37,6 +37,9 @@ import {
   extractLaunchToken,
   mintDshBrowserCookie,
   parseSigningSecretFromCredentialsYaml,
+  resolveRemoteAuthority,
+  resolveRemoteCookieAuthority,
+  resolveRemoteScheme,
 } from '../src/host/auth.ts'
 import {
   discoverLocalGitRemote,
@@ -49,10 +52,12 @@ import {
   type TypertGatewayLike,
   type WorkspaceControllerLike,
 } from '../src/host/gateway.ts'
+import { requestRemote } from '../src/host/http-request.ts'
 import { NativeDeviceProxy } from '../src/host/native-proxy.ts'
 import { DeviceRegistry } from '../src/host/registry.ts'
 import {
   buildSystemSshArgs,
+  listLocalSshKeys,
   parseSshConfigText,
   parseSshTargetSpec,
   resolveSshConfigForTransport,
@@ -218,6 +223,120 @@ records:
     const cookie = mintDshBrowserCookie('127.0.0.1:3080', secret!)
     expect(cookie).toBeDefined()
     expect(cookie!.startsWith(`${dshCookieName('127.0.0.1:3080')}=v1.`)).toBe(true)
+  })
+
+  it('keeps entered credentials in the secrets file, never the device document', async () => {
+    const dir = makeTempDir('dsh-md-secrets-')
+    const dataFile = join(dir, 'devices.json')
+    const secretsFile = join(dir, 'secrets.json')
+    const registry = new DeviceRegistry(
+      dataFile,
+      secretsFile,
+      { localPort: () => 3080, localWorkspaces: () => [], localSessionUpdatedAt: () => new Map() },
+      { allowDirectTransport: true, enableNativeProxy: false },
+    )
+    try {
+      const added = await registry.upsertDevice({
+        name: 'secret-check',
+        enabled: false,
+        transport: { kind: 'direct', baseUrl: 'http://127.0.0.1:9' },
+        auth: { mode: 'bearer', credential: 'super-secret-token' },
+      })
+      expect(added.ok).toBe(true)
+      expect(readFileSync(dataFile, 'utf8')).not.toContain('super-secret-token')
+      expect(readFileSync(secretsFile, 'utf8')).toContain('super-secret-token')
+    } finally {
+      registry.dispose()
+    }
+  })
+})
+
+describe('3b. Node-native Remote HTTP Carrier', () => {
+  it('preserves a caller-supplied Host and Origin over a non-matching URL authority', async () => {
+    let seenHost = ''
+    let seenOrigin = ''
+    const server = createServer((req, res) => {
+      seenHost = req.headers.host ?? ''
+      seenOrigin = req.headers.origin ?? ''
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{}')
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()))
+    const port = (server.address() as { port: number }).port
+    try {
+      const response = await requestRemote(`http://127.0.0.1:${port}/api/probe`, {
+        method: 'POST',
+        headers: {
+          Host: '127.0.0.1:3080',
+          Origin: 'http://127.0.0.1:3080',
+          'content-type': 'application/json',
+        },
+        body: '{}',
+      })
+      expect(response.status).toBe(200)
+      expect(seenHost).toBe('127.0.0.1:3080')
+      expect(seenOrigin).toBe('http://127.0.0.1:3080')
+    } finally {
+      server.closeAllConnections()
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  })
+
+  it('keeps the signed-cookie window within DSH maxAgeSeconds', () => {
+    const sampleYaml = `
+version: 1
+records:
+  client-connection/browser-session:
+    kind: grant
+    payload:
+      version: 1
+      secret: Lmbm2Ybqc9aKKkxPULPgyA0SbQBUlKtboujV41nWgJw
+`
+    const secret = parseSigningSecretFromCredentialsYaml(sampleYaml)!
+    const now = Date.now()
+    const cookie = mintDshBrowserCookie('127.0.0.1:3080', secret, now)!
+    const body = cookie.split('.')[1]!
+    const payload = JSON.parse(
+      Buffer.from(body.replaceAll('-', '+').replaceAll('_', '/'), 'base64').toString('utf8'),
+    ) as { issuedAt: number; expiresAt: number }
+    expect(payload.issuedAt).toBeLessThanOrEqual(now)
+    expect(payload.expiresAt).toBeGreaterThan(now)
+    expect(payload.expiresAt - payload.issuedAt).toBeLessThanOrEqual(30 * 24 * 60 * 60 * 1000)
+  })
+
+  it('separates HTTP Host authority from TLS cookie authority', () => {
+    const direct = {
+      id: DeviceId('direct-https'),
+      name: 'direct',
+      enabled: true,
+      transport: { kind: 'direct' as const, baseUrl: 'https://dev.example.com:8443' },
+      auth: { mode: 'auto' as const },
+    }
+    expect(resolveRemoteAuthority(direct)).toBe('dev.example.com:8443')
+    expect(resolveRemoteCookieAuthority(direct)).toBe('https://dev.example.com:8443')
+    expect(resolveRemoteScheme(direct)).toBe('https')
+    const ssh = {
+      id: DeviceId('ssh'),
+      name: 'ssh',
+      enabled: true,
+      transport: { kind: 'ssh' as const, host: 'dev', remotePort: 3080 },
+      auth: { mode: 'auto' as const },
+    }
+    expect(resolveRemoteAuthority(ssh)).toBe('127.0.0.1:3080')
+    expect(resolveRemoteCookieAuthority(ssh)).toBe('127.0.0.1:3080')
+    expect(resolveRemoteScheme(ssh)).toBe('http')
+  })
+
+  it('discovers local private keys for the picker while skipping public/config files', () => {
+    const home = makeTempDir('dsh-md-keys-')
+    mkdirSync(join(home, '.ssh'), { recursive: true })
+    const privateKey = '-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n'
+    writeFileSync(join(home, '.ssh', 'id_ed25519'), privateKey)
+    writeFileSync(join(home, '.ssh', 'id_ed25519.pub'), 'ssh-ed25519 AAAA')
+    writeFileSync(join(home, '.ssh', 'config'), 'Host example\n')
+    const keys = listLocalSshKeys(home)
+    expect(keys.map(key => key.name)).toEqual(['id_ed25519'])
+    expect(keys[0]?.publicKeyPath).toBe(join(home, '.ssh', 'id_ed25519.pub'))
   })
 })
 
@@ -478,6 +597,42 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
         return
       }
 
+      if (body.method === 'session/modelCatalog') {
+        reply({
+          default: { provider: 'remote-provider', model: 'remote-default' },
+          routableProviders: ['remote-provider'],
+          groups: [
+            {
+              id: 'remote-provider',
+              name: 'Remote Provider',
+              models: [{ id: 'remote-only-model', name: 'Remote Only' }],
+            },
+          ],
+          failures: [],
+        })
+        return
+      }
+
+      if (body.method === 'session/create') {
+        reply({ sessionId: 'rsess-created', agentPreset: 'remote-preset' })
+        return
+      }
+
+      if (body.method === 'workspace/create') {
+        reply({
+          workspace: {
+            workspaceId: 'rws-created',
+            path: '/home/remoteuser/new-repo',
+            title: 'new-repo',
+            sessionIds: [],
+            createdAt: '2026-10-01T00:00:00.000Z',
+            updatedAt: '2026-10-01T00:00:00.000Z',
+          },
+          created: true,
+        })
+        return
+      }
+
       if (body.method === 'session/prompt') {
         remotePrompts.push(body.payload.args.request)
         reply({ accepted: true })
@@ -524,6 +679,7 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
           ],
           localSessionUpdatedAt: () => new Map([['lsess-1', 1000]]),
         },
+        { allowDirectTransport: true },
       )
 
       // Add the remote device
@@ -559,12 +715,29 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
       // Verify Native Mode Reverse Proxy serves remote HTML and strips X-Frame-Options & CSP frame-ancestors
       const proxyUrl = snap.devices[0]?.nativeProxyUrl
       expect(proxyUrl).toBeDefined()
-      const proxyRes = await fetch(proxyUrl!)
+      const proxyBase = new URL(proxyUrl!)
+      const proxyWithoutToken = new URL('/', proxyBase).href
+      const tokenless = await fetch(proxyWithoutToken, { redirect: 'manual' })
+      expect(tokenless.status).toBe(403)
+      const tokenRedirect = await fetch(proxyBase, { redirect: 'manual' })
+      expect(tokenRedirect.status).toBe(302)
+      const proxyCookie = tokenRedirect.headers.get('set-cookie')?.split(';')[0]
+      expect(proxyCookie).toContain('dsh-md-native=')
+      const proxyRes = await fetch(proxyWithoutToken, {
+        headers: { cookie: proxyCookie! },
+      })
       expect(proxyRes.status).toBe(200)
       expect(proxyRes.headers.get('x-frame-options')).toBeNull()
       expect(proxyRes.headers.get('content-security-policy') ?? '').not.toContain('frame-ancestors')
       const html = await proxyRes.text()
       expect(html).toContain('Remote DSH Native Web UI')
+
+      // Path traversal / protocol-relative targets must never become an open proxy.
+      const ssrf = await fetch(`${proxyBase.origin}//evil.example/steal`, {
+        headers: { cookie: proxyCookie! },
+        redirect: 'manual',
+      })
+      expect(ssrf.status).toBe(400)
 
       // Install AggregatedGateway over mock local controllers and test session.list, session.prompt, and approval waterfall
       const mockSessionController: SessionControllerLike = {
@@ -583,7 +756,18 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
         search: async () => ({ items: [], hasMore: false }),
         create: async () => ({ sessionId: 'lsess-new' }),
         selectModel: async () => ({ selected: {} }),
-        modelCatalog: async () => ({}),
+        modelCatalog: async () => ({
+          default: { provider: 'local-provider', model: 'local-default' },
+          routableProviders: ['local-provider'],
+          groups: [
+            {
+              id: 'local-provider',
+              name: 'Local Provider',
+              models: [{ id: 'local-model', name: 'Local Model' }],
+            },
+          ],
+          failures: [],
+        }),
         rename: async () => ({ title: 'renamed', seq: 1 }),
         fork: async () => ({ sessionId: 'lsess-fork' }),
         prompt: async () => ({ accepted: true }),
@@ -640,6 +824,33 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
         encodeRemoteSessionId(devId, 'rsess-1'),
         'lsess-1',
       ])
+
+      // 1b) The model catalog exposes remote-only models alongside local ones.
+      const catalog = (await mockSessionController.modelCatalog()) as {
+        groups: { id: string; models: { id: string }[] }[]
+        routableProviders: string[]
+      }
+      expect(catalog.groups.map(group => group.id)).toContain('remote-provider')
+      expect(catalog.groups.find(group => group.id === 'remote-provider')?.models.map(m => m.id))
+        .toContain('remote-only-model')
+      expect(catalog.routableProviders).toContain('remote-provider')
+
+      // 1c) Explicit per-session device selection creates on the chosen device.
+      const created = await registry.createRemoteSession({
+        deviceId: devId,
+        workspaceId: 'rws-1',
+      })
+      expect(created.ok).toBe(true)
+      if (created.ok) {
+        expect(created.sessionId).toBe(encodeRemoteSessionId(devId, 'rsess-created'))
+      }
+
+      // 1d) Remote workspace registration is available without a remote plugin.
+      const remoteWorkspace = await registry.createRemoteWorkspace({
+        deviceId: devId,
+        path: '/home/remoteuser/new-repo',
+      })
+      expect(remoteWorkspace.ok).toBe(true)
 
       // 2) Routed session.prompt to remote device
       await mockSessionController.prompt(
@@ -801,6 +1012,7 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
           localWorkspaces: () => [],
           localSessionUpdatedAt: () => new Map(),
         },
+        { allowDirectTransport: true },
       )
 
       // 1) Self-loop rejection check
@@ -841,8 +1053,12 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
 
       const nativeProxyUrl = legacyClient.toView().nativeProxyUrl!
       expect(nativeProxyUrl).toBeDefined()
-      const wsProxyUrl = nativeProxyUrl.replace(/^http:/, 'ws:') + 'api/events.mux'
-      const wsClient = new WebSocket(wsProxyUrl)
+      const nativeProxyBase = new URL(nativeProxyUrl)
+      const tokenRedirect = await fetch(nativeProxyBase, { redirect: 'manual' })
+      const nativeCookie = tokenRedirect.headers.get('set-cookie')?.split(';')[0]
+      expect(nativeCookie).toContain('dsh-md-native=')
+      const wsProxyUrl = new URL('/api/events.mux', nativeProxyBase).href.replace(/^http:/, 'ws:')
+      const wsClient = new WebSocket(wsProxyUrl, { headers: { cookie: nativeCookie! } })
       const echoed = await new Promise<string>((resolve, reject) => {
         wsClient.once('open', () => wsClient.send('ping-native'))
         wsClient.once('message', d => resolve(d.toString()))
@@ -864,6 +1080,7 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
           localWorkspaces: () => [],
           localSessionUpdatedAt: () => new Map(),
         },
+        { allowDirectTransport: true },
       )
       expect(reloadedRegistry.deviceConfig(DeviceId('dev-legacy'))?.name).toBe('legacy-node')
       reloadedRegistry.dispose()

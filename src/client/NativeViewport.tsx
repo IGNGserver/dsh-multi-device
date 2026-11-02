@@ -14,7 +14,7 @@
  *
  * @module dsh-multi-device/client/NativeViewport
  */
-import React, { useEffect, useRef } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import type { DeviceId, DeviceView } from '../contract.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
 import { clientStore, useMultiDeviceState } from './state.ts'
@@ -47,8 +47,10 @@ function KeepAliveDeviceFrame({
   const targetUrl = device.nativeProxyUrl ?? device.effectiveBaseUrl
   const containerRef = useRef<HTMLDivElement | null>(null)
   const webviewLeaseRef = useRef<string | undefined>(undefined)
+  const [webviewFailed, setWebviewFailed] = useState(false)
 
   useEffect(() => {
+    setWebviewFailed(false)
     const bridge = getDesktopBrowserBridge()
     const container = containerRef.current
     if (bridge === undefined || container === null || targetUrl === undefined) return
@@ -70,6 +72,9 @@ function KeepAliveDeviceFrame({
         webview.setAttribute('partition', reservation.partition)
         webview.setAttribute('allowpopups', '')
         webview.setAttribute('src', `about:blank#${reservation.lease}`)
+        webview.addEventListener('did-fail-load', () => {
+          if (!cancelled) setWebviewFailed(true)
+        }, { once: true })
         webview.addEventListener(
           'dom-ready',
           () => {
@@ -79,7 +84,7 @@ function KeepAliveDeviceFrame({
                 void wv.loadURL?.(targetUrl)
               }
             } catch {
-              // Ignore
+              if (!cancelled) setWebviewFailed(true)
             }
           },
           { once: true },
@@ -89,7 +94,8 @@ function KeepAliveDeviceFrame({
         container.appendChild(webview)
       })
       .catch(() => {
-        // Fallback to iframe below if webview lease fails
+        // Fall back to the standard authenticated iframe below.
+        if (!cancelled) setWebviewFailed(true)
       })
 
     return () => {
@@ -103,7 +109,7 @@ function KeepAliveDeviceFrame({
     }
   }, [device.id, targetUrl, reloadCount])
 
-  const useDesktopWebview = getDesktopBrowserBridge() !== undefined
+  const useDesktopWebview = getDesktopBrowserBridge() !== undefined && !webviewFailed
 
   return (
     <div

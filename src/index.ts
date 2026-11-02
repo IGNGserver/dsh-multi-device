@@ -55,6 +55,12 @@ export interface Config {
     readonly sshTunnel?: boolean
     /** Enable automatic Git remote workspace aggregation by default. Default: true. */
     readonly autoGitAggregate?: boolean
+    /**
+     * Expose the legacy HTTP(S) direct transport. SSH is the supported user
+     * flow; direct exists only for advanced compatibility and tests.
+     * Default: false.
+     */
+    readonly directTransport?: boolean
   }
 }
 
@@ -67,6 +73,7 @@ export const Config = z.object({
       nativeMode: z.boolean().default(true),
       sshTunnel: z.boolean().default(true),
       autoGitAggregate: z.boolean().default(true),
+      directTransport: z.boolean().default(false),
     })
     .default({}),
 })
@@ -85,6 +92,8 @@ export function apply(ctx: Context, config?: Config): void {
   const webServer = (ctx as unknown as {
     webServer: {
       port?: number
+      protocol?: 'http:' | 'https:'
+      getOrigin?: () => string
       register: (route: {
         kind: 'exact' | 'prefix'
         path: string
@@ -117,6 +126,22 @@ export function apply(ctx: Context, config?: Config): void {
     }
   }
 
+  // Local Session activity arrives as `api-session/activity`; keeping the
+  // latest timestamp avoids sorting local Sessions by creation time.
+  const localSessionActivity = new Map<string, number>()
+  ctx.effect(() => {
+    const on = (ctx as unknown as {
+      on?: (event: string, listener: (sessionId: string, updatedAt: number) => void) => (() => void) | void
+    }).on
+    if (typeof on !== 'function') return () => {}
+    const dispose = on.call(ctx, 'api-session/activity', (sessionId, updatedAt) => {
+      if (typeof sessionId === 'string' && typeof updatedAt === 'number') {
+        localSessionActivity.set(sessionId, updatedAt)
+      }
+    })
+    return typeof dispose === 'function' ? dispose : () => {}
+  }, 'dsh-multi-device: local session activity')
+
   const registry = new DeviceRegistry(
     dataFile,
     secretsFile,
@@ -134,10 +159,11 @@ export function apply(ctx: Context, config?: Config): void {
         return readLocalPhysicalWorkspaces(getWorkspaceRegistry(), runningIds)
       },
       localSessionUpdatedAt: () => {
-        const map = new Map<string, number>()
+        const map = new Map<string, number>(localSessionActivity)
         try {
           for (const s of getLocalSessions()?.list?.() ?? []) {
-            map.set(String(s.id), s.header?.createdAt ?? 0)
+            const id = String(s.id)
+            if (!map.has(id)) map.set(id, s.header?.createdAt ?? 0)
           }
         } catch {
           // Ignore
@@ -148,6 +174,17 @@ export function apply(ctx: Context, config?: Config): void {
     {
       enableTunnels,
       enableNativeProxy: enableNative,
+      localOrigin: () => {
+        try {
+          if (typeof webServer?.getOrigin === 'function') return webServer.getOrigin()
+        } catch {
+          // Fall back to the loopback origin below.
+        }
+        if (webServer?.port === undefined) return undefined
+        const protocol = webServer.protocol === 'https:' ? 'https' : 'http'
+        return `${protocol}://127.0.0.1:${String(webServer.port)}`
+      },
+      allowDirectTransport: features.directTransport === true,
     },
   )
 
@@ -168,12 +205,24 @@ export function apply(ctx: Context, config?: Config): void {
       // Fallback to loopback check
     }
     const host = req.headers.host ?? ''
-    return (
+    const isLoopbackHost =
       host.startsWith('127.0.0.1:') ||
       host.startsWith('localhost:') ||
       host === '127.0.0.1' ||
       host === 'localhost'
-    )
+    if (!isLoopbackHost) return false
+    if (req.headers['sec-fetch-site'] === 'cross-site') return false
+    const origin = req.headers.origin
+    if (origin !== undefined) {
+      try {
+        const parsed = new URL(origin)
+        const originLoopback = ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname.toLowerCase())
+        return originLoopback && parsed.host === host
+      } catch {
+        return false
+      }
+    }
+    return true
   }
 
   const controlPlane = new MultiDeviceControlPlane(registry, admitRequest)

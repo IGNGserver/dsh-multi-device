@@ -16,6 +16,7 @@
  *
  * @module dsh-multi-device/host/native-proxy
  */
+import { randomUUID } from 'node:crypto'
 import {
   createServer,
   request as httpRequest,
@@ -28,16 +29,22 @@ import type { Duplex } from 'node:stream'
 import type { DeviceConfig, DeviceId } from '../contract.ts'
 import { DeviceAuthManager, resolveRemoteAuthority } from './auth.ts'
 
+const PROXY_TOKEN_QUERY = 'md_token'
+const PROXY_COOKIE_NAME = 'dsh-md-native'
+
 export class NativeDeviceProxy {
   private server: Server | undefined
   private localPort: number | undefined
   private readonly sockets = new Set<Duplex>()
   private stopped = false
+  private lastAuthAttemptAt = 0
+  private readonly token = randomUUID().replaceAll('-', '')
 
   constructor(
     private device: DeviceConfig,
     private readonly getUpstreamBaseUrl: () => string | undefined,
     private readonly authManager: DeviceAuthManager,
+    private readonly localOrigin?: () => string | undefined,
   ) {}
 
   updateDevice(device: DeviceConfig): void {
@@ -45,7 +52,12 @@ export class NativeDeviceProxy {
   }
 
   proxyUrl(): string | undefined {
-    return this.localPort === undefined ? undefined : `http://127.0.0.1:${this.localPort}/`
+    if (this.localPort === undefined) return undefined
+    return `http://127.0.0.1:${this.localPort}/?${PROXY_TOKEN_QUERY}=${this.token}`
+  }
+
+  private proxyOrigin(): string | undefined {
+    return this.localPort === undefined ? undefined : `http://127.0.0.1:${this.localPort}`
   }
 
   port(): number | undefined {
@@ -96,8 +108,51 @@ export class NativeDeviceProxy {
       return
     }
 
-    await this.authManager.ensureAuthenticated(this.device, upstreamBase)
-    const upstreamUrl = new URL(req.url ?? '/', upstreamBase)
+    const parsed = parseOriginForm(req.url)
+    if (parsed === undefined) {
+      res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+      res.end('Invalid native proxy request target')
+      return
+    }
+
+    const proxyOrigin = this.proxyOrigin()
+    if (proxyOrigin === undefined) {
+      res.writeHead(503, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+      res.end('Native proxy is not listening')
+      return
+    }
+
+    const requestUrl = new URL(req.url ?? '/', proxyOrigin)
+    const queryToken = requestUrl.searchParams.get(PROXY_TOKEN_QUERY)
+    const cookieToken = readCookie(req.headers.cookie, PROXY_COOKIE_NAME)
+    if (queryToken === this.token && cookieToken !== this.token) {
+      res.writeHead(302, {
+        location: formatPath(parsed.pathname, stripProxyToken(parsed.search)),
+        'set-cookie': `${PROXY_COOKIE_NAME}=${this.token}; Path=/; HttpOnly; SameSite=Lax`,
+        'cache-control': 'no-store',
+      })
+      res.end()
+      return
+    }
+    if (cookieToken !== this.token) {
+      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+      res.end('Native proxy authentication required')
+      return
+    }
+    // SameSite=Lax already prevents this cookie on cross-site subresources;
+    // reject an explicit cross-site fetch as a second line of defence.
+    if (req.headers['sec-fetch-site'] === 'cross-site') {
+      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+      res.end('Cross-site native proxy request rejected')
+      return
+    }
+
+    const now = Date.now()
+    if (now - this.lastAuthAttemptAt > 30_000) {
+      this.lastAuthAttemptAt = now
+      await this.authManager.ensureAuthenticated(this.device, upstreamBase)
+    }
+    const upstreamUrl = buildUpstreamUrl(upstreamBase, parsed.pathname, stripProxyToken(parsed.search))
     const isHttps = upstreamUrl.protocol === 'https:'
     const authority = resolveRemoteAuthority(this.device)
     const authHeaders = this.authManager.getAuthHeaders(this.device)
@@ -142,20 +197,31 @@ export class NativeDeviceProxy {
         for (const [key, val] of Object.entries(proxyRes.headers)) {
           if (val === undefined) continue
           const lower = key.toLowerCase()
-          // Strip framing restrictions so Native Mode works inside <webview> and <iframe>
+          // The proxy is the only allowed framing parent. Strip the generic
+          // DENY header and replace the CSP directive with a local allowlist.
           if (lower === 'x-frame-options') continue
           if (lower === 'content-security-policy') {
             const cleaned = (Array.isArray(val) ? val.join('; ') : val)
               .replace(/frame-ancestors[^;]*;?/gi, '')
               .trim()
-            if (cleaned !== '') resHeaders[key] = cleaned
+            const local = this.localOrigin?.()
+            const framing = local !== undefined ? `frame-ancestors 'self' ${local}` : ''
+            const next = [cleaned, framing].filter(part => part !== '').join('; ')
+            if (next !== '') resHeaders[key] = next
             continue
           }
           if (lower === 'set-cookie') {
             const cookies = Array.isArray(val) ? val : [val]
             resHeaders[key] = cookies.map(c =>
-              c.replace(/;\s*SameSite=Strict/gi, '; SameSite=Lax').replace(/;\s*Secure/gi, ''),
+              c
+                .replace(/;\s*SameSite=Strict/gi, '; SameSite=Lax')
+                .replace(/;\s*Secure/gi, '')
+                .replace(/;\s*Domain=[^;]*/gi, ''),
             )
+            continue
+          }
+          if (lower === 'location' && typeof val === 'string') {
+            resHeaders[key] = rewriteLocation(val, upstreamBase, proxyOrigin)
             continue
           }
           resHeaders[key] = val
@@ -184,7 +250,29 @@ export class NativeDeviceProxy {
       return
     }
 
-    const upstreamUrl = new URL(req.url ?? '/', upstreamBase)
+    const parsed = parseOriginForm(req.url)
+    if (parsed === undefined) {
+      clientSocket.destroy()
+      return
+    }
+
+    const proxyOrigin = this.proxyOrigin()
+    const cookieToken = readCookie(req.headers.cookie, PROXY_COOKIE_NAME)
+    if (proxyOrigin === undefined || cookieToken !== this.token) {
+      clientSocket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+      return
+    }
+    if (req.headers['sec-fetch-site'] === 'cross-site') {
+      clientSocket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+      return
+    }
+    const origin = req.headers.origin
+    if (origin !== undefined && origin !== proxyOrigin && origin !== this.localOrigin?.()) {
+      clientSocket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+      return
+    }
+
+    const upstreamUrl = buildUpstreamUrl(upstreamBase, parsed.pathname, stripProxyToken(parsed.search))
     const isHttps = upstreamUrl.protocol === 'https:'
     const authority = resolveRemoteAuthority(this.device)
     const authHeaders = this.authManager.getAuthHeaders(this.device)
@@ -253,7 +341,10 @@ export class NativeDeviceProxy {
 export class NativeProxyManager {
   private readonly proxies = new Map<DeviceId, NativeDeviceProxy>()
 
-  constructor(private readonly authManager: DeviceAuthManager) {}
+  constructor(
+    private readonly authManager: DeviceAuthManager,
+    private readonly localOrigin?: () => string | undefined,
+  ) {}
 
   async ensureProxy(
     device: DeviceConfig,
@@ -261,7 +352,7 @@ export class NativeProxyManager {
   ): Promise<string | undefined> {
     let proxy = this.proxies.get(device.id)
     if (proxy === undefined) {
-      proxy = new NativeDeviceProxy(device, getUpstreamBaseUrl, this.authManager)
+      proxy = new NativeDeviceProxy(device, getUpstreamBaseUrl, this.authManager, this.localOrigin)
       this.proxies.set(device.id, proxy)
       try {
         await proxy.start()
@@ -290,6 +381,60 @@ export class NativeProxyManager {
   dispose(): void {
     for (const proxy of this.proxies.values()) proxy.stop()
     this.proxies.clear()
+  }
+}
+
+function parseOriginForm(raw: string | undefined): { pathname: string; search: string } | undefined {
+  if (typeof raw !== 'string' || raw === '') return undefined
+  if (!raw.startsWith('/') || raw.startsWith('//') || raw.includes('\\')) return undefined
+  if (/[\u0000-\u001f\u007f]/.test(raw)) return undefined
+  try {
+    const parsed = new URL(raw, 'http://native-proxy.invalid')
+    if (parsed.origin !== 'http://native-proxy.invalid') return undefined
+    return { pathname: parsed.pathname, search: parsed.search }
+  } catch {
+    return undefined
+  }
+}
+
+function buildUpstreamUrl(base: string, pathname: string, search: string): URL {
+  const url = new URL(base)
+  url.pathname = pathname
+  url.search = search
+  return url
+}
+
+function stripProxyToken(search: string): string {
+  if (search === '') return ''
+  const params = new URLSearchParams(search)
+  params.delete(PROXY_TOKEN_QUERY)
+  const next = params.toString()
+  return next === '' ? '' : `?${next}`
+}
+
+function formatPath(pathname: string, search: string): string {
+  return `${pathname}${search}`
+}
+
+function readCookie(header: string | undefined, name: string): string | undefined {
+  if (header === undefined) return undefined
+  for (const segment of header.split(';')) {
+    const at = segment.indexOf('=')
+    if (at === -1) continue
+    if (segment.slice(0, at).trim() !== name) continue
+    return segment.slice(at + 1).trim()
+  }
+  return undefined
+}
+
+function rewriteLocation(value: string, upstreamBase: string, proxyOrigin: string): string {
+  try {
+    const upstream = new URL(upstreamBase)
+    const location = new URL(value, upstream)
+    if (location.origin !== upstream.origin) return value
+    return new URL(`${location.pathname}${location.search}${location.hash}`, proxyOrigin).href
+  } catch {
+    return value
   }
 }
 

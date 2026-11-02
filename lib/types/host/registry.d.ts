@@ -1,4 +1,4 @@
-import { type DeviceConfig, DeviceId, type DeviceView, type MultiDeviceSnapshot, type UpsertDeviceInput, type WorkspaceAggregationConfig } from '../contract.ts';
+import { type DeviceConfig, DeviceId, type DeviceView, type MultiDeviceSnapshot, type RemoteSessionCreateInput, type RemoteWorkspaceCreateInput, type SshKeyEntry, type UpsertDeviceInput, type WorkspaceAggregationConfig } from '../contract.ts';
 import { DeviceAuthManager } from './auth.ts';
 import { type PhysicalWorkspaceInput, WorkspaceAggregator } from './git-aggregator.ts';
 import { NativeProxyManager } from './native-proxy.ts';
@@ -31,6 +31,8 @@ export declare class DeviceRegistry {
     constructor(dataFilePath: string, secretsFilePath: string, localHost: LocalHostProvider, options?: {
         enableTunnels?: boolean;
         enableNativeProxy?: boolean;
+        localOrigin?: () => string | undefined;
+        allowDirectTransport?: boolean;
     });
     setGatewayStatus(active: boolean, error?: string): void;
     onSnapshotChanged(listener: () => void): () => void;
@@ -70,6 +72,29 @@ export declare class DeviceRegistry {
     }>;
     removeDevice(deviceId: DeviceId): boolean;
     reconnectDevice(deviceId: DeviceId): boolean;
+    /** List local private-key candidates for the add/edit device form. */
+    listSshKeys(): SshKeyEntry[];
+    /**
+     * Create a Session directly on an explicitly chosen remote device. The
+     * returned ID is namespaced exactly like a Session discovered by polling, so
+     * the official Session view can open it immediately.
+     */
+    createRemoteSession(input: RemoteSessionCreateInput): Promise<{
+        ok: true;
+        sessionId: string;
+        agentPreset?: string;
+    } | {
+        ok: false;
+        error: string;
+    }>;
+    /** Register one folder as a Workspace on a remote device. */
+    createRemoteWorkspace(input: RemoteWorkspaceCreateInput): Promise<{
+        ok: true;
+        workspace: unknown;
+    } | {
+        ok: false;
+        error: string;
+    }>;
     /** Test reachability & authentication of a candidate device without saving it. */
     testDeviceConnection(input: UpsertDeviceInput): Promise<{
         ok: true;
@@ -88,6 +113,7 @@ export declare class DeviceRegistry {
         client: RemoteDeviceClient;
         rawSessionId: string;
     } | undefined;
+    private hydrateConfig;
     private mountClient;
     private isSelfLoop;
     private bumpRevision;

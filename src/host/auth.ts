@@ -19,6 +19,7 @@ import { createHash, createHmac, randomUUID } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { DeviceAuthConfig, DeviceConfig, DeviceId } from '../contract.ts'
+import { requestRemote } from './http-request.ts'
 import { execSshCommand } from './tunnel.ts'
 
 export interface StoredDeviceSecret {
@@ -30,6 +31,10 @@ export interface StoredDeviceSecret {
   /** Raw 32-byte base64url HMAC secret from remote `.credentials.yaml` if bootstrapped via SSH */
   readonly signingSecret?: string
   readonly bearerToken?: string
+  /** Launch URL/token or explicit cookie/bearer credential entered by the user. */
+  readonly authCredential?: string
+  /** Passphrase for an encrypted local SSH private key. */
+  readonly sshPassphrase?: string
   readonly updatedAt: number
 }
 
@@ -41,6 +46,13 @@ interface SecretStoreDocument {
 const COOKIE_PREFIX = 'dsh-auth-'
 const COOKIE_PAYLOAD_VERSION = 1
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000
+/**
+ * DSH rejects a cookie whose `expiresAt - issuedAt` exceeds its configured
+ * max age. Keep a small safety margin so clock skew does not turn a valid
+ * 30-day cookie into an invalid `30d + 1s` one.
+ */
+const COOKIE_MAX_AGE_SAFETY_MS = 60_000
+const COOKIE_CLOCK_SKEW_MS = 1_000
 
 function encodeBase64Url(value: Buffer): string {
   return value.toString('base64').replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '')
@@ -70,11 +82,15 @@ export function mintDshBrowserCookie(
 ): string | undefined {
   const secretBytes = decodeBase64Url(base64UrlSecret.trim())
   if (secretBytes === undefined || secretBytes.byteLength !== 32) return undefined
+  const issuedAt = now - COOKIE_CLOCK_SKEW_MS
+  const effectiveTtl = Math.max(COOKIE_CLOCK_SKEW_MS, ttlMs - COOKIE_MAX_AGE_SAFETY_MS)
   const payload = {
     version: COOKIE_PAYLOAD_VERSION,
     authority,
-    issuedAt: now - 1000, // 1s clock-skew cushion
-    expiresAt: now + ttlMs,
+    issuedAt,
+    // DSH validates `expiresAt - issuedAt <= maxAgeMilliseconds`; never sign
+    // a window longer than the configured 30-day default.
+    expiresAt: issuedAt + effectiveTtl,
   }
   const body = encodeBase64Url(Buffer.from(JSON.stringify(payload), 'utf8'))
   const sig = encodeBase64Url(createHmac('sha256', secretBytes).update(body).digest())
@@ -136,6 +152,32 @@ export function resolveRemoteAuthority(device: DeviceConfig): string {
 }
 
 /**
+ * Authority used inside a DSH browser-session cookie. DSH 0.2 hashes the
+ * normalized request authority into the cookie name and signs it into the
+ * payload. Plain HTTP cookies use `host:port`; TLS listeners use `origin`
+ * (`https://host:port`).
+ */
+export function resolveRemoteCookieAuthority(device: DeviceConfig): string {
+  if (device.transport.kind === 'ssh') {
+    return resolveRemoteAuthority(device)
+  }
+  try {
+    const url = new URL(device.transport.baseUrl)
+    return url.protocol === 'https:' ? url.origin : url.host
+  } catch {
+    return '127.0.0.1:3080'
+  }
+}
+
+/** HTTP scheme used when constructing the remote `Origin` header. */
+export function resolveRemoteScheme(device: DeviceConfig): 'http' | 'https' {
+  if (device.transport.kind === 'direct') {
+    return device.transport.baseUrl.startsWith('https:') ? 'https' : 'http'
+  }
+  return 'http'
+}
+
+/**
  * Manages persisted authentication state and headers for all configured devices.
  */
 export class DeviceAuthManager {
@@ -185,15 +227,51 @@ export class DeviceAuthManager {
     }
   }
 
+  /** Read the persisted secret record for a device (never exposed to the Client). */
+  storedSecret(deviceId: DeviceId): StoredDeviceSecret | undefined {
+    return this.secrets.get(deviceId)
+  }
+
+  /** Persist or clear the explicit auth credential entered in the device form. */
+  setAuthCredential(deviceId: DeviceId, credential: string | undefined): void {
+    const current = this.secrets.get(deviceId)
+    const next: StoredDeviceSecret = {
+      ...(current ?? { deviceId, updatedAt: Date.now() }),
+      deviceId,
+      updatedAt: Date.now(),
+      ...(credential !== undefined && credential.trim() !== ''
+        ? { authCredential: credential.trim() }
+        : {}),
+    }
+    if (credential === undefined || credential.trim() === '') delete (next as { authCredential?: string }).authCredential
+    this.secrets.set(deviceId, next)
+    this.save()
+  }
+
+  /** Persist or clear the passphrase for an encrypted local SSH key. */
+  setSshPassphrase(deviceId: DeviceId, passphrase: string | undefined): void {
+    const current = this.secrets.get(deviceId)
+    const next: StoredDeviceSecret = {
+      ...(current ?? { deviceId, updatedAt: Date.now() }),
+      deviceId,
+      updatedAt: Date.now(),
+      ...(passphrase !== undefined && passphrase.trim() !== ''
+        ? { sshPassphrase: passphrase }
+        : {}),
+    }
+    if (passphrase === undefined || passphrase.trim() === '') delete (next as { sshPassphrase?: string }).sshPassphrase
+    this.secrets.set(deviceId, next)
+    this.save()
+  }
+
   /**
    * Build the HTTP headers (`Host`, `Origin`, `Cookie`, `Authorization`) needed to authenticate
    * against `device` over `effectiveBaseUrl`.
    */
   getAuthHeaders(device: DeviceConfig): Record<string, string> {
     const authority = resolveRemoteAuthority(device)
-    const scheme = device.transport.kind === 'direct' && device.transport.baseUrl.startsWith('https:')
-      ? 'https'
-      : 'http'
+    const cookieAuthority = resolveRemoteCookieAuthority(device)
+    const scheme = resolveRemoteScheme(device)
     const headers: Record<string, string> = {
       Host: authority,
       Origin: `${scheme}://${authority}`,
@@ -202,27 +280,27 @@ export class DeviceAuthManager {
     const auth = device.auth
     if (auth.mode === 'none') return headers
 
-    if (auth.mode === 'bearer' && auth.credential) {
-      headers['Authorization'] = `Bearer ${auth.credential.trim()}`
-      return headers
-    }
-
-    if (auth.mode === 'cookie' && auth.credential) {
-      const raw = auth.credential.trim()
-      headers['Cookie'] = raw.includes('=') ? raw : `${dshCookieName(authority)}=${raw}`
-      return headers
-    }
-
     const stored = this.secrets.get(device.id)
+    const credential = auth.credential?.trim() || stored?.authCredential?.trim()
+
+    if (auth.mode === 'bearer' && credential !== undefined && credential !== '') {
+      headers['Authorization'] = `Bearer ${credential}`
+      return headers
+    }
+
+    if (auth.mode === 'cookie' && credential !== undefined && credential !== '') {
+      headers['Cookie'] = credential.includes('=') ? credential : `${dshCookieName(cookieAuthority)}=${credential}`
+      return headers
+    }
     if (stored?.signingSecret !== undefined) {
-      const minted = mintDshBrowserCookie(authority, stored.signingSecret)
+      const minted = mintDshBrowserCookie(cookieAuthority, stored.signingSecret)
       if (minted !== undefined) {
         headers['Cookie'] = minted
         return headers
       }
     }
 
-    if (stored?.cookie !== undefined && stored.cookieAuthority === authority) {
+    if (stored?.cookie !== undefined && stored.cookieAuthority === cookieAuthority) {
       headers['Cookie'] = stored.cookie
       return headers
     }
@@ -244,6 +322,7 @@ export class DeviceAuthManager {
     forceRefresh = false,
   ): Promise<{ ok: true } | { ok: false; error: string }> {
     const authority = resolveRemoteAuthority(device)
+    const cookieAuthority = resolveRemoteCookieAuthority(device)
     const auth: DeviceAuthConfig = device.auth ?? { mode: 'auto' }
 
     if (auth.mode === 'none' || auth.mode === 'cookie' || auth.mode === 'bearer') {
@@ -252,26 +331,33 @@ export class DeviceAuthManager {
 
     const existing = this.secrets.get(device.id)
     if (!forceRefresh && existing !== undefined) {
-      if (existing.signingSecret !== undefined || (existing.cookie !== undefined && existing.cookieAuthority === authority)) {
+      if (existing.signingSecret !== undefined || (existing.cookie !== undefined && existing.cookieAuthority === cookieAuthority)) {
         return { ok: true }
       }
     }
 
     // 1. If a launch token or URL is configured, exchange it via GET /?token=...
-    if (auth.credential !== undefined && auth.credential.trim() !== '') {
-      const rawCred = auth.credential.trim()
+    const configuredCredential = auth.credential?.trim() || existing?.authCredential?.trim()
+    if (configuredCredential !== undefined && configuredCredential !== '') {
+      const rawCred = configuredCredential
       // Check if user pasted a 43-char base64url signing secret directly
       if (decodeBase64Url(rawCred)?.byteLength === 32) {
-        const exchanged = await this.exchangeLaunchToken(device.id, effectiveBaseUrl, authority, extractLaunchToken(rawCred))
+        const exchanged = await this.exchangeLaunchToken(
+          device.id,
+          effectiveBaseUrl,
+          authority,
+          cookieAuthority,
+          extractLaunchToken(rawCred),
+        )
         if (exchanged.ok) return exchanged
         // Or treat as signingSecret
-        const minted = mintDshBrowserCookie(authority, rawCred)
+        const minted = mintDshBrowserCookie(cookieAuthority, rawCred)
         if (minted !== undefined) {
           this.secrets.set(device.id, {
             deviceId: device.id,
             signingSecret: rawCred,
             cookie: minted,
-            cookieAuthority: authority,
+            cookieAuthority,
             updatedAt: Date.now(),
           })
           this.save()
@@ -279,7 +365,13 @@ export class DeviceAuthManager {
         }
       } else {
         const token = extractLaunchToken(rawCred)
-        const exchanged = await this.exchangeLaunchToken(device.id, effectiveBaseUrl, authority, token)
+        const exchanged = await this.exchangeLaunchToken(
+          device.id,
+          effectiveBaseUrl,
+          authority,
+          cookieAuthority,
+          token,
+        )
         if (exchanged.ok) return exchanged
         if (auth.mode === 'token') return exchanged
       }
@@ -288,18 +380,19 @@ export class DeviceAuthManager {
     // 2. If transport is SSH and mode is 'auto', bootstrap signing secret from remote ~/.dsh/.credentials.yaml
     if (device.transport.kind === 'ssh' && (auth.mode === 'auto' || auth.mode === 'token')) {
       const dshHome = device.transport.remoteDshHome?.trim() || '~/.dsh'
-      const cmd = `cat ${dshHome}/.credentials.yaml 2>/dev/null || true`
+      const escapedHome = `'${dshHome.replaceAll("'", "'\\''")}'`
+      const cmd = `cat ${escapedHome}/.credentials.yaml 2>/dev/null || true`
       const sshRes = await execSshCommand(device.transport, cmd, 6_000)
       if (sshRes.ok && sshRes.stdout.trim() !== '') {
         const secret = parseSigningSecretFromCredentialsYaml(sshRes.stdout)
         if (secret !== undefined) {
-          const minted = mintDshBrowserCookie(authority, secret)
+          const minted = mintDshBrowserCookie(cookieAuthority, secret)
           if (minted !== undefined) {
             this.secrets.set(device.id, {
               deviceId: device.id,
               signingSecret: secret,
               cookie: minted,
-              cookieAuthority: authority,
+              cookieAuthority,
               updatedAt: Date.now(),
             })
             this.save()
@@ -320,24 +413,32 @@ export class DeviceAuthManager {
     deviceId: DeviceId,
     effectiveBaseUrl: string,
     authority: string,
+    cookieAuthority: string,
     launchToken: string,
   ): Promise<{ ok: true } | { ok: false; error: string }> {
     try {
       const url = new URL('/', effectiveBaseUrl)
       url.searchParams.set('token', launchToken)
-      const response = await fetch(url.href, {
+      // Deliberately no redirect following: the launch endpoint answers with
+      // 303 + Set-Cookie and the caller only needs the cookie pair.
+      const response = await requestRemote(url.href, {
         method: 'GET',
         headers: { Host: authority },
-        redirect: 'manual',
+        timeoutMs: 15_000,
       })
-      const setCookie = response.headers.get('set-cookie')
-      if (setCookie !== null) {
+      const rawSetCookie = response.headers['set-cookie']
+      const setCookies = Array.isArray(rawSetCookie)
+        ? rawSetCookie
+        : rawSetCookie === undefined
+          ? []
+          : [rawSetCookie]
+      for (const setCookie of setCookies) {
         const cookiePair = setCookie.split(';')[0]?.trim()
         if (cookiePair !== undefined && cookiePair.startsWith(COOKIE_PREFIX)) {
           this.secrets.set(deviceId, {
             deviceId,
             cookie: cookiePair,
-            cookieAuthority: authority,
+            cookieAuthority,
             updatedAt: Date.now(),
           })
           this.save()

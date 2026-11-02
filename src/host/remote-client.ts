@@ -29,6 +29,7 @@ import {
 } from '../contract.ts'
 import { DeviceAuthManager } from './auth.ts'
 import { discoverRemoteGitRemotesViaSsh } from './git-aggregator.ts'
+import { headerValue, requestRemote, responseAsFetchResponse } from './http-request.ts'
 import { SshTunnel } from './tunnel.ts'
 
 export interface RemoteSessionSummary {
@@ -107,6 +108,7 @@ export class RemoteDeviceClient {
   private readonly projectionsBySession = new Map<string, { asOfSeq: number; values: Record<string, unknown> }>()
   private readonly pendingInteractions = new Map<string, RemotePendingInteraction>()
   private readonly discoveredGitPaths = new Set<string>()
+  private readonly gitProbeAttemptedAt = new Map<string, number>()
 
   private remoteEventsClientId: string | undefined
   private muxSocket: WebSocket | undefined
@@ -170,6 +172,21 @@ export class RemoteDeviceClient {
       enabled: this.config.enabled,
       state: this.state,
       transportKind: this.config.transport.kind,
+      ...(this.config.transport.kind === 'ssh'
+        ? {
+            ssh: {
+              host: this.config.transport.host,
+              ...(this.config.transport.port !== undefined ? { port: this.config.transport.port } : {}),
+              ...(this.config.transport.username !== undefined ? { username: this.config.transport.username } : {}),
+              ...(this.config.transport.privateKeyPath !== undefined
+                ? { privateKeyPath: this.config.transport.privateKeyPath }
+                : {}),
+              ...(this.config.transport.proxyJump !== undefined ? { proxyJump: this.config.transport.proxyJump } : {}),
+              ...(this.config.transport.remotePort !== undefined ? { remotePort: this.config.transport.remotePort } : {}),
+              ...(this.config.transport.engine !== undefined ? { engine: this.config.transport.engine } : {}),
+            },
+          }
+        : {}),
       targetSummary: this.targetSummary(),
       ...(this.effectiveBaseUrl() !== undefined ? { effectiveBaseUrl: this.effectiveBaseUrl() } : {}),
       ...(this.nativeProxyUrl !== undefined ? { nativeProxyUrl: this.nativeProxyUrl } : {}),
@@ -835,13 +852,18 @@ export class RemoteDeviceClient {
 
   private async probeNewWorkspaceGitRemotes(): Promise<void> {
     if (this.config.transport.kind !== 'ssh') return
+    const now = Date.now()
     const pendingPaths = this.workspaces
       .map(w => w.path)
       .filter(p => p && !this.discoveredGitPaths.has(p))
+      .filter(p => now - (this.gitProbeAttemptedAt.get(p) ?? 0) >= 60_000)
     if (pendingPaths.length === 0) return
-    for (const p of pendingPaths) this.discoveredGitPaths.add(p)
+    for (const p of pendingPaths) this.gitProbeAttemptedAt.set(p, now)
 
     const discovered = await discoverRemoteGitRemotesViaSsh(this.config.transport, pendingPaths)
+    // Only mark a path as complete when a remote URL was actually found; a
+    // transient SSH/git failure must be retryable on a later workspace change.
+    for (const path of discovered.keys()) this.discoveredGitPaths.add(path)
     if (discovered.size > 0) {
       this.callbacks.onGitRemotesDiscovered(this.id, discovered)
       this.callbacks.onWorkspacesChanged(this.id)
@@ -999,7 +1021,7 @@ export class RemoteDeviceClient {
     }
 
     try {
-      const response = await fetch(url.href, {
+      const response = await requestRemote(url.href, {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -1009,23 +1031,27 @@ export class RemoteDeviceClient {
           payload,
         }),
         ...(signal !== undefined ? { signal } : {}),
+        rejectUnauthorized:
+          this.config.transport.kind === 'direct'
+            ? this.config.transport.rejectUnauthorized !== false
+            : true,
       })
 
-      if (!response.ok) {
-        const text = await response.text().catch(() => '')
+      if (response.status < 200 || response.status >= 300) {
+        const text = response.body.toString('utf8').slice(0, 200)
         return {
           ok: false,
           httpStatus: response.status,
           error: {
             code: response.status === 401 ? 'unauthorized' : 'transport',
-            message: `HTTP ${String(response.status)}: ${text.slice(0, 200) || response.statusText}`,
+            message: `HTTP ${String(response.status)}: ${text || response.statusText}`,
           },
         }
       }
 
-      const contentType = response.headers.get('content-type') ?? ''
+      const contentType = headerValue(response.headers, 'content-type') ?? ''
       if (contentType.includes('multipart/form-data')) {
-        const formData = await response.formData()
+        const formData = await responseAsFetchResponse(response).formData()
         const metaRaw = formData.get('metadata')
         if (typeof metaRaw === 'string') {
           const parsed = JSON.parse(metaRaw) as {
@@ -1037,7 +1063,7 @@ export class RemoteDeviceClient {
         }
       }
 
-      const body = (await response.json()) as {
+      const body = JSON.parse(response.body.toString('utf8')) as {
         type?: string
         result?:
           | { ok: true; value: unknown }

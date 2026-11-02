@@ -152,7 +152,11 @@ export async function discoverRemoteGitRemotesViaSsh(
   // Build a safe POSIX shell snippet that prints `PATH\tURL` per directory
   const commands = uniquePaths.map((p, idx) => {
     const escaped = `'${p.replaceAll("'", "'\\''")}'`
-    return `u=$(git -C ${escaped} config --get remote.origin.url 2>/dev/null || true); printf "__DSH_GIT_%d__\\t%s\\n" ${idx} "$u"`
+    return [
+      `u=$(git -C ${escaped} config --get remote.origin.url 2>/dev/null || true)`,
+      `if [ -z "$u" ]; then u=$(git -C ${escaped} config --get-regexp '^remote\\..*\\.url$' 2>/dev/null | head -n 1 | awk '{print $2}'); fi`,
+      `printf "__DSH_GIT_%d__\\t%s\\n" ${idx} "$u"`,
+    ].join('; ')
   })
   const fullCommand = commands.join('; ')
   const res = await execSshCommand(transport, fullCommand, 8_000)
@@ -177,6 +181,7 @@ export const DEFAULT_AGGREGATION_CONFIG: WorkspaceAggregationConfig = {
   excludedMemberKeys: [],
   preferredDeviceByLogicalId: {},
   customTitleByLogicalId: {},
+  workspaceOrder: [],
   manualRules: [],
 }
 
@@ -195,6 +200,7 @@ export class WorkspaceAggregator {
       excludedMemberKeys: [...(initialConfig.excludedMemberKeys ?? [])],
       preferredDeviceByLogicalId: { ...(initialConfig.preferredDeviceByLogicalId ?? {}) },
       customTitleByLogicalId: { ...(initialConfig.customTitleByLogicalId ?? {}) },
+      workspaceOrder: [...(initialConfig.workspaceOrder ?? [])],
       manualRules: [...(initialConfig.manualRules ?? [])],
     }
   }
@@ -214,6 +220,7 @@ export class WorkspaceAggregator {
       customTitleByLogicalId: next.customTitleByLogicalId
         ? { ...next.customTitleByLogicalId }
         : this.config.customTitleByLogicalId,
+      workspaceOrder: next.workspaceOrder ? [...next.workspaceOrder] : this.config.workspaceOrder,
       manualRules: next.manualRules ? [...next.manualRules] : this.config.manualRules,
     }
     return this.config
@@ -427,6 +434,14 @@ export class WorkspaceAggregator {
         createdAt: entry.input.createdAt,
         updatedAt: entry.input.updatedAt,
       })
+    }
+
+    if (this.config.workspaceOrder.length > 0) {
+      const rank = new Map(this.config.workspaceOrder.map((id, index) => [id, index]))
+      logicalWorkspaces.sort(
+        (a, b) => (rank.get(a.logicalWorkspaceId) ?? Number.MAX_SAFE_INTEGER)
+          - (rank.get(b.logicalWorkspaceId) ?? Number.MAX_SAFE_INTEGER),
+      )
     }
 
     return { logicalWorkspaces, allPhysicalWorkspaces }

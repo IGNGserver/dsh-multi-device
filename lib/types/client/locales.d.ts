@@ -12,6 +12,8 @@ export declare const zh: {
     readonly switchToNative: "切至原生模式";
     readonly switchToAggregated: "返回聚合模式";
     readonly tabNative: "原生视图 (Native)";
+    readonly nativeTabHintTitle: "原生模式";
+    readonly nativeTabHint: "原生模式只保留一个全屏实例，避免同一设备被重复加载。点击下方按钮进入完整远端 DSH 页面。";
     readonly tabDevices: "设备与连接";
     readonly tabGitAggregation: "Git 工作区聚合";
     readonly statusConnected: "已连接";
@@ -35,6 +37,10 @@ export declare const zh: {
     readonly sshUser: "SSH 用户名（留空复用 ~/.ssh/config）";
     readonly sshPort: "SSH 端口";
     readonly sshKeyPath: "私钥路径（留空自动使用 SSH Agent / 默认密钥）";
+    readonly sshKeySelect: "从本机 ~/.ssh 选择私钥";
+    readonly sshKeyAuto: "自动（SSH Agent / 默认密钥）";
+    readonly sshKeyPassphrase: "私钥口令（可选）";
+    readonly sshKeyPassphrasePlaceholder: "加密私钥的口令；留空则使用 SSH Agent";
     readonly sshProxyJump: "ProxyJump 跳板机（可选）";
     readonly remoteDshPort: "远端 DSH Web 端口";
     readonly sshEngine: "SSH 隧道引擎";
@@ -70,6 +76,18 @@ export declare const zh: {
     readonly gitAutoToggle: "启用 Git Remote 自动聚合";
     readonly gitPrefixToggle: "未聚合的远端工作区显示 [设备名] 前缀";
     readonly logicalWorkspacesHeading: "当前逻辑工作区视图";
+    readonly remoteWorkspaceHeading: "在远端添加工作区";
+    readonly remoteWorkspaceDesc: "只注册远端 DSH 工作区，不做文件同步。添加后会参与 Git 仓库聚合。";
+    readonly remoteWorkspaceDevice: "目标设备";
+    readonly remoteWorkspaceDevicePlaceholder: "选择远端设备…";
+    readonly remoteWorkspacePath: "远端文件夹路径";
+    readonly remoteWorkspacePlaceholder: "/home/user/project";
+    readonly addRemoteWorkspace: "添加远端工作区";
+    readonly remoteWorkspaceRequired: "请选择设备并填写远端路径";
+    readonly remoteWorkspaceFailed: "添加远端工作区失败";
+    readonly newSessionHere: "在此设备新建会话";
+    readonly newSessionCreated: "已在目标设备创建会话";
+    readonly newSessionFailed: "创建会话失败";
     readonly targetDeviceForNewSession: "新建会话目标设备：";
     readonly splitWorkspace: "拆分此聚合工作区";
     readonly restoreAutoMerge: "恢复自动聚合";
@@ -82,6 +100,7 @@ export declare const zh: {
     readonly hoverDeviceLabel: "所属设备";
     readonly hoverGitRepoLabel: "Git 仓库";
     readonly gatewayDegradedNotice: "聚合网关当前处于降级状态，您仍可正常使用原生模式管理所有远端设备。";
+    readonly aggregatedScopeNotice: "聚合模式负责跨设备工作区与会话；模型目录会合并，但文件上传、终端、远端文件打开和全局设置请使用原生模式。";
 };
 export type MultiDeviceLocaleKey = keyof typeof zh;
 export declare const en: Record<MultiDeviceLocaleKey, string>;

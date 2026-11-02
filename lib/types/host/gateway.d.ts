@@ -85,6 +85,13 @@ export interface SessionControllerLike {
         values: Record<string, unknown>;
     } | null>;
     control(signal: AbortSignal): AsyncIterable<Record<string, unknown>>;
+    openWorkspacePath?(request: {
+        path: string;
+        action?: 'reveal';
+        application?: string;
+    }, signal: AbortSignal): Promise<{
+        opened: true;
+    }>;
 }
 export interface WorkspaceControllerLike {
     create(request: {

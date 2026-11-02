@@ -13,6 +13,9 @@ import {
   type DisplayMode,
   type ManualWorkspaceRule,
   type MultiDeviceSnapshot,
+  type RemoteSessionCreateInput,
+  type RemoteWorkspaceCreateInput,
+  type SshKeyEntry,
   type UpsertDeviceInput,
   type WorkspaceAggregationConfig,
 } from '../contract.ts'
@@ -55,6 +58,7 @@ const EMPTY_SNAPSHOT: MultiDeviceSnapshot = {
     excludedMemberKeys: [],
     preferredDeviceByLogicalId: {},
     customTitleByLogicalId: {},
+    workspaceOrder: [],
     manualRules: [],
   },
   logicalWorkspaces: [],
@@ -355,6 +359,39 @@ class MultiDeviceClientStore {
       payload: input as unknown as Record<string, unknown>,
     })
     return res.ok ? { ok: true, ...res.value } : res
+  }
+
+  async listSshKeys(): Promise<SshKeyEntry[]> {
+    const res = await this.callControlPlane<{ keys: SshKeyEntry[] }>({ action: 'listSshKeys' })
+    return res.ok ? res.value.keys : []
+  }
+
+  async createRemoteSession(
+    input: RemoteSessionCreateInput,
+  ): Promise<{ ok: boolean; sessionId?: string; error?: string }> {
+    const res = await this.callControlPlane<{ sessionId: string; snapshot: MultiDeviceSnapshot }>({
+      action: 'createSession',
+      payload: input as unknown as Record<string, unknown>,
+    })
+    if (res.ok) {
+      this.applyIncomingSnapshot(res.value.snapshot)
+      return { ok: true, sessionId: res.value.sessionId }
+    }
+    return { ok: false, error: res.error }
+  }
+
+  async createRemoteWorkspace(
+    input: RemoteWorkspaceCreateInput,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const res = await this.callControlPlane<{ snapshot: MultiDeviceSnapshot }>({
+      action: 'createRemoteWorkspace',
+      payload: input as unknown as Record<string, unknown>,
+    })
+    if (res.ok) {
+      this.applyIncomingSnapshot(res.value.snapshot)
+      return { ok: true }
+    }
+    return { ok: false, error: res.error }
   }
 
   async updateAggregationConfig(patch: Partial<WorkspaceAggregationConfig>): Promise<void> {

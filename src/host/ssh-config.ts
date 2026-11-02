@@ -14,7 +14,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir, userInfo } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
-import type { SshConfigHostEntry, SshTransportConfig } from '../contract.ts'
+import type { SshConfigHostEntry, SshKeyEntry, SshTransportConfig } from '../contract.ts'
 
 export interface ParsedSshConfigBlock {
   readonly patterns: readonly string[]
@@ -62,6 +62,57 @@ export function discoverDefaultPrivateKeys(home = homedir()): string[] {
     }
   }
   return found
+}
+
+/**
+ * Discover candidate private keys under `<home>/.ssh` for the device form.
+ *
+ * Only files whose first bytes look like PEM/OpenSSH private-key material are
+ * returned. Passphrase detection is best-effort (OpenSSH PEM header or the
+ * legacy `Proc-Type: 4,ENCRYPTED` marker); the authoritative check remains the
+ * SSH client's prompt/agent.
+ */
+export function listLocalSshKeys(home = homedir()): SshKeyEntry[] {
+  const sshDir = join(home, '.ssh')
+  if (!existsSync(sshDir)) return []
+  const entries: SshKeyEntry[] = []
+  let names: string[]
+  try {
+    names = readdirSync(sshDir)
+  } catch {
+    return []
+  }
+
+  for (const name of names.sort()) {
+    if (name.endsWith('.pub')) continue
+    if (name === 'config' || name === 'known_hosts' || name === 'authorized_keys') continue
+    if (name.startsWith('.')) continue
+    const path = join(sshDir, name)
+    let mode: number
+    let text: string
+    try {
+      const stat = statSync(path)
+      if (!stat.isFile()) continue
+      mode = stat.mode
+      text = readFileSync(path, 'utf8').slice(0, 4096)
+    } catch {
+      continue
+    }
+    if (!/-----BEGIN (?:OPENSSH |RSA |EC |DSA |ENCRYPTED )?PRIVATE KEY-----/.test(text)) continue
+    const publicKeyPath = existsSync(`${path}.pub`) ? `${path}.pub` : undefined
+    entries.push({
+      path,
+      name,
+      ...(publicKeyPath !== undefined ? { publicKeyPath } : {}),
+      encrypted:
+        /-----BEGIN ENCRYPTED PRIVATE KEY-----/.test(text) ||
+        /^Proc-Type:\s*4,ENCRYPTED/im.test(text) ||
+        /ENCRYPTED/.test(text),
+      permissionsTooOpen: (mode & 0o077) !== 0,
+    })
+  }
+
+  return entries
 }
 
 /**

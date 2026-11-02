@@ -11,9 +11,11 @@
  *
  * @module dsh-multi-device/host/tunnel
  */
-import { spawn, type ChildProcess } from 'node:child_process'
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { createConnection, createServer, type Server, type Socket } from 'node:net'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import type { SshTransportConfig } from '../contract.ts'
 import {
   expandHomePath,
@@ -120,6 +122,12 @@ export async function execSshCommand(
     (transport.passphrase !== undefined && transport.passphrase !== '')
 
   if (useSsh2) {
+    if (resolved.proxyJump !== undefined || resolved.proxyCommand !== undefined) {
+      return {
+        ok: false,
+        error: 'ssh2 engine cannot honor ProxyJump/ProxyCommand; use system-ssh with an SSH agent',
+      }
+    }
     return execViaSsh2(transport, resolved, command, timeoutMs)
   }
 
@@ -237,6 +245,7 @@ async function execViaSsh2(
       ...(privateKey !== undefined ? { privateKey } : {}),
       ...(transport.passphrase !== undefined ? { passphrase: transport.passphrase } : {}),
       ...(process.env.SSH_AUTH_SOCK !== undefined ? { agent: process.env.SSH_AUTH_SOCK } : {}),
+      hostVerifier: (key: Buffer) => verifySsh2HostKey(resolved.hostName, resolved.port, key),
       readyTimeout: timeoutMs,
     })
   })
@@ -374,6 +383,14 @@ export class SshTunnel {
       if (ok || this.stopped || this.transport.engine === 'system-ssh') return
     }
 
+    if (resolved.proxyJump !== undefined || resolved.proxyCommand !== undefined) {
+      this.fail(
+        'ssh2 engine cannot honor ProxyJump/ProxyCommand; use system-ssh with an SSH agent',
+        false,
+      )
+      return
+    }
+
     await this.openWithSsh2(resolved)
   }
 
@@ -504,6 +521,7 @@ export class SshTunnel {
         ...(privateKey !== undefined ? { privateKey } : {}),
         ...(this.transport.passphrase !== undefined ? { passphrase: this.transport.passphrase } : {}),
         ...(process.env.SSH_AUTH_SOCK !== undefined ? { agent: process.env.SSH_AUTH_SOCK } : {}),
+        hostVerifier: (key: Buffer) => verifySsh2HostKey(resolved.hostName, resolved.port, key),
         readyTimeout: READY_TIMEOUT_MS,
         keepaliveInterval: KEEPALIVE_INTERVAL_SEC * 1000,
       })
@@ -612,6 +630,35 @@ function tryTcpConnect(port: number, timeoutMs: number): Promise<boolean> {
       done(false)
     })
   })
+}
+
+/**
+ * Verify an in-process `ssh2` host key against the user's `known_hosts`.
+ *
+ * The system `ssh` engine keeps its normal host-key policy. The fallback
+ * engine must not silently accept an unknown key, so it requires a matching
+ * entry and tells the user to connect once with `ssh` / `ssh-keyscan` when the
+ * host is new.
+ */
+function verifySsh2HostKey(host: string, port: number, key: Buffer): boolean {
+  const knownHosts = join(homedir(), '.ssh', 'known_hosts')
+  if (!existsSync(knownHosts)) return false
+  const target = port === 22 ? host : `[${host}]:${String(port)}`
+  try {
+    const output = execFileSync('ssh-keygen', ['-F', target, '-f', knownHosts], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    for (const line of output.split(/\r?\n/)) {
+      const parts = line.trim().split(/\s+/)
+      if (parts.length < 3 || parts[2] === undefined) continue
+      const knownKey = Buffer.from(parts[2], 'base64')
+      if (knownKey.equals(key)) return true
+    }
+  } catch {
+    // Missing ssh-keygen or unknown host: reject rather than trust blindly.
+  }
+  return false
 }
 
 /** One-shot tunnel probe for the "Test Connection" button. */

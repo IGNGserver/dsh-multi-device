@@ -79,6 +79,7 @@ export declare class RemoteDeviceClient {
     private readonly projectionsBySession;
     private readonly pendingInteractions;
     private readonly discoveredGitPaths;
+    private readonly gitProbeAttemptedAt;
     private remoteEventsClientId;
     private muxSocket;
     private readonly muxStreams;

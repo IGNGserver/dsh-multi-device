@@ -15,7 +15,7 @@ import type { DeviceRegistry } from './host/registry.ts';
 export declare const MULTI_DEVICE_API_PATH = "/multi-device/api";
 export declare const MULTI_DEVICE_EVENTS_PATH = "/multi-device/events";
 export interface ControlPlaneRequest {
-    readonly action: 'snapshot' | 'upsertDevice' | 'removeDevice' | 'reconnectDevice' | 'testDevice' | 'updateAggregationConfig' | 'upsertManualRule' | 'removeManualRule' | 'setMemberExcluded' | 'setPreferredDevice' | 'setCustomTitle';
+    readonly action: 'snapshot' | 'upsertDevice' | 'removeDevice' | 'reconnectDevice' | 'testDevice' | 'listSshKeys' | 'createSession' | 'createRemoteWorkspace' | 'updateAggregationConfig' | 'upsertManualRule' | 'removeManualRule' | 'setMemberExcluded' | 'setPreferredDevice' | 'setCustomTitle';
     readonly payload?: Record<string, unknown>;
 }
 export declare class MultiDeviceControlPlane {
