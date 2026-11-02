@@ -14,10 +14,22 @@
  *
  * @module dsh-multi-device/client/NativeViewport
  */
+import {
+  Button,
+  IconChevronLeftOutlineRegular,
+  IconCloseOutlineRegular,
+  IconPlusOutlineRegular,
+  IconRefreshOutlineRegular,
+  IconRightUpOutlineRegular,
+  IconSettingsOutlineRegular,
+  Pill,
+  StateDot,
+  Tooltip,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 import React, { useEffect, useRef, useState } from 'react'
 import type { DeviceId, DeviceView } from '../contract.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
-import { clientStore, useMultiDeviceState } from './state.ts'
+import { clientStore, deviceStateToDotState, useMultiDeviceState } from './state.ts'
 
 interface DesktopBrowserBridgeLike {
   acquire(workspace: string): Promise<{ lease: string; partition: string }>
@@ -39,10 +51,12 @@ function KeepAliveDeviceFrame({
   device,
   active,
   reloadCount,
+  t,
 }: {
   device: DeviceView
   active: boolean
   reloadCount: number
+  t: (key: MultiDeviceLocaleKey) => string
 }): React.ReactElement {
   const targetUrl = device.nativeProxyUrl ?? device.effectiveBaseUrl
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -123,33 +137,24 @@ function KeepAliveDeviceFrame({
       data-active={active ? 'true' : 'false'}
     >
       {targetUrl === undefined ? (
-        <div
-          style={{
-            flex: 1,
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: 10,
-            padding: 24,
-          }}
-        >
-          <span className="dsh-md-dot" data-state={device.state} />
-          <div style={{ fontSize: 15, fontWeight: 600 }}>{device.name}</div>
-          <div style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary, #9ca3af)' }}>
+        <div className="dsh-md-native-placeholder">
+          <StateDot state={deviceStateToDotState(device.state)} size={12} />
+          <div className="dsh-md-row-name">{device.name}</div>
+          <div className="dsh-md-pref-desc">
             {reconnectError ?? device.lastError ?? device.targetSummary}
           </div>
-          <button
-            type="button"
-            className="dsh-md-btn dsh-md-btn-primary"
+          <Button
+            variant="primary"
+            size="sm"
+            icon={<IconRefreshOutlineRegular size={13} />}
             onClick={() => {
               void clientStore.reconnectDevice(device.id).then((res) => {
-                setReconnectError(res.ok ? null : res.error ?? 'Reconnect failed')
+                setReconnectError(res.ok ? null : res.error ?? t('actionFailed'))
               })
             }}
           >
-            Reconnect
-          </button>
+            {t('reconnect')}
+          </Button>
         </div>
       ) : useDesktopWebview ? (
         <div ref={containerRef} className="dsh-md-native-iframe" />
@@ -197,62 +202,50 @@ export function NativeViewport({
     >
       <div className="dsh-md-native-toolbar" style={embedded ? { paddingLeft: 12 } : undefined}>
         {!embedded && (
-          <button
-            type="button"
-            className="dsh-md-btn dsh-md-btn-primary"
+          <Button
+            variant="outline"
+            size="sm"
+            icon={<IconChevronLeftOutlineRegular size={14} />}
             onClick={() => clientStore.setDisplayMode('aggregated')}
           >
-            ← {t('switchToAggregated')}
-          </button>
+            {t('switchToAggregated')}
+          </Button>
         )}
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1, overflowX: 'auto' }}>
+        <div className="dsh-md-native-tabs">
           {devices.map((dev) => {
             const isSelected = dev.id === activeDevice?.id
             const isKeptAlive = state.keepAliveDeviceIds.includes(dev.id)
             return (
-              <div
-                key={dev.id}
-                style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}
-              >
-                <button
-                  type="button"
-                  className="dsh-md-device-pill"
-                  data-active={isSelected ? 'true' : 'false'}
+              <div key={dev.id} className="dsh-md-native-tab-item">
+                <Pill
+                  active={isSelected}
                   onClick={() => clientStore.selectNativeDevice(dev.id)}
                 >
-                  <span className="dsh-md-dot" data-state={dev.state} />
-                  <span>{dev.name}</span>
-                  {dev.runningSessionCount > 0 && (
-                    <span className="dsh-md-badge" style={{ color: '#60a5fa' }}>
-                      {dev.runningSessionCount} run
-                    </span>
-                  )}
-                  {dev.latencyMs !== undefined && (
-                    <span style={{ opacity: 0.65 }}>{dev.latencyMs}ms</span>
-                  )}
-                  {isKeptAlive && (
-                    <span title={t('keepAliveActive')} style={{ color: '#10b981', fontSize: 10 }}>
-                      ●
-                    </span>
-                  )}
-                </button>
+                  <span className="dsh-md-pill-inner">
+                    <StateDot state={deviceStateToDotState(dev.state)} size={8} />
+                    <span>{dev.name}</span>
+                    {dev.runningSessionCount > 0 && (
+                      <span className="dsh-md-muted">
+                        {t('runningCount').replace('{count}', String(dev.runningSessionCount))}
+                      </span>
+                    )}
+                    {dev.latencyMs !== undefined && (
+                      <span className="dsh-md-muted">{dev.latencyMs}ms</span>
+                    )}
+                  </span>
+                </Pill>
                 {isKeptAlive && (
-                  <button
-                    type="button"
-                    title={t('releaseKeepAlive')}
-                    onClick={() => clientStore.releaseKeepAliveDevice(dev.id)}
-                    style={{
-                      border: 'none',
-                      background: 'transparent',
-                      color: 'var(--dsw-alias-label-tertiary, #9ca3af)',
-                      cursor: 'pointer',
-                      fontSize: 11,
-                      padding: '0 3px',
-                    }}
-                  >
-                    ×
-                  </button>
+                  <Tooltip label={t('releaseKeepAlive')} side="bottom">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      aria-label={t('releaseKeepAlive')}
+                      onClick={() => clientStore.releaseKeepAliveDevice(dev.id)}
+                    >
+                      <IconCloseOutlineRegular size={12} />
+                    </Button>
+                  </Tooltip>
                 )}
               </div>
             )
@@ -260,59 +253,65 @@ export function NativeViewport({
         </div>
 
         {activeDevice !== undefined && (
-          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-            <button
-              type="button"
-              className="dsh-md-btn"
-              title={t('reloadPage')}
-              onClick={() => clientStore.reloadNativeDevice(activeDevice.id)}
-            >
-              ↻ {t('reloadPage')}
-            </button>
-            {(activeDevice.nativeProxyUrl ?? activeDevice.effectiveBaseUrl) !== undefined && (
-              <button
-                type="button"
-                className="dsh-md-btn"
-                title={t('openExternal')}
-                onClick={() => {
-                  const url = activeDevice.nativeProxyUrl ?? activeDevice.effectiveBaseUrl
-                  if (url !== undefined) window.open(url, '_blank', 'noopener,noreferrer')
-                }}
+          <div className="dsh-md-native-tab-item">
+            <Tooltip label={t('reloadPage')} side="bottom">
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label={t('reloadPage')}
+                onClick={() => clientStore.reloadNativeDevice(activeDevice.id)}
               >
-                ↗ {t('openExternal')}
-              </button>
+                <IconRefreshOutlineRegular size={14} />
+              </Button>
+            </Tooltip>
+            {(activeDevice.nativeProxyUrl ?? activeDevice.effectiveBaseUrl) !== undefined && (
+              <Tooltip label={t('openExternal')} side="bottom">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label={t('openExternal')}
+                  onClick={() => {
+                    const url = activeDevice.nativeProxyUrl ?? activeDevice.effectiveBaseUrl
+                    if (url !== undefined) window.open(url, '_blank', 'noopener,noreferrer')
+                  }}
+                >
+                  <IconRightUpOutlineRegular size={14} />
+                </Button>
+              </Tooltip>
             )}
           </div>
         )}
 
         {onOpenSettings !== undefined && (
-          <button type="button" className="dsh-md-btn" onClick={onOpenSettings}>
-            ⚙ {t('tabDevices')}
-          </button>
+          <Tooltip label={t('settingsSectionTitle')} side="bottom">
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label={t('settingsSectionTitle')}
+              onClick={onOpenSettings}
+            >
+              <IconSettingsOutlineRegular size={14} />
+            </Button>
+          </Tooltip>
         )}
       </div>
 
       <div className="dsh-md-native-stage">
         {devices.length === 0 ? (
-          <div
-            style={{
-              flex: 1,
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 10,
-              padding: 32,
-            }}
-          >
-            <div style={{ fontSize: 16, fontWeight: 600 }}>{t('noDevicesTitle')}</div>
-            <div style={{ fontSize: 13, color: 'var(--dsw-alias-label-tertiary, #9ca3af)', maxWidth: 420, textAlign: 'center' }}>
+          <div className="dsh-md-native-placeholder">
+            <div className="dsh-md-row-name">{t('noDevicesTitle')}</div>
+            <div className="dsh-md-pref-desc" style={{ maxWidth: 420 }}>
               {t('noDevicesDesc')}
             </div>
             {onOpenSettings !== undefined && (
-              <button type="button" className="dsh-md-btn dsh-md-btn-primary" onClick={onOpenSettings}>
-                + {t('addDevice')}
-              </button>
+              <Button
+                variant="primary"
+                size="sm"
+                icon={<IconPlusOutlineRegular size={13} />}
+                onClick={onOpenSettings}
+              >
+                {t('addDevice')}
+              </Button>
             )}
           </div>
         ) : (
@@ -322,6 +321,7 @@ export function NativeViewport({
               device={dev}
               active={dev.id === activeDevice?.id}
               reloadCount={state.reloadCounters[dev.id] ?? 0}
+              t={t}
             />
           ))
         )}

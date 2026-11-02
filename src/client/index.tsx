@@ -1,16 +1,17 @@
 /**
  * `dsh-multi-device` Browser Client Entry.
  *
- * Contributes to official DSH 0.2 UI extension slots without replacing any core slot:
- * 1. `shell.overlay` (`id: 'multi-device-switcher'`): Floating Aggregated ⟷ Native mode switcher
- *    and persistent Keep-Alive Native Mode viewport container.
- * 2. `sidebar.panellist` + `main` (`id/key: 'multi-device-hub'`): Global sidebar entry and main panel
- *    for managing devices, importing `~/.ssh/config`, configuring Git workspace aggregation, and
- *    using Native Mode.
- * 3. `settings.plugins.tab` (`id: 'multi-device-hub'`): Settings → Built-in plugins tab.
+ * Contributes strictly to official DSH 0.2 UI extension slots without occupying
+ * the primary left sidebar navigation:
+ * 1. `settings.section` (`id: 'multi-device'`): Native top-level Settings section
+ *    for managing remote SSH devices, display mode, and Git repository auto-aggregation.
+ * 2. `plugins.bundle.config` (`key: 'dsh-multi-device'`): Companion configuration surface
+ *    inside DSH's Plugin Manager bundle detail view.
+ * 3. `shell.overlay` (`id: 'multi-device-switcher'`): Compact Aggregated ⟷ Native switcher
+ *    (auto-hidden until a device is added) and persistent Keep-Alive Native Mode viewport.
  * 4. `sidebar.session.row.leading`, `sidebar.session.row.hover`, and
  *    `sidebar.workspaces.session.menu.item`: Per-session device badges, hover details, and
- *    "Open Device in Native Mode" context menu action.
+ *    native `MenuItemButton` action to open the owning device in Native Mode.
  *
  * @module dsh-multi-device/client
  */
@@ -26,7 +27,9 @@ import { MultiDeviceHubPanel } from './MultiDeviceHubPanel.tsx'
 import { clientStore } from './state.ts'
 import { adoptMultiDeviceStyles } from './styles.ts'
 
-export const PANEL_ID = 'multi-device-hub'
+export const SETTINGS_SECTION_ID = 'multi-device'
+/** Retained alias for backwards compatibility with external callers. */
+export const PANEL_ID = SETTINGS_SECTION_ID
 
 export const inject = ['slots', 'locale']
 
@@ -38,14 +41,17 @@ function translateFallback(key: MultiDeviceLocaleKey): string {
   return fallbackDict[key] ?? en[key] ?? key
 }
 
-function HubPanelIcon({ size = 16 }: { size?: number; active?: boolean }): React.ReactElement {
-  return (
-    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <rect x="1.5" y="2" width="8.5" height="6" rx="1.2" stroke="currentColor" strokeWidth="1.3" />
-      <rect x="6" y="8" width="8.5" height="6" rx="1.2" stroke="currentColor" strokeWidth="1.3" />
-      <path d="M4 11H6M10 5H12" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-    </svg>
-  )
+export interface SlotEntryLike {
+  readonly options?: {
+    readonly id?: string
+    readonly store?: {
+      readonly create?: () => {
+        readonly actions?: {
+          readonly openSection?: (id: string) => void
+        }
+      }
+    }
+  }
 }
 
 export interface ClientContextLike {
@@ -64,7 +70,31 @@ export interface ClientContextLike {
   slots: {
     inject(slotName: string, fn: () => (() => void) | void): () => void
     register(options: Record<string, unknown>, component: (props: any) => React.ReactNode): () => void
+    entries?(slotName: string): readonly SlotEntryLike[]
   }
+}
+
+/**
+ * Open the native DSH Settings modal directly on `sectionId` via the `sidebar.settings`
+ * shell store, falling back to an owned native `Modal` if the host shell does not mount
+ * `sidebar.settings`.
+ */
+export function openSettingsSection(
+  ctx: ClientContextLike,
+  sectionId: string = SETTINGS_SECTION_ID,
+): boolean {
+  try {
+    const entries = ctx.slots.entries?.('sidebar.settings')
+    const openSection = entries?.[0]?.options?.store?.create?.()?.actions?.openSection
+    if (typeof openSection === 'function') {
+      openSection(sectionId)
+      return true
+    }
+  } catch {
+    // Fall back to the owned Modal below.
+  }
+  clientStore.setSettingsModalOpen(true)
+  return false
 }
 
 export function apply(ctx: ClientContextLike): void {
@@ -84,12 +114,8 @@ export function apply(ctx: ClientContextLike): void {
     return translateFallback
   }
 
-  const openHubPanel = (): void => {
-    try {
-      ctx.layout?.selectPanel(PANEL_ID)
-    } catch {
-      // Ignore if layout is not ready
-    }
+  const handleOpenSettings = (): void => {
+    openSettingsSection(ctx, SETTINGS_SECTION_ID)
   }
 
   // 1. Register keyboard shortcut (Cmd/Ctrl+Shift+M) to toggle Aggregated ⟷ Native mode
@@ -121,7 +147,42 @@ export function apply(ctx: ClientContextLike): void {
     }, 'dsh-multi-device: shortcut')
   })
 
-  // 2. Register Floating Mode Switcher & Persistent Native Keep-Alive Viewport in `shell.overlay`
+  // 2. Register Native Settings Section (`settings.section`, id: 'multi-device')
+  ctx.slots.inject('settings.section', () =>
+    ctx.slots.register(
+      {
+        name: 'settings.section',
+        id: SETTINGS_SECTION_ID,
+        order: 12,
+        label: () => getTranslate()('settingsSectionTitle'),
+        locale: LOCALE_NS,
+      },
+      (props: { t?: (k: MultiDeviceLocaleKey) => string; close?: () => void }) => (
+        <MultiDeviceHubPanel
+          t={props.t ?? getTranslate()}
+          onCloseSettings={props.close}
+        />
+      ),
+    ),
+  )
+
+  // 3. Register Plugin Manager Bundle Configuration (`plugins.bundle.config`)
+  ctx.slots.inject('plugins.bundle.config', () =>
+    ctx.slots.register(
+      {
+        name: 'plugins.bundle.config',
+        key: 'dsh-multi-device',
+        locale: LOCALE_NS,
+      },
+      (props: { view?: 'summary' | 'page'; t?: (k: MultiDeviceLocaleKey) => string }) => {
+        const t = props.t ?? getTranslate()
+        if (props.view === 'summary') return t('pluginSummary')
+        return <MultiDeviceHubPanel t={t} hideHeader />
+      },
+    ),
+  )
+
+  // 4. Register Floating Mode Switcher & Persistent Native Keep-Alive Viewport in `shell.overlay`
   ctx.slots.inject('shell.overlay', () =>
     ctx.slots.register(
       {
@@ -131,51 +192,10 @@ export function apply(ctx: ClientContextLike): void {
         locale: LOCALE_NS,
       },
       (props: { t?: (k: MultiDeviceLocaleKey) => string }) => (
-        <ModeSwitcherOverlay t={props.t ?? getTranslate()} onOpenHubPanel={openHubPanel} />
-      ),
-    ),
-  )
-
-  // 3. Register Global Sidebar Panel icon (`sidebar.panellist`) & Main Panel (`main`)
-  ctx.slots.inject('sidebar.panellist', () =>
-    ctx.slots.register(
-      {
-        name: 'sidebar.panellist',
-        id: PANEL_ID,
-        order: 25,
-        label: () => getTranslate()('panelTitle'),
-      },
-      (props: { size?: number; active?: boolean }) => (
-        <HubPanelIcon size={props.size} active={props.active} />
-      ),
-    ),
-  )
-
-  ctx.slots.inject('main', () =>
-    ctx.slots.register(
-      {
-        name: 'main',
-        key: PANEL_ID,
-        locale: LOCALE_NS,
-      },
-      (props: { t?: (k: MultiDeviceLocaleKey) => string }) => (
-        <MultiDeviceHubPanel t={props.t ?? getTranslate()} />
-      ),
-    ),
-  )
-
-  // 4. Register Settings → Built-in plugins tab (`settings.plugins.tab`)
-  ctx.slots.inject('settings.plugins.tab', () =>
-    ctx.slots.register(
-      {
-        name: 'settings.plugins.tab',
-        id: 'multi-device-hub',
-        order: 8,
-        label: () => getTranslate()('settingsTabTitle'),
-        locale: LOCALE_NS,
-      },
-      (props: { t?: (k: MultiDeviceLocaleKey) => string }) => (
-        <MultiDeviceHubPanel t={props.t ?? getTranslate()} />
+        <ModeSwitcherOverlay
+          t={props.t ?? getTranslate()}
+          onOpenSettings={handleOpenSettings}
+        />
       ),
     ),
   )

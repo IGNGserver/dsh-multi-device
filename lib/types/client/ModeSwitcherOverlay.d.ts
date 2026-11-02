@@ -1,22 +1,8 @@
-/**
- * Floating Mode Switcher & Sidebar Session Row Enhancements.
- *
- * 1. `ModeSwitcherOverlay`: Mounted in `shell.overlay` (`id: 'multi-device-switcher'`).
- *    - Displays a compact top-right pill bar for 1-click switching between
- *      **Aggregated Mode (聚合模式)** and **Native Mode (原生模式)** plus per-device status dots.
- *    - Always keeps the `NativeViewport` mounted in the DOM (hidden via `display: none` while in
- *      Aggregated Mode) so Native Mode keep-alive pages are NEVER unmounted when switching modes!
- * 2. `SessionRowLeadingBadge`, `SessionRowHoverDeviceSection`, `SessionMenuOpenInNativeItem`:
- *    - Official DSH 0.2 slot contributions for `sidebar.session.row.leading`,
- *      `sidebar.session.row.hover`, and `sidebar.workspaces.session.menu.item`.
- *
- * @module dsh-multi-device/client/ModeSwitcherOverlay
- */
 import React from 'react';
 import type { MultiDeviceLocaleKey } from './locales.ts';
-export declare function ModeSwitcherOverlay({ t, onOpenHubPanel, }: {
+export declare function ModeSwitcherOverlay({ t, onOpenSettings, }: {
     t: (key: MultiDeviceLocaleKey) => string;
-    onOpenHubPanel: () => void;
+    onOpenSettings: () => void;
 }): React.ReactElement;
 /** Leading badge inside the 16px idle slot of a remote Session row (`sidebar.session.row.leading`). */
 export declare function SessionRowLeadingBadge({ sessionId }: {

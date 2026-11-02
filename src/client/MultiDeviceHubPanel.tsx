@@ -1,147 +1,228 @@
 /**
- * Multi-Device Management & Git Aggregation Hub Panel (`MultiDeviceHubPanel`).
+ * Native Settings Section for `dsh-multi-device` (`MultiDeviceHubPanel`).
  *
- * Used both as a dedicated main panel (`multi-device-hub`) and inside
- * Settings → Built-in plugins (`settings.plugins.tab`).
+ * Mounted inside Settings → Multi-Device (`settings.section`, `id: 'multi-device'`)
+ * and Plugins → dsh-multi-device (`plugins.bundle.config`).
  *
- * Provides three tabs:
- * 1. Devices & SSH Connections (with `~/.ssh/config` one-click host import, SSH tunnel / HTTP(S)
- *    direct configuration, persistent token/cookie/auto-SSH auth, and live connection test).
- * 2. Git Workspace Aggregation (toggle `autoGitAggregate`, inspect merged Logical Workspaces,
- *    pick preferred device for "+ New Session", split/restore workspaces, and create custom
- *    manual aggregation rules).
- * 3. Native Viewport (embedded Keep-Alive remote DSH Web UI with 1-click fullscreen toggle).
+ * Built 100% with `@deepseek-ai/dsh-client-ui-primitives` following the layout and
+ * interaction conventions of `@deepseek-ai/dsh-client-ui-settings-general` and
+ * `@deepseek-ai/dsh-client-ui-settings-models`:
+ * 1. Global preferences: Display Mode (`SegmentedControl`) & Auto Git Repository
+ *    Aggregation (`Switch`, plus default target device selector only when multi-device
+ *    repositories actually exist).
+ * 2. Remote Devices list: Clean row cards with `StateDot`, `Tag`, 1-click Native UI
+ *    entry, reconnect, inline edit, and `Modal`-confirmed removal.
+ * 3. Streamlined Add/Edit form: Only 3 core inputs visible by default (SSH Host,
+ *    optional Display Name, optional Launch URL / Token), with `~/.ssh/config` quick
+ *    fill and a collapsed `DisclosureRow` for non-default ports, keys, or ProxyJump.
  *
  * @module dsh-multi-device/client/MultiDeviceHubPanel
  */
-import React, { useEffect, useState } from 'react'
 import {
-  type DeviceAuthMode,
+  Button,
+  DisclosureRow,
+  IconEditOutlineRegular,
+  IconPlusOutlineRegular,
+  IconRefreshOutlineRegular,
+  IconRightUpOutlineRegular,
+  IconTrashOutlineRegular,
+  IconWarningOutlineRegular,
+  Input,
+  Modal,
+  SegmentedControl,
+  StateDot,
+  Switch,
+  Tag,
+  Toast,
+  Tooltip,
+} from '@deepseek-ai/dsh-client-ui-primitives'
+import React, { useEffect, useId, useState } from 'react'
+import {
   type DeviceId,
   type DeviceView,
+  type DisplayMode,
   LOCAL_DEVICE_ID,
+  type SshConfigHostEntry,
   type SshKeyEntry,
-  type SshTunnelEngine,
   type UpsertDeviceInput,
-  workspaceMemberKey,
 } from '../contract.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
-import { clientStore, type HubTabId, useMultiDeviceState } from './state.ts'
+import {
+  clientStore,
+  deviceStateToDotState,
+  type HubTabId,
+  parseSshHostInput,
+  useMultiDeviceState,
+} from './state.ts'
 
-export function MultiDeviceHubPanel({
+const EYE_CONTOUR =
+  'M1.5 8C2.9 5.25 5.25 3.5 8 3.5C10.75 3.5 13.1 5.25 14.5 8C13.1 10.75 10.75 12.5 8 12.5C5.25 12.5 2.9 10.75 1.5 8Z'
+const EYE_PATH = `${EYE_CONTOUR}M10 8C10 9.1 9.1 10 8 10C6.9 10 6 9.1 6 8C6 6.9 6.9 6 8 6C9.1 6 10 6.9 10 8Z`
+const EYE_OFF_PATH = `${EYE_CONTOUR}M2.5 2.5L13.5 13.5`
+
+function formatCompactDeviceTarget(dev: DeviceView): string {
+  if (dev.ssh !== undefined) {
+    const userPart = dev.ssh.username !== undefined && dev.ssh.username !== '' ? `${dev.ssh.username}@` : ''
+    const sshPortPart = dev.ssh.port !== undefined && dev.ssh.port !== 22 ? `:${String(dev.ssh.port)}` : ''
+    const remotePortPart =
+      dev.ssh.remotePort !== undefined && dev.ssh.remotePort !== 3080
+        ? ` → :${String(dev.ssh.remotePort)}`
+        : ''
+    return `${userPart}${dev.ssh.host}${sshPortPart}${remotePortPart}`
+  }
+  return dev.targetSummary
+}
+
+function hasCustomAdvancedFields(dev: DeviceView | undefined): boolean {
+  if (dev?.ssh === undefined) return false
+  return (
+    (dev.ssh.remotePort !== undefined && dev.ssh.remotePort !== 3080) ||
+    (dev.ssh.port !== undefined && dev.ssh.port !== 22) ||
+    (dev.ssh.username !== undefined && dev.ssh.username !== '') ||
+    (dev.ssh.privateKeyPath !== undefined && dev.ssh.privateKeyPath !== '') ||
+    (dev.ssh.proxyJump !== undefined && dev.ssh.proxyJump !== '')
+  )
+}
+
+function SecretCredentialInput({
+  id,
+  value,
+  placeholder,
+  disabled,
   t,
-  defaultTab = 'devices',
+  onChange,
 }: {
+  id: string
+  value: string
+  placeholder: string
+  disabled: boolean
   t: (key: MultiDeviceLocaleKey) => string
-  defaultTab?: HubTabId
+  onChange: (next: string) => void
 }): React.ReactElement {
-  const state = useMultiDeviceState()
-  const [tab, setTab] = useState<HubTabId>(defaultTab)
-  const [editingDevice, setEditingDevice] = useState<DeviceView | null>(null)
-  const [showAddForm, setShowAddForm] = useState(false)
+  const [revealedValue, setRevealedValue] = useState<string | undefined>(undefined)
+  const revealed = value.length > 0 && revealedValue === value
 
-  // Device Form State
-  const [name, setName] = useState('')
-  const [label, setLabel] = useState('')
-  const [sshHost, setSshHost] = useState('')
-  const [sshUser, setSshUser] = useState('')
-  const [sshPort, setSshPort] = useState('22')
-  const [sshKeyPath, setSshKeyPath] = useState('')
-  const [sshPassphrase, setSshPassphrase] = useState('')
-  const [sshKeys, setSshKeys] = useState<readonly SshKeyEntry[]>([])
-  const [sshProxyJump, setSshProxyJump] = useState('')
-  const [remotePort, setRemotePort] = useState('3080')
-  const [sshEngine, setSshEngine] = useState<SshTunnelEngine>('auto')
-  const [authMode, setAuthMode] = useState<DeviceAuthMode>('auto')
+  return (
+    <div className="dsh-md-secret-wrap">
+      <Input
+        id={id}
+        className="dsh-md-secret-input"
+        type={revealed ? 'text' : 'password'}
+        autoComplete="new-password"
+        value={value}
+        placeholder={placeholder}
+        disabled={disabled}
+        onChange={(e) => {
+          setRevealedValue(undefined)
+          onChange(e.currentTarget.value)
+        }}
+      />
+      {value.length > 0 && (
+        <Button
+          variant="ghost"
+          size="icon"
+          className="dsh-md-secret-toggle"
+          aria-label={t(revealed ? 'keyHide' : 'keyReveal')}
+          aria-pressed={revealed}
+          disabled={disabled}
+          onClick={() => {
+            setRevealedValue(revealed ? undefined : value)
+          }}
+        >
+          <svg
+            width={14}
+            height={14}
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.3}
+            strokeLinecap="round"
+            aria-hidden="true"
+          >
+            <path d={revealed ? EYE_OFF_PATH : EYE_PATH} />
+          </svg>
+        </Button>
+      )}
+    </div>
+  )
+}
+
+function DeviceEditorForm({
+  device,
+  sshConfigHosts,
+  sshKeys,
+  t,
+  onSaved,
+  onCancel,
+}: {
+  device?: DeviceView
+  sshConfigHosts: readonly SshConfigHostEntry[]
+  sshKeys: readonly SshKeyEntry[]
+  t: (key: MultiDeviceLocaleKey) => string
+  onSaved: () => void
+  onCancel: () => void
+}): React.ReactElement {
+  const formId = useId()
+  const [sshHost, setSshHost] = useState(device?.ssh?.host ?? '')
+  const [name, setName] = useState(device?.name ?? '')
   const [authCredential, setAuthCredential] = useState('')
-  const [keepNativeAlive, setKeepNativeAlive] = useState(true)
+  const [advancedOpen, setAdvancedOpen] = useState(() => hasCustomAdvancedFields(device))
+  const [remotePort, setRemotePort] = useState(String(device?.ssh?.remotePort ?? 3080))
+  const [sshUser, setSshUser] = useState(device?.ssh?.username ?? '')
+  const [sshPort, setSshPort] = useState(String(device?.ssh?.port ?? 22))
+  const [sshKeyPath, setSshKeyPath] = useState(device?.ssh?.privateKeyPath ?? '')
+  const [sshPassphrase, setSshPassphrase] = useState('')
+  const [sshProxyJump, setSshProxyJump] = useState(device?.ssh?.proxyJump ?? '')
 
   const [testing, setTesting] = useState(false)
-  const [testFeedback, setTestFeedback] = useState<{ ok: boolean; text: string } | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
 
-  // Manual Rule Builder State
-  const [ruleTitle, setRuleTitle] = useState('')
-  const [ruleGitRemote, setRuleGitRemote] = useState('')
-  const [selectedMemberKeys, setSelectedMemberKeys] = useState<Set<string>>(() => new Set())
-  const [remoteWorkspaceDeviceId, setRemoteWorkspaceDeviceId] = useState('')
-  const [remoteWorkspacePath, setRemoteWorkspacePath] = useState('')
-  const [remoteWorkspaceError, setRemoteWorkspaceError] = useState<string | null>(null)
-  const [sessionNotice, setSessionNotice] = useState<string | null>(null)
-  const [actionError, setActionError] = useState<string | null>(null)
+  const selectedKeyEntry = sshKeys.find(k => k.path === sshKeyPath)
+  const showPassphraseField = selectedKeyEntry?.encrypted === true
+  const busy = testing || saving
 
-  const resetForm = (dev?: DeviceView): void => {
-    setTestFeedback(null)
-    setSaveError(null)
-    if (dev === undefined) {
-      setEditingDevice(null)
-      setName('')
-      setLabel('')
-      setSshHost('')
-      setSshUser('')
-      setSshPort('22')
-      setSshKeyPath('')
-      setSshPassphrase('')
-      setSshProxyJump('')
-      setRemotePort('3080')
-      setSshEngine('auto')
-      setAuthMode('auto')
-      setAuthCredential('')
-      setKeepNativeAlive(true)
-      return
+  const buildInput = (): UpsertDeviceInput => {
+    const parsedHost = parseSshHostInput(sshHost)
+    const effectiveHost = parsedHost.host
+    const effectiveUser = sshUser.trim() || parsedHost.username
+    const explicitPort = Number(sshPort)
+    const effectiveSshPort =
+      sshPort.trim() !== '' && explicitPort > 0 && (explicitPort !== 22 || parsedHost.port === undefined)
+        ? explicitPort
+        : (parsedHost.port ?? 22)
+    const parsedRemotePort = Number(remotePort)
+
+    return {
+      ...(device !== undefined ? { id: device.id } : {}),
+      name: name.trim() || effectiveHost || 'remote-device',
+      ...(device?.label !== undefined ? { label: device.label } : {}),
+      enabled: true,
+      keepNativeAlive: device?.keepNativeAlive ?? true,
+      transport: {
+        kind: 'ssh',
+        host: effectiveHost,
+        ...(effectiveUser !== undefined && effectiveUser !== '' ? { username: effectiveUser } : {}),
+        ...(effectiveSshPort > 0 ? { port: effectiveSshPort } : {}),
+        ...(sshKeyPath.trim() !== '' ? { privateKeyPath: sshKeyPath.trim() } : {}),
+        ...(sshPassphrase.trim() !== '' ? { passphrase: sshPassphrase.trim() } : {}),
+        ...(sshProxyJump.trim() !== '' ? { proxyJump: sshProxyJump.trim() } : {}),
+        remotePort: parsedRemotePort > 0 ? parsedRemotePort : 3080,
+        engine: device?.ssh?.engine ?? 'auto',
+      },
+      auth: {
+        mode: 'auto',
+        ...(authCredential.trim() !== '' ? { credential: authCredential.trim() } : {}),
+      },
     }
-    setEditingDevice(dev)
-    setName(dev.name)
-    setLabel(dev.label ?? '')
-    setSshHost(dev.ssh?.host ?? '')
-    setSshUser(dev.ssh?.username ?? '')
-    setSshPort(String(dev.ssh?.port ?? 22))
-    setSshKeyPath(dev.ssh?.privateKeyPath ?? '')
-    setSshPassphrase('')
-    setSshProxyJump(dev.ssh?.proxyJump ?? '')
-    setRemotePort(String(dev.ssh?.remotePort ?? 3080))
-    setSshEngine(dev.ssh?.engine ?? 'auto')
-    setAuthMode('auto')
-    setAuthCredential('')
-    setKeepNativeAlive(dev.keepNativeAlive)
   }
-
-  const buildInputFromForm = (): UpsertDeviceInput => ({
-    ...(editingDevice !== null ? { id: editingDevice.id } : {}),
-    name: name.trim() || sshHost.trim() || 'remote-device',
-    ...(label.trim() !== '' ? { label: label.trim() } : {}),
-    enabled: true,
-    keepNativeAlive,
-    transport: {
-      kind: 'ssh',
-      host: sshHost.trim(),
-      ...(sshUser.trim() !== '' ? { username: sshUser.trim() } : {}),
-      ...(Number(sshPort) > 0 ? { port: Number(sshPort) } : {}),
-      ...(sshKeyPath.trim() !== '' ? { privateKeyPath: sshKeyPath.trim() } : {}),
-      ...(sshPassphrase.trim() !== '' ? { passphrase: sshPassphrase.trim() } : {}),
-      ...(sshProxyJump.trim() !== '' ? { proxyJump: sshProxyJump.trim() } : {}),
-      remotePort: Number(remotePort) > 0 ? Number(remotePort) : 3080,
-      engine: sshEngine,
-    },
-    auth: {
-      mode: authMode,
-      ...(authCredential.trim() !== '' ? { credential: authCredential.trim() } : {}),
-    },
-  })
-
-  const refreshSshKeys = async (): Promise<void> => {
-    setSshKeys(await clientStore.listSshKeys())
-  }
-
-  useEffect(() => {
-    if (showAddForm || editingDevice !== null) {
-      void refreshSshKeys()
-    }
-  }, [showAddForm, editingDevice])
 
   const handleImportSshHost = (alias: string): void => {
-    const entry = state.snapshot.sshConfigHosts.find(h => h.alias === alias)
+    const entry = sshConfigHosts.find(h => h.alias === alias)
     if (entry === undefined) return
+    setTestResult(null)
+    setSaveError(null)
     setSshHost(entry.alias)
     if (name.trim() === '') setName(entry.alias)
     setSshUser(entry.user ?? '')
@@ -150,762 +231,636 @@ export function MultiDeviceHubPanel({
     setSshProxyJump(entry.proxyJump ?? '')
   }
 
-  const handleTestConnection = async (): Promise<void> => {
+  const handleTest = async (): Promise<void> => {
+    if (sshHost.trim() === '' || busy) return
     setTesting(true)
-    setTestFeedback(null)
-    const res = await clientStore.testDevice(buildInputFromForm())
+    setTestResult(null)
+    setSaveError(null)
+    const res = await clientStore.testDevice(buildInput())
     setTesting(false)
     if (res.ok) {
-      setTestFeedback({
+      setTestResult({
         ok: true,
-        text: `✓ Connected (DSH ${res.remoteDshVersion ?? res.protocolVersion}, RTT ${res.latencyMs}ms)`,
+        text: `${t('testPassed')} · DSH ${res.remoteDshVersion ?? res.protocolVersion} · ${String(res.latencyMs)}ms`,
       })
     } else {
-      setTestFeedback({ ok: false, text: `✕ ${res.error}` })
+      setTestResult({ ok: false, text: res.error })
     }
   }
 
-  const handleSaveDevice = async (e: React.FormEvent): Promise<void> => {
+  const handleSubmit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault()
+    if (sshHost.trim() === '' || busy) return
+    setSaving(true)
     setSaveError(null)
-    const res = await clientStore.upsertDevice(buildInputFromForm())
+    const res = await clientStore.upsertDevice(buildInput())
+    setSaving(false)
     if (!res.ok) {
-      setSaveError(res.error ?? 'Failed to save device')
+      setSaveError(res.error ?? t('actionFailed'))
       return
     }
-    setShowAddForm(false)
-    setEditingDevice(null)
+    onSaved()
   }
 
-  const handleCreateRemoteWorkspace = async (): Promise<void> => {
-    setRemoteWorkspaceError(null)
-    if (remoteWorkspaceDeviceId === '' || remoteWorkspacePath.trim() === '') {
-      setRemoteWorkspaceError(t('remoteWorkspaceRequired'))
-      return
-    }
-    const res = await clientStore.createRemoteWorkspace({
-      deviceId: remoteWorkspaceDeviceId as DeviceId,
-      path: remoteWorkspacePath.trim(),
-    })
-    if (!res.ok) {
-      setRemoteWorkspaceError(res.error ?? t('remoteWorkspaceFailed'))
-      return
-    }
-    setRemoteWorkspacePath('')
-  }
-
-  const handleCreateSession = async (deviceId: DeviceId, workspaceId: string): Promise<void> => {
-    setSessionNotice(null)
-    const res = await clientStore.createRemoteSession({ deviceId, workspaceId })
-    setSessionNotice(
-      res.ok
-        ? `✓ ${t('newSessionCreated')} ${res.sessionId ?? ''}`
-        : `✕ ${t('newSessionFailed')}: ${res.error ?? ''}`,
-    )
-  }
-
-  const { snapshot } = state
+  const hasCustomKeyPath =
+    sshKeyPath.trim() !== '' && !sshKeys.some(k => k.path === sshKeyPath)
 
   return (
-    <div className="dsh-md-hub-root">
-      <div className="dsh-md-hub-header">
-        <div>
-          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 600 }}>{t('panelTitle')}</h2>
-          {!snapshot.hostStatus.aggregatedGatewayActive && snapshot.hostStatus.aggregatedGatewayError && (
-            <div style={{ marginTop: 4, fontSize: 12, color: '#f59e0b' }}>
-              ⚠ {t('gatewayDegradedNotice')} ({snapshot.hostStatus.aggregatedGatewayError})
-            </div>
-          )}
-        </div>
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <div className="dsh-md-mode-seg">
-            <button
-              type="button"
-              className="dsh-md-mode-btn"
-              data-active={state.displayMode === 'aggregated' ? 'true' : 'false'}
-              onClick={() => clientStore.setDisplayMode('aggregated')}
-            >
-              {t('modeAggregated')}
-            </button>
-            <button
-              type="button"
-              className="dsh-md-mode-btn"
-              data-active={state.displayMode === 'native' ? 'true' : 'false'}
-              onClick={() => clientStore.setDisplayMode('native')}
-            >
-              {t('modeNative')}
-            </button>
-          </div>
-          <button
-            type="button"
-            className="dsh-md-btn dsh-md-btn-primary"
-            onClick={() => {
-              resetForm()
-              setTab('devices')
-              setShowAddForm(true)
-            }}
+    <form className="dsh-md-editor" onSubmit={(e) => { void handleSubmit(e) }}>
+      <div className="dsh-md-editor-top">
+        <span className="dsh-md-editor-title">
+          {device !== undefined ? t('editDevice') : t('addDevice')}
+        </span>
+        {sshConfigHosts.length > 0 && (
+          <select
+            className="dsh-md-native-select dsh-md-native-select-compact"
+            value=""
+            aria-label={t('importSshPlaceholder')}
+            disabled={busy}
+            onChange={(e) => handleImportSshHost(e.currentTarget.value)}
           >
-            + {t('addDevice')}
-          </button>
+            <option value="" disabled>
+              {t('importSshPlaceholder')}
+            </option>
+            {sshConfigHosts.map((h) => (
+              <option key={h.alias} value={h.alias}>
+                {h.alias} ({h.user ? `${h.user}@` : ''}{h.hostName}{h.port && h.port !== 22 ? `:${String(h.port)}` : ''})
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
+
+      <div className="dsh-md-form-grid">
+        <div className="dsh-md-field">
+          <label className="dsh-md-field-label" htmlFor={`${formId}-host`}>
+            {t('sshHost')}
+          </label>
+          <Input
+            id={`${formId}-host`}
+            required
+            value={sshHost}
+            placeholder={t('sshHostPlaceholder')}
+            disabled={busy}
+            onChange={(e) => {
+              setSshHost(e.currentTarget.value)
+              setTestResult(null)
+            }}
+          />
+        </div>
+
+        <div className="dsh-md-field">
+          <label className="dsh-md-field-label" htmlFor={`${formId}-name`}>
+            {t('deviceName')}
+          </label>
+          <Input
+            id={`${formId}-name`}
+            value={name}
+            placeholder={sshHost.trim() !== '' ? parseSshHostInput(sshHost).host : t('deviceNamePlaceholder')}
+            disabled={busy}
+            onChange={(e) => setName(e.currentTarget.value)}
+          />
         </div>
       </div>
 
-      <div className="dsh-md-tabs" role="tablist">
-        <button
-          type="button"
-          role="tab"
-          className="dsh-md-tab"
-          data-active={tab === 'devices' ? 'true' : 'false'}
-          onClick={() => setTab('devices')}
-        >
-          {t('tabDevices')} ({snapshot.devices.length})
-        </button>
-        <button
-          type="button"
-          role="tab"
-          className="dsh-md-tab"
-          data-active={tab === 'git' ? 'true' : 'false'}
-          onClick={() => setTab('git')}
-        >
-          {t('tabGitAggregation')} ({snapshot.logicalWorkspaces.length})
-        </button>
-        <button
-          type="button"
-          role="tab"
-          className="dsh-md-tab"
-          data-active={tab === 'native' ? 'true' : 'false'}
-          onClick={() => setTab('native')}
-        >
-          {t('tabNative')}
-        </button>
+      <div className="dsh-md-field">
+        <label className="dsh-md-field-label" htmlFor={`${formId}-token`}>
+          {t('authCredential')}
+        </label>
+        <SecretCredentialInput
+          id={`${formId}-token`}
+          value={authCredential}
+          placeholder={t('authCredentialPlaceholder')}
+          disabled={busy}
+          t={t}
+          onChange={(next) => {
+            setAuthCredential(next)
+            setTestResult(null)
+          }}
+        />
       </div>
 
-      {tab === 'devices' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          {(showAddForm || editingDevice !== null) && (
-            <form className="dsh-md-card" onSubmit={(e) => { void handleSaveDevice(e) }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <strong style={{ fontSize: 14 }}>
-                  {editingDevice !== null ? t('editDevice') : t('addDevice')}
-                </strong>
-                {snapshot.sshConfigHosts.length > 0 && (
-                  <select
-                    className="dsh-md-select"
-                    defaultValue=""
-                    aria-label={t('importSshConfig')}
-                    onChange={(e) => handleImportSshHost(e.currentTarget.value)}
-                  >
-                    <option value="" disabled>
-                      ⚡ {t('selectSshHostPlaceholder')}
-                    </option>
-                    {snapshot.sshConfigHosts.map((h) => (
-                      <option key={h.alias} value={h.alias}>
-                        {h.alias} ({h.user ? `${h.user}@` : ''}{h.hostName}{h.port && h.port !== 22 ? `:${h.port}` : ''})
-                      </option>
-                    ))}
-                  </select>
-                )}
-              </div>
+      <DisclosureRow
+        title={<span className="dsh-md-field-label">{t('advancedOptions')}</span>}
+        open={advancedOpen}
+        expandable
+        expandOnRowClick
+        onToggle={() => setAdvancedOpen(prev => !prev)}
+      >
+        <div className="dsh-md-form-grid dsh-md-advanced-body">
+          <div className="dsh-md-field">
+            <label className="dsh-md-field-label" htmlFor={`${formId}-rport`}>
+              {t('remoteDshPort')}
+            </label>
+            <Input
+              id={`${formId}-rport`}
+              type="number"
+              min={1}
+              max={65535}
+              value={remotePort}
+              disabled={busy}
+              onChange={(e) => setRemotePort(e.currentTarget.value)}
+            />
+          </div>
 
-              <div className="dsh-md-grid">
-                <div className="dsh-md-field">
-                  <label>{t('deviceName')}</label>
-                  <input
-                    className="dsh-md-input"
-                    required
-                    value={name}
-                    placeholder={t('deviceNamePlaceholder')}
-                    onChange={e => setName(e.currentTarget.value)}
-                  />
-                </div>
-                <div className="dsh-md-field">
-                  <label>{t('deviceLabel')}</label>
-                  <input
-                    className="dsh-md-input"
-                    value={label}
-                    placeholder={t('deviceLabelPlaceholder')}
-                    onChange={e => setLabel(e.currentTarget.value)}
-                  />
-                </div>
-              </div>
+          <div className="dsh-md-field">
+            <label className="dsh-md-field-label" htmlFor={`${formId}-user`}>
+              {t('sshUser')}
+            </label>
+            <Input
+              id={`${formId}-user`}
+              value={sshUser}
+              placeholder={t('sshUserPlaceholder')}
+              disabled={busy}
+              onChange={(e) => setSshUser(e.currentTarget.value)}
+            />
+          </div>
 
-              <div className="dsh-md-grid">
-                <div className="dsh-md-field">
-                  <label>{t('sshHost')}</label>
-                  <input
-                    className="dsh-md-input"
-                    required
-                    value={sshHost}
-                    placeholder={t('sshHostPlaceholder')}
-                    onChange={e => setSshHost(e.currentTarget.value)}
-                  />
-                </div>
-                <div className="dsh-md-field">
-                  <label>{t('sshUser')}</label>
-                  <input
-                    className="dsh-md-input"
-                    value={sshUser}
-                    placeholder="root / ubuntu"
-                    onChange={e => setSshUser(e.currentTarget.value)}
-                  />
-                </div>
-                <div className="dsh-md-field">
-                  <label>{t('sshPort')}</label>
-                  <input
-                    className="dsh-md-input"
-                    type="number"
-                    value={sshPort}
-                    onChange={e => setSshPort(e.currentTarget.value)}
-                  />
-                </div>
-                <div className="dsh-md-field">
-                  <label>{t('remoteDshPort')}</label>
-                  <input
-                    className="dsh-md-input"
-                    type="number"
-                    value={remotePort}
-                    onChange={e => setRemotePort(e.currentTarget.value)}
-                  />
-                </div>
-                <div className="dsh-md-field">
-                  <label>{t('sshKeySelect')}</label>
-                  <select
-                    className="dsh-md-select"
-                    value={sshKeyPath}
-                    onChange={e => setSshKeyPath(e.currentTarget.value)}
-                  >
-                    <option value="">{t('sshKeyAuto')}</option>
-                    {sshKeys.map(key => (
-                      <option key={key.path} value={key.path}>
-                        {key.name}{key.encrypted ? ' (🔒)' : ''}{key.permissionsTooOpen ? ' ⚠' : ''}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div className="dsh-md-field">
-                  <label>{t('sshKeyPath')}</label>
-                  <input
-                    className="dsh-md-input"
-                    value={sshKeyPath}
-                    placeholder="~/.ssh/id_ed25519"
-                    onChange={e => setSshKeyPath(e.currentTarget.value)}
-                  />
-                </div>
-                <div className="dsh-md-field">
-                  <label>{t('sshKeyPassphrase')}</label>
-                  <input
-                    className="dsh-md-input"
-                    type="password"
-                    autoComplete="new-password"
-                    value={sshPassphrase}
-                    placeholder={t('sshKeyPassphrasePlaceholder')}
-                    onChange={e => setSshPassphrase(e.currentTarget.value)}
-                  />
-                </div>
-                <div className="dsh-md-field">
-                  <label>{t('sshProxyJump')}</label>
-                  <input
-                    className="dsh-md-input"
-                    value={sshProxyJump}
-                    placeholder="bastion-host"
-                    onChange={e => setSshProxyJump(e.currentTarget.value)}
-                  />
-                </div>
-                <div className="dsh-md-field">
-                  <label>{t('sshEngine')}</label>
-                  <select
-                    className="dsh-md-select"
-                    value={sshEngine}
-                    onChange={e => setSshEngine(e.currentTarget.value as SshTunnelEngine)}
-                  >
-                    <option value="auto">{t('sshEngineAuto')}</option>
-                    <option value="system-ssh">{t('sshEngineSystem')}</option>
-                    <option value="ssh2">{t('sshEngineSsh2')}</option>
-                  </select>
-                </div>
-              </div>
+          <div className="dsh-md-field">
+            <label className="dsh-md-field-label" htmlFor={`${formId}-port`}>
+              {t('sshPort')}
+            </label>
+            <Input
+              id={`${formId}-port`}
+              type="number"
+              min={1}
+              max={65535}
+              value={sshPort}
+              disabled={busy}
+              onChange={(e) => setSshPort(e.currentTarget.value)}
+            />
+          </div>
 
-              <div className="dsh-md-grid">
-                <div className="dsh-md-field">
-                  <label>{t('authMode')}</label>
-                  <select
-                    className="dsh-md-select"
-                    value={authMode}
-                    onChange={e => setAuthMode(e.currentTarget.value as DeviceAuthMode)}
-                  >
-                    <option value="auto">{t('authAuto')}</option>
-                    <option value="token">{t('authToken')}</option>
-                    <option value="cookie">{t('authCookie')}</option>
-                    <option value="bearer">{t('authBearer')}</option>
-                    <option value="none">{t('authNone')}</option>
-                  </select>
-                </div>
-                {authMode !== 'none' && (
-                  <div className="dsh-md-field">
-                    <label>{t('authCredential')}</label>
-                    <input
-                      className="dsh-md-input"
-                      type="password"
-                      autoComplete="new-password"
-                      value={authCredential}
-                      placeholder={t('authCredentialPlaceholder')}
-                      onChange={e => setAuthCredential(e.currentTarget.value)}
-                    />
-                  </div>
-                )}
-              </div>
-
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, cursor: 'pointer' }}>
-                <input
-                  type="checkbox"
-                  checked={keepNativeAlive}
-                  onChange={e => setKeepNativeAlive(e.currentTarget.checked)}
-                />
-                {t('keepNativeAlive')}
-              </label>
-
-              {testFeedback !== null && (
-                <div style={{ fontSize: 12, color: testFeedback.ok ? '#10b981' : '#ef4444' }}>
-                  {testFeedback.text}
-                </div>
+          <div className="dsh-md-field">
+            <label className="dsh-md-field-label" htmlFor={`${formId}-key`}>
+              {t('sshKeySelect')}
+            </label>
+            <select
+              id={`${formId}-key`}
+              className="dsh-md-native-select"
+              value={sshKeyPath}
+              disabled={busy}
+              onChange={(e) => setSshKeyPath(e.currentTarget.value)}
+            >
+              <option value="">{t('sshKeyAuto')}</option>
+              {hasCustomKeyPath && (
+                <option value={sshKeyPath}>{sshKeyPath}</option>
               )}
-              {saveError !== null && (
-                <div style={{ fontSize: 12, color: '#ef4444' }}>{saveError}</div>
-              )}
-
-              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                <button
-                  type="button"
-                  className="dsh-md-btn"
-                  disabled={testing}
-                  onClick={() => { void handleTestConnection() }}
-                >
-                  {testing ? t('testingConnection') : t('testConnection')}
-                </button>
-                <button
-                  type="button"
-                  className="dsh-md-btn"
-                  onClick={() => {
-                    setShowAddForm(false)
-                    setEditingDevice(null)
-                  }}
-                >
-                  {t('cancel')}
-                </button>
-                <button type="submit" className="dsh-md-btn dsh-md-btn-primary">
-                  {t('saveDevice')}
-                </button>
-              </div>
-            </form>
-          )}
-
-          {actionError !== null && tab === 'devices' && (
-            <div style={{ fontSize: 12, color: '#ef4444' }}>{actionError}</div>
-          )}
-
-          {snapshot.devices.length === 0 ? (
-            <div className="dsh-md-card" style={{ alignItems: 'center', textAlign: 'center', padding: 32 }}>
-              <div style={{ fontSize: 15, fontWeight: 600 }}>{t('noDevicesTitle')}</div>
-              <div style={{ fontSize: 13, color: 'var(--dsw-alias-label-tertiary, #9ca3af)', maxWidth: 460 }}>
-                {t('noDevicesDesc')}
-              </div>
-            </div>
-          ) : (
-            <div className="dsh-md-grid">
-              {snapshot.devices.map((dev) => (
-                <div key={dev.id} className="dsh-md-card">
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <span className="dsh-md-dot" data-state={dev.state} />
-                      <strong style={{ fontSize: 14 }}>{dev.name}</strong>
-                      {dev.label !== undefined && <span className="dsh-md-badge">{dev.label}</span>}
-                    </div>
-                    <span className="dsh-md-badge">
-                      {dev.state === 'connected'
-                        ? t('statusConnected')
-                        : dev.state === 'connecting'
-                          ? t('statusConnecting')
-                          : dev.state === 'reconnecting'
-                            ? t('statusReconnecting')
-                            : dev.state === 'error'
-                              ? t('statusError')
-                              : t('statusDisabled')}
-                    </span>
-                  </div>
-
-                  <div style={{ fontSize: 12, color: 'var(--dsw-alias-label-secondary, #9ca3af)', wordBreak: 'break-all' }}>
-                    {dev.targetSummary}
-                  </div>
-
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                    <span className="dsh-md-badge"> Workspaces: {dev.workspaceCount}</span>
-                    <span className="dsh-md-badge">Sessions: {dev.sessionCount}</span>
-                    {dev.runningSessionCount > 0 && (
-                      <span className="dsh-md-badge" style={{ color: '#60a5fa' }}>
-                        Running: {dev.runningSessionCount}
-                      </span>
-                    )}
-                    {dev.pendingApprovalCount > 0 && (
-                      <span className="dsh-md-badge" style={{ color: '#f59e0b' }}>
-                        Pending Approval: {dev.pendingApprovalCount}
-                      </span>
-                    )}
-                    {dev.latencyMs !== undefined && (
-                      <span className="dsh-md-badge">{dev.latencyMs}ms</span>
-                    )}
-                    {dev.remoteDshVersion !== undefined && (
-                      <span className="dsh-md-badge">DSH {dev.remoteDshVersion}</span>
-                    )}
-                  </div>
-
-                  {dev.lastError !== undefined && (
-                    <div style={{ fontSize: 11, color: '#ef4444', wordBreak: 'break-word' }}>
-                      {dev.lastError}
-                    </div>
-                  )}
-
-                  <div style={{ display: 'flex', gap: 6, marginTop: 'auto', pt: 4 } as React.CSSProperties}>
-                    <button
-                      type="button"
-                      className="dsh-md-btn dsh-md-btn-primary"
-                      onClick={() => clientStore.selectNativeDevice(dev.id)}
-                    >
-                      {t('openNative')}
-                    </button>
-                    <button
-                      type="button"
-                      className="dsh-md-btn"
-                      onClick={() => {
-                        void clientStore.reconnectDevice(dev.id).then((res) => {
-                          setActionError(res.ok ? null : `${t('actionFailed')}: ${res.error ?? ''}`)
-                        })
-                      }}
-                    >
-                      {t('reconnect')}
-                    </button>
-                    <button
-                      type="button"
-                      className="dsh-md-btn"
-                      onClick={() => {
-                        resetForm(dev)
-                        setTab('devices')
-                        setShowAddForm(true)
-                      }}
-                    >
-                      {t('editDevice')}
-                    </button>
-                    <button
-                      type="button"
-                      className="dsh-md-btn dsh-md-btn-danger"
-                      onClick={() => {
-                        void clientStore.removeDevice(dev.id).then((res) => {
-                          setActionError(res.ok ? null : `${t('actionFailed')}: ${res.error ?? ''}`)
-                        })
-                      }}
-                    >
-                      {t('remove')}
-                    </button>
-                  </div>
-                </div>
+              {sshKeys.map((key) => (
+                <option key={key.path} value={key.path}>
+                  {key.name}{key.encrypted ? ' (encrypted)' : ''}{key.permissionsTooOpen ? ' (!)' : ''}
+                </option>
               ))}
+            </select>
+          </div>
+
+          {showPassphraseField && (
+            <div className="dsh-md-field">
+              <label className="dsh-md-field-label" htmlFor={`${formId}-passphrase`}>
+                {t('sshKeyPassphrase')}
+              </label>
+              <SecretCredentialInput
+                id={`${formId}-passphrase`}
+                value={sshPassphrase}
+                placeholder={t('sshKeyPassphrasePlaceholder')}
+                disabled={busy}
+                t={t}
+                onChange={setSshPassphrase}
+              />
             </div>
           )}
+
+          <div className="dsh-md-field">
+            <label className="dsh-md-field-label" htmlFor={`${formId}-jump`}>
+              {t('sshProxyJump')}
+            </label>
+            <Input
+              id={`${formId}-jump`}
+              value={sshProxyJump}
+              placeholder={t('sshProxyJumpPlaceholder')}
+              disabled={busy}
+              onChange={(e) => setSshProxyJump(e.currentTarget.value)}
+            />
+          </div>
+        </div>
+      </DisclosureRow>
+
+      {saveError !== null && (
+        <p className="dsh-md-error-text" role="alert">
+          {saveError}
+        </p>
+      )}
+
+      <div className="dsh-md-editor-footer">
+        <div className="dsh-md-editor-footer-left">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={busy || sshHost.trim() === ''}
+            icon={testing ? <StateDot state="ongoing" size={12} /> : undefined}
+            onClick={() => { void handleTest() }}
+          >
+            {testing ? t('testingConnection') : t('testConnection')}
+          </Button>
+          {testResult !== null && (
+            testResult.ok ? (
+              <span className="dsh-md-success-text">
+                <StateDot state="done" size={8} />
+                {testResult.text}
+              </span>
+            ) : (
+              <span className="dsh-md-error-text" role="alert">
+                {testResult.text}
+              </span>
+            )
+          )}
+        </div>
+
+        <div className="dsh-md-editor-footer-right">
+          <Button variant="outline" size="sm" disabled={busy} onClick={onCancel}>
+            {t('cancel')}
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
+            type="submit"
+            disabled={busy || sshHost.trim() === ''}
+          >
+            {saving ? t('savingDevice') : t('saveDevice')}
+          </Button>
+        </div>
+      </div>
+    </form>
+  )
+}
+
+export function MultiDeviceHubPanel({
+  t,
+  onCloseSettings,
+  hideHeader = false,
+}: {
+  t: (key: MultiDeviceLocaleKey) => string
+  defaultTab?: HubTabId
+  onCloseSettings?: () => void
+  hideHeader?: boolean
+}): React.ReactElement {
+  const state = useMultiDeviceState()
+  const { snapshot } = state
+  const modeSegId = useId()
+
+  const [addingNew, setAddingNew] = useState(false)
+  const [editingDeviceId, setEditingDeviceId] = useState<DeviceId | null>(null)
+  const [sshKeys, setSshKeys] = useState<readonly SshKeyEntry[]>([])
+  const [aggBusy, setAggBusy] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<DeviceView | null>(null)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [toastNotice, setToastNotice] = useState<{
+    seq: number
+    text: string
+    tone?: 'success' | 'warning' | 'error'
+  } | null>(null)
+
+  const pushToast = (text: string, tone?: 'success' | 'warning' | 'error'): void => {
+    setToastNotice(prev => ({
+      seq: (prev?.seq ?? 0) + 1,
+      text,
+      ...(tone !== undefined ? { tone } : {}),
+    }))
+  }
+
+  useEffect(() => {
+    if (addingNew || editingDeviceId !== null) {
+      void clientStore.listSshKeys().then(setSshKeys)
+    }
+  }, [addingNew, editingDeviceId])
+
+  const mergedWorkspaces = snapshot.logicalWorkspaces.filter(w => w.members.length > 1)
+  const hasDevices = snapshot.devices.length > 0
+
+  const handleConfirmDelete = async (): Promise<void> => {
+    if (deleteTarget === null || deleting) return
+    setDeleting(true)
+    setDeleteError(null)
+    const res = await clientStore.removeDevice(deleteTarget.id)
+    setDeleting(false)
+    if (!res.ok) {
+      setDeleteError(res.error ?? t('actionFailed'))
+      return
+    }
+    if (editingDeviceId === deleteTarget.id) {
+      setEditingDeviceId(null)
+    }
+    setDeleteTarget(null)
+    pushToast(t('savedNotice'), 'success')
+  }
+
+  return (
+    <div className="dsh-md-section">
+      {!hideHeader && (
+        <div>
+          <h2 className="dsh-md-section-title">{t('settingsSectionTitle')}</h2>
+          <p className="dsh-md-section-intro">{t('settingsSectionIntro')}</p>
         </div>
       )}
 
-      {tab === 'git' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <div className="dsh-md-card" style={{ borderColor: 'rgba(96, 165, 250, 0.35)' }}>
-            <div style={{ fontSize: 12, color: 'var(--dsw-alias-label-secondary, #9ca3af)' }}>
-              {t('aggregatedScopeNotice')}
-            </div>
-            {sessionNotice !== null && (
-              <div style={{ fontSize: 12, color: sessionNotice.startsWith('✓') ? '#10b981' : '#ef4444' }}>
-                {sessionNotice}
-              </div>
-            )}
-            {actionError !== null && (
-              <div style={{ fontSize: 12, color: '#ef4444' }}>{actionError}</div>
-            )}
+      {!snapshot.hostStatus.aggregatedGatewayActive &&
+        snapshot.hostStatus.aggregatedGatewayError !== undefined && (
+          <p className="dsh-md-notice-warn" role="status">
+            <IconWarningOutlineRegular size={14} />
+            <span>
+              {t('gatewayDegradedNotice')} ({snapshot.hostStatus.aggregatedGatewayError})
+            </span>
+          </p>
+        )}
+
+      {/* Global Preferences (aligned with DSH General Settings rows) */}
+      <div className="dsh-md-pref-list">
+        <div className="dsh-md-pref-row">
+          <div>
+            <div className="dsh-md-pref-title">{t('modeRowTitle')}</div>
+            <div className="dsh-md-pref-desc">{t('modeRowDesc')}</div>
           </div>
-          <div className="dsh-md-card">
-            <strong style={{ fontSize: 14 }}>{t('gitAutoTitle')}</strong>
-            <div style={{ fontSize: 12, color: 'var(--dsw-alias-label-secondary, #9ca3af)' }}>
-              {t('gitAutoDesc')}
-            </div>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' }}>
-              <input
-                type="checkbox"
-                checked={snapshot.aggregationConfig.autoGitAggregate}
-                onChange={(e) => {
-                  const enabled = e.currentTarget.checked
-                  void clientStore.updateAggregationConfig({
-                    autoGitAggregate: enabled,
-                  }).then((res) => {
-                    setActionError(res.ok ? null : `${t('actionFailed')}: ${res.error ?? ''}`)
-                  })
-                }}
-              />
-              {t('gitAutoToggle')}
-            </label>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' }}>
-              <input
-                type="checkbox"
-                checked={snapshot.aggregationConfig.prefixUnmatchedWithDevice}
-                onChange={(e) => {
-                  const enabled = e.currentTarget.checked
-                  void clientStore.updateAggregationConfig({
-                    prefixUnmatchedWithDevice: enabled,
-                  }).then((res) => {
-                    setActionError(res.ok ? null : `${t('actionFailed')}: ${res.error ?? ''}`)
-                  })
-                }}
-              />
-              {t('gitPrefixToggle')}
-            </label>
+          <SegmentedControl<DisplayMode>
+            id={modeSegId}
+            label={t('modeRowTitle')}
+            value={state.displayMode}
+            options={[
+              { value: 'aggregated', label: t('modeAggregated') },
+              {
+                value: 'native',
+                label: t('modeNative'),
+                disabled: !hasDevices,
+                ...(!hasDevices ? { title: t('modeNativeNoDeviceHint') } : {}),
+              },
+            ]}
+            onChange={(next) => {
+              clientStore.setDisplayMode(next)
+              if (next === 'native') {
+                onCloseSettings?.()
+              }
+            }}
+          />
+        </div>
+
+        <div className="dsh-md-pref-row">
+          <div>
+            <div className="dsh-md-pref-title">{t('gitAutoTitle')}</div>
+            <div className="dsh-md-pref-desc">{t('gitAutoDesc')}</div>
           </div>
+          <Switch
+            checked={snapshot.aggregationConfig.autoGitAggregate}
+            label={t('gitAutoTitle')}
+            disabled={aggBusy}
+            onChange={(enabled) => {
+              setAggBusy(true)
+              void clientStore
+                .updateAggregationConfig({ autoGitAggregate: enabled })
+                .then((res) => {
+                  if (!res.ok) {
+                    pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
+                  }
+                })
+                .finally(() => {
+                  setAggBusy(false)
+                })
+            }}
+          />
+        </div>
 
-          <div className="dsh-md-card">
-            <strong style={{ fontSize: 14 }}>{t('logicalWorkspacesHeading')}</strong>
-            {snapshot.logicalWorkspaces.map((lws) => (
-              <div
-                key={lws.logicalWorkspaceId}
-                style={{
-                  padding: '10px 12px',
-                  borderRadius: 8,
-                  border: '0.5px solid var(--dsw-alias-border-l2, rgba(255,255,255,0.1))',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 6,
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <strong>{lws.title}</strong>
-                    <span className="dsh-md-badge">{lws.kind.toUpperCase()}</span>
-                    {lws.gitRemote !== undefined && (
-                      <span className="dsh-md-badge" style={{ color: '#60a5fa' }}>
-                        ⎇ {lws.gitRemote}
-                      </span>
-                    )}
-                    <span className="dsh-md-badge">Sessions: {lws.sessionIds.length}</span>
-                  </div>
-
-                  {lws.members.length > 1 && (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
-                      <span>{t('targetDeviceForNewSession')}</span>
-                      <select
-                        className="dsh-md-select"
-                        style={{ height: 26 }}
-                        value={lws.targetDeviceId}
-                        onChange={(e) => {
-                          void clientStore.setPreferredDevice(
-                            lws.logicalWorkspaceId,
-                            e.currentTarget.value as DeviceId,
-                          )
-                        }}
-                      >
-                        {lws.members.map(m => (
-                          <option key={`${m.deviceId}:${m.path}`} value={m.deviceId}>
-                            {m.deviceName} ({m.path})
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  )}
-                </div>
-
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                  {lws.members.map((m) => {
-                    const memberKey = workspaceMemberKey(m.deviceId, m.path)
-                    const isExcluded = snapshot.aggregationConfig.excludedMemberKeys.includes(memberKey)
-                    return (
-                      <span key={memberKey} className="dsh-md-badge">
-                        🖥 {m.deviceId === LOCAL_DEVICE_ID ? 'Local' : m.deviceName}: {m.path} ({m.sessionCount})
-                        {m.deviceId !== LOCAL_DEVICE_ID && (
-                          <button
-                            type="button"
-                            title={t('newSessionHere')}
-                            onClick={() => { void handleCreateSession(m.deviceId, m.remoteWorkspaceId) }}
-                            style={{
-                              border: 'none',
-                              background: 'transparent',
-                              color: '#60a5fa',
-                              cursor: 'pointer',
-                              marginLeft: 4,
-                              fontSize: 11,
-                            }}
-                          >
-                            ＋
-                          </button>
-                        )}
-                        {lws.kind === 'git' && (
-                          <button
-                            type="button"
-                            title={t('splitWorkspace')}
-                            onClick={() => {
-                              void clientStore.setMemberExcluded(memberKey, !isExcluded).then((res) => {
-                                setActionError(res.ok ? null : `${t('actionFailed')}: ${res.error ?? ''}`)
-                              })
-                            }}
-                            style={{
-                              border: 'none',
-                              background: 'transparent',
-                              color: '#f59e0b',
-                              cursor: 'pointer',
-                              marginLeft: 4,
-                              fontSize: 11,
-                            }}
-                          >
-                            {isExcluded ? t('restoreAutoMerge') : '×'}
-                          </button>
-                        )}
-                      </span>
+        {snapshot.aggregationConfig.autoGitAggregate && mergedWorkspaces.length > 0 && (
+          <div className="dsh-md-merged-repos">
+            <div className="dsh-md-merged-repos-label">{t('targetDeviceHeading')}</div>
+            {mergedWorkspaces.map((lws) => (
+              <div key={lws.logicalWorkspaceId} className="dsh-md-merged-repo-row">
+                <span className="dsh-md-merged-repo-name" title={lws.gitRemote ?? lws.title}>
+                  {lws.title}
+                </span>
+                <select
+                  className="dsh-md-native-select dsh-md-native-select-compact"
+                  value={lws.targetDeviceId}
+                  aria-label={`${lws.title} - ${t('targetDeviceHeading')}`}
+                  onChange={(e) => {
+                    void clientStore.setPreferredDevice(
+                      lws.logicalWorkspaceId,
+                      e.currentTarget.value as DeviceId,
                     )
-                  })}
-                </div>
+                  }}
+                >
+                  {lws.members.map(m => (
+                    <option key={`${m.deviceId}:${m.path}`} value={m.deviceId}>
+                      {m.deviceId === LOCAL_DEVICE_ID ? 'Local' : m.deviceName} ({m.path})
+                    </option>
+                  ))}
+                </select>
               </div>
             ))}
           </div>
+        )}
+      </div>
 
-          {snapshot.devices.length > 0 && (
-            <div className="dsh-md-card">
-              <strong style={{ fontSize: 14 }}>{t('remoteWorkspaceHeading')}</strong>
-              <div style={{ fontSize: 12, color: 'var(--dsw-alias-label-secondary, #9ca3af)' }}>
-                {t('remoteWorkspaceDesc')}
-              </div>
-              <div className="dsh-md-grid">
-                <div className="dsh-md-field">
-                  <label>{t('remoteWorkspaceDevice')}</label>
-                  <select
-                    className="dsh-md-select"
-                    value={remoteWorkspaceDeviceId}
-                    onChange={e => setRemoteWorkspaceDeviceId(e.currentTarget.value)}
-                  >
-                    <option value="">{t('remoteWorkspaceDevicePlaceholder')}</option>
-                    {snapshot.devices.map(device => (
-                      <option key={device.id} value={device.id}>
-                        {device.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div className="dsh-md-field">
-                  <label>{t('remoteWorkspacePath')}</label>
-                  <input
-                    className="dsh-md-input"
-                    value={remoteWorkspacePath}
-                    placeholder={t('remoteWorkspacePlaceholder')}
-                    onChange={e => setRemoteWorkspacePath(e.currentTarget.value)}
-                  />
-                </div>
-              </div>
-              {remoteWorkspaceError !== null && (
-                <div style={{ fontSize: 12, color: '#ef4444' }}>{remoteWorkspaceError}</div>
-              )}
-              <div>
-                <button
-                  type="button"
-                  className="dsh-md-btn dsh-md-btn-primary"
-                  onClick={() => { void handleCreateRemoteWorkspace() }}
-                >
-                  + {t('addRemoteWorkspace')}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {snapshot.allPhysicalWorkspaces.length > 0 && (
-            <div className="dsh-md-card">
-              <strong style={{ fontSize: 14 }}>{t('manualRuleBuilderTitle')}</strong>
-              <div className="dsh-md-grid">
-                <div className="dsh-md-field">
-                  <input
-                    className="dsh-md-input"
-                    value={ruleTitle}
-                    placeholder={t('manualRuleNamePlaceholder')}
-                    onChange={e => setRuleTitle(e.currentTarget.value)}
-                  />
-                </div>
-                <div className="dsh-md-field">
-                  <input
-                    className="dsh-md-input"
-                    value={ruleGitRemote}
-                    placeholder={t('manualRuleGitPlaceholder')}
-                    onChange={e => setRuleGitRemote(e.currentTarget.value)}
-                  />
-                </div>
-              </div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                {snapshot.allPhysicalWorkspaces.map((pw) => {
-                  const key = workspaceMemberKey(pw.deviceId, pw.path)
-                  const checked = selectedMemberKeys.has(key)
-                  return (
-                    <label
-                      key={key}
-                      className="dsh-md-badge"
-                      style={{ cursor: 'pointer', padding: '4px 8px' }}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={(e) => {
-                          const next = new Set(selectedMemberKeys)
-                          if (e.currentTarget.checked) next.add(key)
-                          else next.delete(key)
-                          setSelectedMemberKeys(next)
-                        }}
-                      />
-                      {pw.deviceName}: {pw.path}
-                    </label>
-                  )
-                })}
-              </div>
-              <div>
-                <button
-                  type="button"
-                  className="dsh-md-btn dsh-md-btn-primary"
-                  disabled={ruleTitle.trim() === '' || (selectedMemberKeys.size === 0 && ruleGitRemote.trim() === '')}
-                  onClick={() => {
-                    void clientStore.upsertManualRule({
-                      id: `rule-${Date.now()}`,
-                      title: ruleTitle.trim(),
-                      memberKeys: [...selectedMemberKeys],
-                      ...(ruleGitRemote.trim() !== '' ? { gitRemote: ruleGitRemote.trim() } : {}),
-                    })
-                    setRuleTitle('')
-                    setRuleGitRemote('')
-                    setSelectedMemberKeys(new Set())
-                  }}
-                >
-                  + {t('createManualRule')}
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {tab === 'native' && (
-        <div className="dsh-md-card" style={{ alignItems: 'flex-start' }}>
-          <strong style={{ fontSize: 14 }}>{t('nativeTabHintTitle')}</strong>
-          <div style={{ fontSize: 12, color: 'var(--dsw-alias-label-secondary, #9ca3af)' }}>
-            {t('nativeTabHint')}
-          </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button
-              type="button"
-              className="dsh-md-btn dsh-md-btn-primary"
-              onClick={() => clientStore.setDisplayMode('native')}
+      {/* Remote Devices List & Inline Editor (aligned with DSH Models Settings cards) */}
+      <div className="dsh-md-devices-block">
+        <div className="dsh-md-devices-header">
+          <h3 className="dsh-md-devices-heading">{t('devicesHeading')}</h3>
+          {!addingNew && (
+            <Button
+              variant="outline"
+              size="sm"
+              icon={<IconPlusOutlineRegular size={13} />}
+              onClick={() => {
+                setEditingDeviceId(null)
+                setAddingNew(true)
+              }}
             >
-              {t('openNative')}
-            </button>
-            <button type="button" className="dsh-md-btn" onClick={() => setTab('devices')}>
-              ⚙ {t('tabDevices')}
-            </button>
-          </div>
+              {t('addDevice')}
+            </Button>
+          )}
         </div>
+
+        {addingNew && (
+          <div className="dsh-md-card">
+            <DeviceEditorForm
+              sshConfigHosts={snapshot.sshConfigHosts}
+              sshKeys={sshKeys}
+              t={t}
+              onSaved={() => {
+                setAddingNew(false)
+                pushToast(t('savedNotice'), 'success')
+              }}
+              onCancel={() => setAddingNew(false)}
+            />
+          </div>
+        )}
+
+        {!hasDevices && !addingNew ? (
+          <div className="dsh-md-card dsh-md-empty-card">
+            <div className="dsh-md-row-name">{t('noDevicesTitle')}</div>
+            <div className="dsh-md-pref-desc">{t('noDevicesDesc')}</div>
+          </div>
+        ) : hasDevices ? (
+          <ul className="dsh-md-rows">
+            {snapshot.devices.map((dev) => {
+              const isEditing = editingDeviceId === dev.id
+              return (
+                <li key={dev.id} className="dsh-md-card">
+                  <div className="dsh-md-row-head">
+                    <div className="dsh-md-row-identity">
+                      <StateDot state={deviceStateToDotState(dev.state)} size={8} />
+                      <span className="dsh-md-row-name">{dev.name}</span>
+                      <Tag>
+                        <span className="dsh-md-code-text">{formatCompactDeviceTarget(dev)}</span>
+                      </Tag>
+                      {dev.latencyMs !== undefined && dev.state === 'connected' && (
+                        <Tag>{dev.latencyMs}ms</Tag>
+                      )}
+                      {dev.runningSessionCount > 0 && (
+                        <Tag>{t('runningCount').replace('{count}', String(dev.runningSessionCount))}</Tag>
+                      )}
+                      {dev.pendingApprovalCount > 0 && (
+                        <Tag>{t('pendingCount').replace('{count}', String(dev.pendingApprovalCount))}</Tag>
+                      )}
+                    </div>
+
+                    <div className="dsh-md-row-actions">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        icon={<IconRightUpOutlineRegular size={13} />}
+                        onClick={() => {
+                          clientStore.selectNativeDevice(dev.id)
+                          onCloseSettings?.()
+                        }}
+                      >
+                        {t('openNative')}
+                      </Button>
+
+                      <Tooltip label={t('reconnect')} side="top">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          aria-label={t('reconnect')}
+                          onClick={() => {
+                            void clientStore.reconnectDevice(dev.id).then((res) => {
+                              if (res.ok) {
+                                pushToast(t('reconnectedNotice'), 'success')
+                              } else {
+                                pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
+                              }
+                            })
+                          }}
+                        >
+                          <IconRefreshOutlineRegular size={14} />
+                        </Button>
+                      </Tooltip>
+
+                      <Tooltip label={t('editDevice')} side="top">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          aria-label={t('editDevice')}
+                          aria-expanded={isEditing}
+                          onClick={() => {
+                            setAddingNew(false)
+                            setEditingDeviceId(isEditing ? null : dev.id)
+                          }}
+                        >
+                          <IconEditOutlineRegular size={14} />
+                        </Button>
+                      </Tooltip>
+
+                      <Tooltip label={t('remove')} side="top">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          aria-label={t('remove')}
+                          onClick={() => {
+                            setDeleteError(null)
+                            setDeleteTarget(dev)
+                          }}
+                        >
+                          <IconTrashOutlineRegular size={14} />
+                        </Button>
+                      </Tooltip>
+                    </div>
+                  </div>
+
+                  {!isEditing && dev.lastError !== undefined && (
+                    <p className="dsh-md-error-text">{dev.lastError}</p>
+                  )}
+
+                  {isEditing && (
+                    <DeviceEditorForm
+                      device={dev}
+                      sshConfigHosts={snapshot.sshConfigHosts}
+                      sshKeys={sshKeys}
+                      t={t}
+                      onSaved={() => {
+                        setEditingDeviceId(null)
+                        pushToast(t('savedNotice'), 'success')
+                      }}
+                      onCancel={() => setEditingDeviceId(null)}
+                    />
+                  )}
+                </li>
+              )
+            })}
+          </ul>
+        ) : null}
+      </div>
+
+      {/* Native Delete Confirmation Modal */}
+      <Modal
+        open={deleteTarget !== null}
+        onClose={() => {
+          if (!deleting) {
+            setDeleteTarget(null)
+            setDeleteError(null)
+          }
+        }}
+        title={
+          deleteTarget === null
+            ? ''
+            : t('deleteTitle').replace('{name}', deleteTarget.name)
+        }
+        closeLabel={t('close')}
+        description={deleteTarget === null ? undefined : t('deleteDescription')}
+        footer={
+          <>
+            <Button
+              variant="outline"
+              disabled={deleting}
+              onClick={() => {
+                setDeleteTarget(null)
+                setDeleteError(null)
+              }}
+            >
+              {t('cancel')}
+            </Button>
+            <Button
+              variant="primary"
+              disabled={deleting}
+              onClick={() => { void handleConfirmDelete() }}
+            >
+              {deleting ? t('deletingDevice') : t('deleteConfirm')}
+            </Button>
+          </>
+        }
+      >
+        {deleteError !== null ? (
+          <p className="dsh-md-error-text" role="alert">
+            {deleteError}
+          </p>
+        ) : null}
+      </Modal>
+
+      {toastNotice !== null && (
+        <Toast
+          key={toastNotice.seq}
+          text={toastNotice.text}
+          tone={toastNotice.tone}
+          onDone={() => setToastNotice(null)}
+        />
       )}
     </div>
   )
