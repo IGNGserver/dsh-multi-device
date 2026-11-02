@@ -12,7 +12,7 @@
  *    - `AggregatedGateway` + `MultiDeviceControlPlane` mode independence & fallback verification.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -1183,8 +1183,14 @@ describe('6. Stability guards', () => {
   })
 
   it('calls connection.requestRejection as a method on the Cordis proxy', async () => {
+    // Cordis is a host peer, not a plugin dependency. CI has no copy; a local
+    // DSH install (or DSH_CORDIS_MODULE) runs the real proxy regression.
     const cordisPath = process.env.DSH_CORDIS_MODULE
-      ?? '/Users/lvziw/.npm-global/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis/lib/index.js'
+      ?? [
+        '/Users/lvziw/.npm-global/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis/lib/index.js',
+        '/home/lvziw/.npm-global/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/cordis/lib/index.js',
+      ].find((candidate) => existsSync(candidate))
+    if (cordisPath === undefined || !existsSync(cordisPath)) return
     const cordis = await import(cordisPath) as {
       Context: new () => {
         plugin(plugin: object): Promise<unknown>
