@@ -7,8 +7,10 @@
  *
  * @module dsh-multi-device/client/state
  */
+import type { StateDotState } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useSyncExternalStore } from 'react'
 import {
+  type DeviceConnectionState,
   type DeviceId,
   type DisplayMode,
   type ManualWorkspaceRule,
@@ -23,6 +25,98 @@ import type { ControlPlaneRequest } from '../runtime.ts'
 
 export type HubTabId = 'native' | 'devices' | 'git'
 
+/** Map device connection lifecycle states to official DSH `StateDot` states. */
+export function deviceStateToDotState(state: DeviceConnectionState): StateDotState {
+  switch (state) {
+    case 'connected':
+      return 'done'
+    case 'connecting':
+    case 'reconnecting':
+      return 'ongoing'
+    case 'error':
+      return 'error'
+    case 'disabled':
+    default:
+      return 'idle'
+  }
+}
+
+/**
+ * Browser-safe parser for shorthand SSH host specifications (`alias`, `user@host`,
+ * `user@host:2222`, or `ssh://user@host:2222`).
+ */
+export function parseSshHostInput(raw: string): {
+  readonly host: string
+  readonly username?: string
+  readonly port?: number
+} {
+  let trimmed = raw.trim()
+  if (trimmed === '') return { host: '' }
+
+  if (trimmed.toLowerCase().startsWith('ssh://')) {
+    try {
+      const parsed = new URL(trimmed)
+      const portNum = parsed.port !== '' ? Number(parsed.port) : undefined
+      return {
+        host: parsed.hostname,
+        ...(parsed.username !== '' ? { username: decodeURIComponent(parsed.username) } : {}),
+        ...(portNum !== undefined && Number.isInteger(portNum) && portNum > 0 && portNum <= 65535
+          ? { port: portNum }
+          : {}),
+      }
+    } catch {
+      trimmed = trimmed.slice('ssh://'.length)
+    }
+  }
+
+  let username: string | undefined
+  const atIndex = trimmed.lastIndexOf('@')
+  if (atIndex > 0 && atIndex < trimmed.length - 1) {
+    username = trimmed.slice(0, atIndex)
+    trimmed = trimmed.slice(atIndex + 1)
+  }
+
+  // Bracketed IPv6: [::1]:2222 or [::1]
+  if (trimmed.startsWith('[')) {
+    const closeIdx = trimmed.indexOf(']')
+    if (closeIdx > 1) {
+      const host = trimmed.slice(1, closeIdx)
+      const rest = trimmed.slice(closeIdx + 1)
+      if (rest.startsWith(':')) {
+        const portNum = Number(rest.slice(1))
+        if (Number.isInteger(portNum) && portNum > 0 && portNum <= 65535) {
+          return {
+            host,
+            ...(username !== undefined ? { username } : {}),
+            port: portNum,
+          }
+        }
+      }
+      return { host, ...(username !== undefined ? { username } : {}) }
+    }
+  }
+
+  // Host:port (only when there is a single colon, avoiding unbracketed IPv6 literals)
+  const firstColon = trimmed.indexOf(':')
+  if (firstColon > 0 && firstColon === trimmed.lastIndexOf(':')) {
+    const hostPart = trimmed.slice(0, firstColon)
+    const portPart = trimmed.slice(firstColon + 1)
+    const portNum = Number(portPart)
+    if (hostPart !== '' && /^\d+$/.test(portPart) && portNum > 0 && portNum <= 65535) {
+      return {
+        host: hostPart,
+        ...(username !== undefined ? { username } : {}),
+        port: portNum,
+      }
+    }
+  }
+
+  return {
+    host: trimmed,
+    ...(username !== undefined ? { username } : {}),
+  }
+}
+
 export interface MultiDeviceClientState {
   readonly snapshot: MultiDeviceSnapshot
   readonly loading: boolean
@@ -35,10 +129,12 @@ export interface MultiDeviceClientState {
   readonly keepAliveDeviceIds: readonly DeviceId[]
   /** Reload counter per deviceId for triggering iframe/webview reload without losing other devices. */
   readonly reloadCounters: Readonly<Record<string, number>>
-  /** Active tab inside the Multi-Device Hub panel. */
+  /** Active tab inside the Multi-Device Hub panel (retained for API compatibility). */
   readonly activeHubTab: HubTabId
   /** Whether the floating mode-switcher pill in `shell.overlay` is minimized. */
   readonly overlayCollapsed: boolean
+  /** Fallback settings modal open state when the host shell does not expose `sidebar.settings`. */
+  readonly settingsModalOpen: boolean
 }
 
 const UI_STORAGE_KEY = 'dsh.multi-device.ui.v1'
@@ -130,6 +226,7 @@ class MultiDeviceClientStore {
       reloadCounters: {},
       activeHubTab: 'devices',
       overlayCollapsed: prefs.overlayCollapsed,
+      settingsModalOpen: false,
     }
   }
 
@@ -213,8 +310,12 @@ class MultiDeviceClientStore {
       activeNative = snap.devices.find(device => alive.has(device.id))?.id
     }
     const keepAlive = this.state.keepAliveDeviceIds.filter(id => alive.has(id)).slice(-MAX_KEEP_ALIVE_PAGES)
+    const nextDisplayMode: DisplayMode =
+      this.state.displayMode === 'native' && snap.devices.length === 0
+        ? 'aggregated'
+        : this.state.displayMode
     if (
-      this.state.displayMode === 'native' &&
+      nextDisplayMode === 'native' &&
       activeNative !== undefined &&
       !keepAlive.includes(activeNative)
     ) {
@@ -225,6 +326,7 @@ class MultiDeviceClientStore {
       snapshot: snap,
       loading: false,
       error: undefined,
+      displayMode: nextDisplayMode,
       ...(activeNative !== undefined ? { activeNativeDeviceId: activeNative } : {}),
       keepAliveDeviceIds: keepAlive,
     })
@@ -235,6 +337,9 @@ class MultiDeviceClientStore {
   // ==========================================================================
 
   setDisplayMode(mode: DisplayMode, targetDeviceId?: DeviceId): void {
+    if (mode === 'native' && this.state.snapshot.devices.length === 0 && targetDeviceId === undefined) {
+      return
+    }
     const nextDeviceId =
       targetDeviceId ??
       this.state.activeNativeDeviceId ??
@@ -303,6 +408,10 @@ class MultiDeviceClientStore {
 
   setOverlayCollapsed(collapsed: boolean): void {
     this.setState({ overlayCollapsed: collapsed }, true)
+  }
+
+  setSettingsModalOpen(open: boolean): void {
+    this.setState({ settingsModalOpen: open })
   }
 
   // ==========================================================================

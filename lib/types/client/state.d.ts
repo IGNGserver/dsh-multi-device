@@ -1,6 +1,27 @@
-import { type DeviceId, type DisplayMode, type ManualWorkspaceRule, type MultiDeviceSnapshot, type RemoteSessionCreateInput, type RemoteWorkspaceCreateInput, type SshKeyEntry, type UpsertDeviceInput, type WorkspaceAggregationConfig } from '../contract.ts';
+/**
+ * Client-side reactive store, SSE live synchronization, and control-plane RPC client.
+ *
+ * Persists UI mode (`aggregated` vs `native`) and active device selection in `localStorage`,
+ * and maintains the LRU Keep-Alive set of Native Mode device pages so switching between
+ * Aggregated Mode and Native Mode never destroys loaded remote DSH pages.
+ *
+ * @module dsh-multi-device/client/state
+ */
+import type { StateDotState } from '@deepseek-ai/dsh-client-ui-primitives';
+import { type DeviceConnectionState, type DeviceId, type DisplayMode, type ManualWorkspaceRule, type MultiDeviceSnapshot, type RemoteSessionCreateInput, type RemoteWorkspaceCreateInput, type SshKeyEntry, type UpsertDeviceInput, type WorkspaceAggregationConfig } from '../contract.ts';
 import type { ControlPlaneRequest } from '../runtime.ts';
 export type HubTabId = 'native' | 'devices' | 'git';
+/** Map device connection lifecycle states to official DSH `StateDot` states. */
+export declare function deviceStateToDotState(state: DeviceConnectionState): StateDotState;
+/**
+ * Browser-safe parser for shorthand SSH host specifications (`alias`, `user@host`,
+ * `user@host:2222`, or `ssh://user@host:2222`).
+ */
+export declare function parseSshHostInput(raw: string): {
+    readonly host: string;
+    readonly username?: string;
+    readonly port?: number;
+};
 export interface MultiDeviceClientState {
     readonly snapshot: MultiDeviceSnapshot;
     readonly loading: boolean;
@@ -13,16 +34,20 @@ export interface MultiDeviceClientState {
     readonly keepAliveDeviceIds: readonly DeviceId[];
     /** Reload counter per deviceId for triggering iframe/webview reload without losing other devices. */
     readonly reloadCounters: Readonly<Record<string, number>>;
-    /** Active tab inside the Multi-Device Hub panel. */
+    /** Active tab inside the Multi-Device Hub panel (retained for API compatibility). */
     readonly activeHubTab: HubTabId;
     /** Whether the floating mode-switcher pill in `shell.overlay` is minimized. */
     readonly overlayCollapsed: boolean;
+    /** Fallback settings modal open state when the host shell does not expose `sidebar.settings`. */
+    readonly settingsModalOpen: boolean;
 }
 declare class MultiDeviceClientStore {
     private state;
     private readonly listeners;
     private eventSource;
     private pollTimer;
+    private sseRetryTimer;
+    private sseAttempt;
     private started;
     constructor();
     getSnapshot: () => MultiDeviceClientState;
@@ -38,6 +63,7 @@ declare class MultiDeviceClientStore {
     reloadNativeDevice(deviceId: DeviceId): void;
     setActiveHubTab(tab: HubTabId): void;
     setOverlayCollapsed(collapsed: boolean): void;
+    setSettingsModalOpen(open: boolean): void;
     callControlPlane<T = unknown>(request: ControlPlaneRequest): Promise<{
         ok: true;
         value: T;
@@ -50,8 +76,14 @@ declare class MultiDeviceClientStore {
         ok: boolean;
         error?: string;
     }>;
-    removeDevice(deviceId: DeviceId): Promise<void>;
-    reconnectDevice(deviceId: DeviceId): Promise<void>;
+    removeDevice(deviceId: DeviceId): Promise<{
+        ok: boolean;
+        error?: string;
+    }>;
+    reconnectDevice(deviceId: DeviceId): Promise<{
+        ok: boolean;
+        error?: string;
+    }>;
     testDevice(input: UpsertDeviceInput): Promise<{
         ok: true;
         protocolVersion: string;
@@ -71,10 +103,16 @@ declare class MultiDeviceClientStore {
         ok: boolean;
         error?: string;
     }>;
-    updateAggregationConfig(patch: Partial<WorkspaceAggregationConfig>): Promise<void>;
+    updateAggregationConfig(patch: Partial<WorkspaceAggregationConfig>): Promise<{
+        ok: boolean;
+        error?: string;
+    }>;
     upsertManualRule(rule: ManualWorkspaceRule): Promise<void>;
     removeManualRule(ruleId: string): Promise<void>;
-    setMemberExcluded(memberKey: string, excluded: boolean): Promise<void>;
+    setMemberExcluded(memberKey: string, excluded: boolean): Promise<{
+        ok: boolean;
+        error?: string;
+    }>;
     setPreferredDevice(logicalWorkspaceId: string, deviceId: DeviceId): Promise<void>;
 }
 export declare const clientStore: MultiDeviceClientStore;

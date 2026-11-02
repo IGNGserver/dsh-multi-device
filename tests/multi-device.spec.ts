@@ -15,7 +15,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { WebSocket, WebSocketServer } from 'ws'
 import {
   decodeLogicalWorkspaceId,
@@ -1266,7 +1266,270 @@ describe('7. P2 boundary guards', () => {
     expect(resolveUserIncludePattern('/etc/ssh/ssh_config.d/*.conf')).toBe(
       '/etc/ssh/ssh_config.d/*.conf',
     )
+    expect(resolveUserIncludePattern('~/custom/*.conf')).toBeDefined()
     expect(resolveUserIncludePattern('~/custom/*.conf').endsWith('/custom/*.conf')).toBe(true)
+  })
+})
+
+describe('8. Native Settings UI & Streamlined Client State Helpers', () => {
+  it('parses shorthand SSH host inputs and maps connection states to native StateDot states', async () => {
+    const { deviceStateToDotState, parseSshHostInput } = await import('../src/client/state.ts')
+
+    expect(parseSshHostInput('ubuntu-gpu')).toEqual({ host: 'ubuntu-gpu' })
+    expect(parseSshHostInput('root@10.0.0.12:2202')).toEqual({
+      host: '10.0.0.12',
+      username: 'root',
+      port: 2202,
+    })
+    expect(parseSshHostInput('ssh://dev@example.internal:2222')).toEqual({
+      host: 'example.internal',
+      username: 'dev',
+      port: 2222,
+    })
+    expect(parseSshHostInput('[::1]:2222')).toEqual({
+      host: '::1',
+      port: 2222,
+    })
+
+    expect(deviceStateToDotState('connected')).toBe('done')
+    expect(deviceStateToDotState('connecting')).toBe('ongoing')
+    expect(deviceStateToDotState('reconnecting')).toBe('ongoing')
+    expect(deviceStateToDotState('error')).toBe('error')
+    expect(deviceStateToDotState('disabled')).toBe('idle')
+  })
+
+  it('registers settings.section and plugins.bundle.config without polluting sidebar.panellist or settings.plugins.tab, and renders native primitives cleanly', async () => {
+    vi.doMock('@deepseek-ai/dsh-client-ui-primitives', async () => {
+      const React = await import('react')
+      const icon = (name: string) =>
+        function MockIcon({ size = 16 }: { size?: number }) {
+          return React.createElement('svg', { 'data-icon': name, width: size, height: size })
+        }
+      return {
+        Button: React.forwardRef(function MockButton(
+          { children, icon: ic, variant = 'ghost', size = 'md', ...rest }: Record<string, unknown>,
+          ref: React.ForwardedRef<HTMLButtonElement>,
+        ) {
+          return React.createElement(
+            'button',
+            { ref, type: 'button', 'data-primitive': 'Button', 'data-variant': variant, 'data-size': size, ...rest },
+            ic as React.ReactNode,
+            children as React.ReactNode,
+          )
+        }),
+        Input: React.forwardRef(function MockInput(
+          { icon: _ic, ...rest }: Record<string, unknown>,
+          ref: React.ForwardedRef<HTMLInputElement>,
+        ) {
+          return React.createElement('input', { ref, 'data-primitive': 'Input', ...rest })
+        }),
+        Switch: ({ checked, label, disabled }: { checked: boolean; label: string; disabled?: boolean }) =>
+          React.createElement('button', {
+            type: 'button',
+            role: 'switch',
+            'data-primitive': 'Switch',
+            'aria-checked': checked,
+            'aria-label': label,
+            disabled,
+          }),
+        SegmentedControl: ({
+          value,
+          options,
+          label,
+        }: {
+          value: string
+          options: readonly { value: string; label: React.ReactNode; disabled?: boolean }[]
+          label: string
+        }) =>
+          React.createElement(
+            'div',
+            { role: 'tablist', 'aria-label': label, 'data-primitive': 'SegmentedControl' },
+            options.map(opt =>
+              React.createElement(
+                'button',
+                {
+                  key: opt.value,
+                  type: 'button',
+                  role: 'tab',
+                  'aria-selected': opt.value === value,
+                  disabled: opt.disabled,
+                },
+                opt.label,
+              ),
+            ),
+          ),
+        StateDot: ({ state }: { state: string }) =>
+          React.createElement('span', { 'data-primitive': 'StateDot', 'data-state': state }),
+        Tag: ({ children }: { children?: React.ReactNode }) =>
+          React.createElement('span', { 'data-primitive': 'Tag' }, children),
+        Pill: ({ active, children }: { active?: boolean; children?: React.ReactNode }) =>
+          React.createElement('button', { type: 'button', 'data-primitive': 'Pill', 'data-active': Boolean(active) }, children),
+        DisclosureRow: ({
+          title,
+          open,
+          children,
+        }: {
+          title: React.ReactNode
+          open: boolean
+          children?: React.ReactNode
+        }) =>
+          React.createElement(
+            'div',
+            { 'data-primitive': 'DisclosureRow', 'data-open': open },
+            React.createElement('div', null, title),
+            open ? children : null,
+          ),
+        Modal: ({ open, title, children, footer }: { open: boolean; title?: string; children?: React.ReactNode; footer?: React.ReactNode }) =>
+          open
+            ? React.createElement('div', { role: 'dialog', 'aria-label': title, 'data-primitive': 'Modal' }, children, footer)
+            : null,
+        Toast: ({ text }: { text: string }) =>
+          React.createElement('div', { role: 'alert', 'data-primitive': 'Toast' }, text),
+        Tooltip: ({ children }: { children: React.ReactElement }) => children,
+        MenuItemButton: ({ icon: ic, children }: { icon?: React.ReactNode; children: React.ReactNode }) =>
+          React.createElement('button', { type: 'button', role: 'menuitem', 'data-primitive': 'MenuItemButton' }, ic, children),
+        IconPlusOutlineRegular: icon('plus'),
+        IconRefreshOutlineRegular: icon('refresh'),
+        IconEditOutlineRegular: icon('edit'),
+        IconTrashOutlineRegular: icon('trash'),
+        IconSettingsOutlineRegular: icon('settings'),
+        IconSettingsOutlineMedium: icon('settings-md'),
+        IconRightUpOutlineRegular: icon('right-up'),
+        IconChevronLeftOutlineRegular: icon('chevron-left'),
+        IconChevronDownOutlineRegular: icon('chevron-down'),
+        IconChevronRightOutlineRegular: icon('chevron-right'),
+        IconCloseOutlineRegular: icon('close'),
+        IconWarningOutlineRegular: icon('warning'),
+        IconCheckCircleFillRegular: icon('check'),
+        IconGlobeOutlineRegular: icon('globe'),
+      }
+    })
+
+    const React = await import('react')
+    const { renderToStaticMarkup } = await import('react-dom/server')
+    const clientEntry = await import('../src/client/index.tsx')
+    const { zh } = await import('../src/client/locales.ts')
+    const { clientStore } = await import('../src/client/state.ts')
+
+    const injectedSlots: string[] = []
+    const registeredSlots = new Map<string, { options: Record<string, unknown>; component: (props: any) => React.ReactNode }>()
+    const openedSections: string[] = []
+    const disposers: Array<() => void> = []
+
+    const mockCtx: import('../src/client/index.tsx').ClientContextLike = {
+      effect(fn) {
+        const dispose = fn()
+        if (typeof dispose === 'function') disposers.push(dispose)
+      },
+      inject(_deps, fn) {
+        fn(mockCtx)
+      },
+      locale: {
+        register: () => () => {},
+        bind: () => (k) => zh[k],
+      },
+      slots: {
+        inject(slotName, fn) {
+          injectedSlots.push(slotName)
+          const dispose = fn()
+          return typeof dispose === 'function' ? dispose : () => {}
+        },
+        register(options, component) {
+          const key = `${String(options.name)}:${String(options.id ?? options.key ?? '')}`
+          registeredSlots.set(key, { options, component })
+          return () => {
+            registeredSlots.delete(key)
+          }
+        },
+        entries(slotName) {
+          if (slotName === 'sidebar.settings') {
+            return [
+              {
+                options: {
+                  store: {
+                    create: () => ({
+                      actions: {
+                        openSection: (id: string) => {
+                          openedSections.push(id)
+                        },
+                      },
+                    }),
+                  },
+                },
+              },
+            ]
+          }
+          return []
+        },
+      },
+    }
+
+    try {
+      clientEntry.apply(mockCtx)
+
+      // Must register native settings.section & plugins.bundle.config, and NEVER sidebar.panellist / main / settings.plugins.tab
+      expect(injectedSlots).toContain('settings.section')
+      expect(injectedSlots).toContain('plugins.bundle.config')
+      expect(injectedSlots).toContain('shell.overlay')
+      expect(injectedSlots).not.toContain('sidebar.panellist')
+      expect(injectedSlots).not.toContain('main')
+      expect(injectedSlots).not.toContain('settings.plugins.tab')
+
+      // openSettingsSection routes straight to sidebar.settings shellStore when available
+      expect(clientEntry.openSettingsSection(mockCtx)).toBe(true)
+      expect(openedSections).toEqual(['multi-device'])
+
+      // Fallback when sidebar.settings is absent opens owned native Modal
+      const fallbackCtx = {
+        ...mockCtx,
+        slots: { ...mockCtx.slots, entries: () => [] },
+      }
+      clientStore.setSettingsModalOpen(false)
+      expect(clientEntry.openSettingsSection(fallbackCtx)).toBe(false)
+      expect(clientStore.getSnapshot().settingsModalOpen).toBe(true)
+      clientStore.setSettingsModalOpen(false)
+
+      // Render settings.section and verify streamlined native markup
+      const settingsReg = registeredSlots.get('settings.section:multi-device')
+      expect(settingsReg).toBeDefined()
+      const settingsHtml = renderToStaticMarkup(
+        React.createElement(settingsReg!.component as React.ComponentType<any>, { t: (k: keyof typeof zh) => zh[k] }),
+      )
+      expect(settingsHtml).toContain('data-primitive="SegmentedControl"')
+      expect(settingsHtml).toContain('data-primitive="Switch"')
+      expect(settingsHtml).toContain('data-primitive="Button"')
+      expect(settingsHtml).toContain(zh.devicesHeading)
+      expect(settingsHtml).not.toContain('sshEngine')
+      expect(settingsHtml).not.toContain('manualRule')
+
+      // Plugin bundle summary view returns concise one-liner
+      const bundleReg = registeredSlots.get('plugins.bundle.config:dsh-multi-device')
+      expect(bundleReg).toBeDefined()
+      expect(bundleReg!.component({ view: 'summary', t: (k: keyof typeof zh) => zh[k] })).toBe(zh.pluginSummary)
+
+      // Overlay bar stays hidden when 0 devices are configured in Aggregated Mode
+      const overlayReg = registeredSlots.get('shell.overlay:multi-device-switcher')
+      expect(overlayReg).toBeDefined()
+      const overlayEmptyHtml = renderToStaticMarkup(
+        React.createElement(overlayReg!.component as React.ComponentType<any>, { t: (k: keyof typeof zh) => zh[k] }),
+      )
+      expect(overlayEmptyHtml).not.toContain('dsh-md-overlay-bar')
+
+      // Context menu item renders official MenuItemButton
+      const menuReg = registeredSlots.get('sidebar.workspaces.session.menu.item:multi-device-open-native')
+      expect(menuReg).toBeDefined()
+      const menuHtml = renderToStaticMarkup(
+        React.createElement(menuReg!.component as React.ComponentType<any>, {
+          sessionId: encodeRemoteSessionId(DeviceId('dev-a'), 'sess-1'),
+          useMenuOpenState: () => [true, () => {}] as const,
+          t: (k: keyof typeof zh) => zh[k],
+        }),
+      )
+      expect(menuHtml).toContain('data-primitive="MenuItemButton"')
+    } finally {
+      for (const dispose of disposers) dispose()
+      vi.doUnmock('@deepseek-ai/dsh-client-ui-primitives')
+    }
   })
 })
 
