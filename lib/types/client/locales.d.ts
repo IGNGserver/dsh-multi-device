@@ -44,6 +44,9 @@ export declare const zh: {
     readonly sshKeyPassphrasePlaceholder: "输入加密私钥口令；留空使用 SSH Agent";
     readonly sshProxyJump: "ProxyJump 跳板机";
     readonly sshProxyJumpPlaceholder: "可选，留空复用 ~/.ssh/config";
+    readonly authBootstrap: "通过 SSH 读取远端凭据并签发 Cookie（签名密钥不写入本机）";
+    readonly remoteDshHome: "远端 DSH 主目录（可选）";
+    readonly remoteDshHomePlaceholder: "默认 ~/.dsh";
     readonly testConnection: "测试连接";
     readonly testingConnection: "测试中…";
     readonly testPassed: "连接成功";

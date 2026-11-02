@@ -11,7 +11,7 @@
  *
  * @module dsh-multi-device/host/tunnel
  */
-import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
+import { execFileSync, spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { createConnection, createServer, type Server, type Socket } from 'node:net'
 import { homedir } from 'node:os'
@@ -33,6 +33,24 @@ export interface TunnelStatus {
   readonly engine?: 'system-ssh' | 'ssh2'
   readonly error?: string
   readonly attempt: number
+}
+
+/** Test seam. Production always uses `node:child_process` `spawn`. */
+export type SpawnFn = (
+  command: string,
+  args: readonly string[],
+  options: SpawnOptions,
+) => ChildProcess
+
+let spawnImpl: SpawnFn = nodeSpawn as unknown as SpawnFn
+
+/** Replace or restore the process spawner. Tests pass `null` to restore. */
+export function setSshSpawn(spawnFn: SpawnFn | null): void {
+  spawnImpl = spawnFn ?? (nodeSpawn as unknown as SpawnFn)
+}
+
+function spawn(command: string, args: readonly string[], options: SpawnOptions): ChildProcess {
+  return spawnImpl(command, args, options)
 }
 
 const BACKOFF_BASE_MS = 600
@@ -196,8 +214,8 @@ export async function execSshCommand(
       finish({ ok: false, error: 'ssh command timed out' })
     }, timeoutMs + 500)
 
-    proc.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString('utf8') })
-    proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8') })
+    proc.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString('utf8') })
+    proc.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8') })
     proc.on('error', (err) => {
       finish({ ok: false, error: err.message })
     })

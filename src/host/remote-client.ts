@@ -202,6 +202,12 @@ export class RemoteDeviceClient {
                 : {}),
               ...(this.config.transport.proxyJump !== undefined ? { proxyJump: this.config.transport.proxyJump } : {}),
               ...(this.config.transport.remotePort !== undefined ? { remotePort: this.config.transport.remotePort } : {}),
+              ...(this.config.transport.remoteDshHome !== undefined
+                ? { remoteDshHome: this.config.transport.remoteDshHome }
+                : {}),
+              ...(this.config.transport.bootstrapFromRemoteCredentials === true
+                ? { bootstrapFromRemoteCredentials: true }
+                : {}),
               ...(this.config.transport.engine !== undefined ? { engine: this.config.transport.engine } : {}),
             },
           }

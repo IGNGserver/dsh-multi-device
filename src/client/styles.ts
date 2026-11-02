@@ -240,6 +240,10 @@ const CSS_TEXT = `
   min-width: 0;
 }
 
+.dsh-md-field-span {
+  grid-column: 1 / -1;
+}
+
 .dsh-md-field-label {
   color: var(--dsw-alias-label-secondary);
   font-size: 12px;

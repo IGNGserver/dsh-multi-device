@@ -378,9 +378,10 @@ export class DeviceAuthManager {
       }
     }
 
-    // 2. Opt-in SSH bootstrap. Default `auto` never reads the remote signing
-    // secret. When explicitly enabled, mint a cookie and persist only that
-    // cookie — the 32-byte HMAC secret stays on the remote machine.
+    // 2. SSH bootstrap. The device form enables this for auto mode. Mint a
+    // cookie and persist only that cookie — the 32-byte HMAC secret stays on
+    // the remote machine. A failed read is fatal here: continuing without a
+    // cookie makes the next request look like a broken SSH key (HTTP 401).
     if (
       device.transport.kind === 'ssh' &&
       auth.mode === 'auto' &&
@@ -390,23 +391,33 @@ export class DeviceAuthManager {
       const escapedHome = `'${dshHome.replaceAll("'", "'\\''")}'`
       const cmd = `cat ${escapedHome}/.credentials.yaml 2>/dev/null || true`
       const sshRes = await execSshCommand(device.transport, cmd, 6_000)
-      if (sshRes.ok && sshRes.stdout.trim() !== '') {
-        const secret = parseSigningSecretFromCredentialsYaml(sshRes.stdout)
-        const minted = secret === undefined ? undefined : mintDshBrowserCookie(cookieAuthority, secret)
-        if (minted !== undefined) {
-          const next: StoredDeviceSecret = {
-            ...(existing ?? { deviceId: device.id, updatedAt: Date.now() }),
-            deviceId: device.id,
-            cookie: minted,
-            cookieAuthority,
-            updatedAt: Date.now(),
-          }
-          delete (next as { signingSecret?: string }).signingSecret
-          this.secrets.set(device.id, next)
-          this.save()
-          return { ok: true }
+      if (!sshRes.ok) {
+        return {
+          ok: false,
+          error: `SSH login succeeded, but reading ${dshHome}/.credentials.yaml failed: ${sshRes.error}`,
         }
       }
+      const secret = sshRes.stdout.trim() === ''
+        ? undefined
+        : parseSigningSecretFromCredentialsYaml(sshRes.stdout)
+      const minted = secret === undefined ? undefined : mintDshBrowserCookie(cookieAuthority, secret)
+      if (minted === undefined) {
+        return {
+          ok: false,
+          error: `SSH login succeeded, but ${dshHome}/.credentials.yaml has no client-connection/browser-session secret. Paste the launch URL, or confirm dsh web is installed on that machine.`,
+        }
+      }
+      const next: StoredDeviceSecret = {
+        ...(existing ?? { deviceId: device.id, updatedAt: Date.now() }),
+        deviceId: device.id,
+        cookie: minted,
+        cookieAuthority,
+        updatedAt: Date.now(),
+      }
+      delete (next as { signingSecret?: string }).signingSecret
+      this.secrets.set(device.id, next)
+      this.save()
+      return { ok: true }
     }
 
     // 3. Probe whether remote server even requires authentication (e.g. DSH 0.1.x)
