@@ -292,7 +292,7 @@ export interface SessionOriginMetadata {
   readonly gitRemote?: string
   readonly logicalWorkspaceId?: string
   readonly running: boolean
-  readonly pendingInteractionKind?: 'approval' | 'question' | 'plan-review'
+  readonly pendingInteractionKind?: PendingInteractionKind
   readonly nativeUrl?: string
 }
 
@@ -321,6 +321,9 @@ const REMOTE_WORKSPACE_PREFIX = 'md-ws~'
 const LOGICAL_WORKSPACE_PREFIX = 'md-lws~'
 const REMOTE_EVENT_PREFIX = 'md-ev~'
 const SEPARATOR = '~'
+
+/** Waterfall interactions the host tracks per remote device. */
+export type PendingInteractionKind = 'approval' | 'question' | 'plan-review'
 
 /**
  * Encode a `(deviceId, remoteSessionId)` pair into a collision-free local `SessionId`.
@@ -423,6 +426,10 @@ export function decodeLogicalWorkspaceId(workspaceId: string): {
 /**
  * Encode a remote `$events` waterfall `eventId` so `/api/$events/result` can route the user's
  * approval or question answer back to the exact remote device and active `$events` stream.
+ *
+ * The remote part is opaque and appended verbatim; an id that already looks
+ * namespaced is rejected by {@link decodeRemoteEventId} rather than routed as
+ * another device's waterfall.
  */
 export function encodeRemoteEventId(deviceId: DeviceId, remoteEventId: string): string {
   return `${REMOTE_EVENT_PREFIX}${escapeSegment(deviceId)}${SEPARATOR}${remoteEventId}`
@@ -430,6 +437,10 @@ export function encodeRemoteEventId(deviceId: DeviceId, remoteEventId: string): 
 
 /**
  * Decode a remote `$events` waterfall `eventId`.
+ *
+ * The remote part is opaque, but a remote must not smuggle a second namespaced
+ * id through it: decoding that would let one device address another device's
+ * waterfall. Reject double-prefixed ids instead of routing them.
  */
 export function decodeRemoteEventId(eventId: string): {
   readonly deviceId: DeviceId
@@ -439,9 +450,11 @@ export function decodeRemoteEventId(eventId: string): {
   const rest = eventId.slice(REMOTE_EVENT_PREFIX.length)
   const sepIndex = rest.indexOf(SEPARATOR)
   if (sepIndex <= 0 || sepIndex === rest.length - 1) return undefined
+  const remoteEventId = rest.slice(sepIndex + 1)
+  if (remoteEventId.startsWith(REMOTE_EVENT_PREFIX)) return undefined
   return {
     deviceId: unescapeSegment(rest.slice(0, sepIndex)) as DeviceId,
-    remoteEventId: rest.slice(sepIndex + 1),
+    remoteEventId,
   }
 }
 

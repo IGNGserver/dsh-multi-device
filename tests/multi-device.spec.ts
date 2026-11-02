@@ -47,7 +47,12 @@ import {
   WorkspaceAggregator,
 } from '../src/host/git-aggregator.ts'
 import {
+  deviceCatalogGroupId,
   installAggregatedGateway02,
+  isSameDeviceChildSession,
+  mergeModelCatalog,
+  type ModelCatalogLike,
+  stripDeviceCatalogPrefix,
   type SessionControllerLike,
   type TypertGatewayLike,
   type WorkspaceControllerLike,
@@ -60,13 +65,20 @@ import {
   parseSshConfigText,
   parseSshTargetSpec,
   resolveSshConfigForTransport,
+  resolveUserIncludePattern,
 } from '../src/host/ssh-config.ts'
 import {
   assertLoopbackForward,
   buildSystemSshArgs as buildTunnelSshArgs,
   hostKeyMatchesKnownHostsLine,
 } from '../src/host/tunnel.ts'
-import { classifyRemoteProtocol, protocolGeneration, resolveProbedProtocol } from '../src/host/remote-client.ts'
+import {
+  classifyRemoteProtocol,
+  pendingInteractionKind,
+  protocolGeneration,
+  resolveProbedProtocol,
+} from '../src/host/remote-client.ts'
+import { BoundedStreamQueue } from '../src/host/stream-queue.ts'
 import { buildForwardHeaders } from '../src/host/native-proxy.ts'
 import { admitControlPlaneRequest, MultiDeviceControlPlane } from '../src/runtime.ts'
 
@@ -840,10 +852,11 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
         groups: { id: string; models: { id: string }[] }[]
         routableProviders: string[]
       }
-      expect(catalog.groups.map(group => group.id)).toContain('remote-provider')
-      expect(catalog.groups.find(group => group.id === 'remote-provider')?.models.map(m => m.id))
+      const remoteGroupId = deviceCatalogGroupId(devId, 'remote-provider')
+      expect(catalog.groups.map(group => group.id)).toContain(remoteGroupId)
+      expect(catalog.groups.find(group => group.id === remoteGroupId)?.models.map(m => m.id))
         .toContain('remote-only-model')
-      expect(catalog.routableProviders).toContain('remote-provider')
+      expect(catalog.routableProviders).toContain(remoteGroupId)
 
       // 1c) Explicit per-session device selection creates on the chosen device.
       const created = await registry.createRemoteSession({
@@ -1180,6 +1193,80 @@ describe('6. Stability guards', () => {
     expect(headers['accept']).toBe('text/html')
     expect(headers['x-forwarded-for']).toBeUndefined()
     expect(JSON.stringify(headers)).not.toContain('from-browser')
+  })
+})
+
+describe('7. P2 boundary guards', () => {
+  it('rejects a nested remote event id instead of routing it to another device', () => {
+    const eventId = encodeRemoteEventId(DeviceId('dev-a'), 'event-1')
+    expect(decodeRemoteEventId(eventId)).toEqual({
+      deviceId: DeviceId('dev-a'),
+      remoteEventId: 'event-1',
+    })
+    expect(
+      decodeRemoteEventId(encodeRemoteEventId(DeviceId('dev-a'), 'md-ev~dev-b~event-2')),
+    ).toBeUndefined()
+  })
+
+  it('routes a subagent address only when the child belongs to the same device', () => {
+    const parent = DeviceId('dev-a')
+    expect(isSameDeviceChildSession(parent, encodeRemoteSessionId(parent, 'child-1'))).toBe(true)
+    expect(isSameDeviceChildSession(parent, 'local-child')).toBe(false)
+    expect(
+      isSameDeviceChildSession(parent, encodeRemoteSessionId(DeviceId('dev-b'), 'child-1')),
+    ).toBe(false)
+  })
+
+  it('tracks plan-review waterfalls alongside approval and questions', () => {
+    expect(pendingInteractionKind('approval/request')).toBe('approval')
+    expect(pendingInteractionKind('user-questions/request')).toBe('question')
+    expect(pendingInteractionKind('plan-review/request')).toBe('plan-review')
+    expect(pendingInteractionKind('other/request')).toBeUndefined()
+  })
+
+  it('keeps same-named providers from different devices separate', () => {
+    const catalog = (model: string): ModelCatalogLike => ({
+      default: {},
+      routableProviders: ['openai'],
+      groups: [{ id: 'openai', name: 'OpenAI', models: [{ id: model, name: model }] }],
+      failures: [],
+    })
+    const merged = mergeModelCatalog(catalog('local-model'), [
+      { deviceId: DeviceId('dev-a'), deviceName: 'Device A', catalog: catalog('a-model') },
+      { deviceId: DeviceId('dev-b'), deviceName: 'Device B', catalog: catalog('b-model') },
+    ])
+    expect(merged.groups.map(group => group.id)).toEqual([
+      'openai',
+      deviceCatalogGroupId(DeviceId('dev-a'), 'openai'),
+      deviceCatalogGroupId(DeviceId('dev-b'), 'openai'),
+    ])
+    expect(merged.groups[1]?.models.map(model => model.id)).toEqual(['a-model'])
+    expect(merged.groups[2]?.models.map(model => model.id)).toEqual(['b-model'])
+    expect(merged.routableProviders).toContain(deviceCatalogGroupId(DeviceId('dev-a'), 'openai'))
+    expect(merged.routableProviders).toContain(deviceCatalogGroupId(DeviceId('dev-b'), 'openai'))
+    expect(
+      stripDeviceCatalogPrefix(deviceCatalogGroupId(DeviceId('dev-a'), 'openai'), DeviceId('dev-a')),
+    ).toBe('openai')
+    expect(stripDeviceCatalogPrefix('openai', DeviceId('dev-a'))).toBe('openai')
+  })
+
+  it('caps a stalled stream queue instead of growing without bound', () => {
+    const queue = new BoundedStreamQueue<number>(2)
+    queue.push(1)
+    queue.push(2)
+    queue.push(3)
+    expect(queue.overflow).toBe(true)
+    expect(queue.shift()).toBe(1)
+    expect(queue.shift()).toBe(2)
+    expect(queue.shift()).toBeUndefined()
+  })
+
+  it('resolves relative Include patterns under ~/.ssh like OpenSSH', () => {
+    expect(resolveUserIncludePattern('conf.d/*.conf').endsWith('/.ssh/conf.d/*.conf')).toBe(true)
+    expect(resolveUserIncludePattern('/etc/ssh/ssh_config.d/*.conf')).toBe(
+      '/etc/ssh/ssh_config.d/*.conf',
+    )
+    expect(resolveUserIncludePattern('~/custom/*.conf').endsWith('/custom/*.conf')).toBe(true)
   })
 })
 

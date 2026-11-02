@@ -98,7 +98,7 @@ export function apply(ctx: ClientContextLike): void {
       if (shortcutCtx.shortcuts === undefined) return () => {}
       return shortcutCtx.shortcuts.register({
         id: 'multiDevice.toggleMode',
-        label: () => getTranslate()('switchToNative'),
+        label: () => getTranslate()('toggleMode'),
         aliases: ['toggle native mode', 'multi device mode'],
         defaults: {
           'desktop:macos': { code: 'KeyM', modifiers: ['primary', 'shift'] },
@@ -107,7 +107,9 @@ export function apply(ctx: ClientContextLike): void {
           'web:macos': { code: 'KeyM', modifiers: ['primary', 'shift'] },
           'web:windows': { code: 'KeyM', modifiers: ['primary', 'shift'] },
         },
-        regions: ['page', 'editable'],
+        // Only outside inputs: toggling the whole UI while typing in a
+        // textarea loses the composer draft focus.
+        regions: ['page'],
         modals: [],
         resolve: () => ({
           status: 'handled',
