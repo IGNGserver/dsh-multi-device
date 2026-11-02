@@ -22,6 +22,7 @@ import {
   decodeSessionId,
   type DeviceId,
   encodeRemoteSessionId,
+  encodeRemoteWorkspaceId,
   LOCAL_DEVICE_ID,
 } from '../contract.ts'
 import type { PhysicalWorkspaceInput } from './git-aggregator.ts'
@@ -43,6 +44,10 @@ export interface SessionControllerLike {
   follow(request: Record<string, unknown>, signal: AbortSignal): AsyncIterable<Record<string, unknown>>
   projections(request: { sessionId: string }, signal: AbortSignal): Promise<{ asOfSeq: number; values: Record<string, unknown> } | null>
   control(signal: AbortSignal): AsyncIterable<Record<string, unknown>>
+  openWorkspacePath?(
+    request: { path: string; action?: 'reveal'; application?: string },
+    signal: AbortSignal,
+  ): Promise<{ opened: true }>
 }
 
 export interface WorkspaceControllerLike {
@@ -69,6 +74,26 @@ export interface WorkspaceRegistryLike {
   }[]
   readonly archivedSessionIds: readonly string[]
   readonly pinnedSessionIds: readonly string[]
+}
+
+interface ModelCatalogLike {
+  readonly default: Record<string, unknown>
+  readonly routableProviders: readonly string[]
+  readonly groups: {
+    readonly id: string
+    readonly name: string
+    readonly models: {
+      readonly id: string
+      readonly name: string
+      readonly description?: string
+      readonly reasoning?: unknown
+    }[]
+  }[]
+  readonly failures: {
+    readonly id: string
+    readonly name: string
+    readonly message: string
+  }[]
 }
 
 export interface TypertGatewayLike {
@@ -141,6 +166,7 @@ export function installAggregatedGateway02(
   const origSessionSearch = sessionController.search.bind(sessionController)
   const origSessionCreate = sessionController.create.bind(sessionController)
   const origSessionSelectModel = sessionController.selectModel.bind(sessionController)
+  const origSessionModelCatalog = sessionController.modelCatalog.bind(sessionController)
   const origSessionRename = sessionController.rename.bind(sessionController)
   const origSessionFork = sessionController.fork.bind(sessionController)
   const origSessionPrompt = sessionController.prompt.bind(sessionController)
@@ -151,9 +177,15 @@ export function installAggregatedGateway02(
   const origSessionFollow = sessionController.follow.bind(sessionController)
   const origSessionProjections = sessionController.projections.bind(sessionController)
   const origSessionControl = sessionController.control.bind(sessionController)
+  const origSessionOpenWorkspacePath =
+    typeof sessionController.openWorkspacePath === 'function'
+      ? sessionController.openWorkspacePath.bind(sessionController)
+      : undefined
 
   const origWorkspaceRename = workspaceController.rename.bind(workspaceController)
   const origWorkspaceDelete = workspaceController.delete.bind(workspaceController)
+  const origWorkspaceInsertBefore = workspaceController.insertBefore.bind(workspaceController)
+  const origWorkspaceInsertSessionBefore = workspaceController.insertSessionBefore.bind(workspaceController)
   const origWorkspaceArchive = workspaceController.archiveSession.bind(workspaceController)
   const origWorkspaceUnarchive = workspaceController.unarchiveSession.bind(workspaceController)
   const origWorkspacePin = workspaceController.pinSession.bind(workspaceController)
@@ -316,6 +348,59 @@ export function installAggregatedGateway02(
     })) as { selected: Record<string, unknown> }
   })
 
+  // The DSH model picker asks the process-level catalog. Merge every connected
+  // device's catalog so a remote-only provider/model remains selectable; the
+  // click itself is routed by `selectModel` above.
+  patchMethod(sessionController, 'modelCatalog', async () => {
+    const local = (await origSessionModelCatalog()) as unknown as ModelCatalogLike
+    const groups = (local.groups ?? []).map(group => ({
+      ...group,
+      models: [...group.models],
+    }))
+    const byId = new Map(groups.map(group => [group.id, group]))
+    const routableProviders = new Set(local.routableProviders ?? [])
+    const failures = [...(local.failures ?? [])]
+
+    await Promise.all(
+      registry.clientList().map(async (client) => {
+        if (client.toView().state !== 'connected') return
+        try {
+          const remote = (await client.invokeUnary('session', 'modelCatalog', {})) as unknown as ModelCatalogLike
+          for (const group of remote.groups ?? []) {
+            const existing = byId.get(group.id)
+            if (existing === undefined) {
+              const copy = {
+                ...group,
+                name: `${client.toView().name} — ${group.name}`,
+                models: [...group.models],
+              }
+              groups.push(copy)
+              byId.set(group.id, copy)
+            } else {
+              const known = new Set(existing.models.map(model => model.id))
+              for (const model of group.models) {
+                if (!known.has(model.id)) existing.models.push(model)
+              }
+            }
+            routableProviders.add(group.id)
+          }
+          for (const failure of remote.failures ?? []) {
+            failures.push({ ...failure, id: `${String(client.id)}:${failure.id}` })
+          }
+        } catch {
+          // A disconnected/incompatible device must not break the local picker.
+        }
+      }),
+    )
+
+    return {
+      ...local,
+      groups,
+      routableProviders: [...routableProviders],
+      failures,
+    }
+  })
+
   patchMethod(sessionController, 'rename', async (request) => {
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner === undefined) return origSessionRename(request)
@@ -381,6 +466,23 @@ export function installAggregatedGateway02(
       signal,
     )) as { asOfSeq: number; values: Record<string, unknown> } | null
   })
+
+  if (origSessionOpenWorkspacePath !== undefined) {
+    patchMethod(sessionController, 'openWorkspacePath', async (request, signal) => {
+      const path = request.path
+      const remote = registry.snapshot().allPhysicalWorkspaces.find(workspace => {
+        if (workspace.deviceId === LOCAL_DEVICE_ID) return false
+        const root = workspace.path.replace(/[\\/]+$/, '')
+        return path === root || path.startsWith(`${root}/`) || path.startsWith(`${root}\\`)
+      })
+      if (remote !== undefined) {
+        throw new Error(
+          'Remote workspace paths can only be opened inside Native Mode; the aggregated mode will not open them on the local machine',
+        )
+      }
+      return origSessionOpenWorkspacePath(request, signal)
+    })
+  }
 
   // 5. session.page & session.follow (address-routed)
   patchMethod(sessionController, 'page', async (request, signal) => {
@@ -486,6 +588,76 @@ export function installAggregatedGateway02(
       }
     }
     return origWorkspaceDelete(request)
+  })
+
+  patchMethod(workspaceController, 'insertBefore', async (request) => {
+    if (decodeLogicalWorkspaceId(request.workspaceId) !== undefined) {
+      const snapshot = registry.snapshot()
+      const ids = snapshot.logicalWorkspaces.map(workspace => workspace.logicalWorkspaceId)
+      const from = ids.indexOf(request.workspaceId)
+      if (from !== -1) ids.splice(from, 1)
+      const before = request.beforeWorkspaceId === undefined
+        ? -1
+        : ids.indexOf(request.beforeWorkspaceId)
+      if (before === -1) ids.push(request.workspaceId)
+      else ids.splice(before, 0, request.workspaceId)
+      registry.updateAggregationConfig({ workspaceOrder: ids })
+      return { workspaceIds: ids }
+    }
+    const decodedRemote = decodeRemoteWorkspaceId(request.workspaceId)
+    if (decodedRemote.isRemote) {
+      const client = registry.client(decodedRemote.deviceId)
+      if (client !== undefined) {
+        const res = (await client.invokeUnary('workspace', 'insertBefore', {
+          request: {
+            workspaceId: decodedRemote.rawWorkspaceId,
+            ...(request.beforeWorkspaceId !== undefined
+              ? { beforeWorkspaceId: decodeRemoteWorkspaceId(request.beforeWorkspaceId).rawWorkspaceId }
+              : {}),
+          },
+        })) as { workspaceIds: readonly string[] }
+        return {
+          workspaceIds: res.workspaceIds.map(id =>
+            encodeRemoteWorkspaceId(decodedRemote.deviceId, id),
+          ),
+        }
+      }
+    }
+    return origWorkspaceInsertBefore(request)
+  })
+
+  patchMethod(workspaceController, 'insertSessionBefore', async (request) => {
+    // A Session cannot be moved between physical machines. For a logical
+    // Workspace the visual grouping stays as-is; the UI must not send the
+    // synthetic id to the local Workspace controller.
+    if (decodeLogicalWorkspaceId(request.workspaceId) !== undefined) {
+      const snapshot = registry.snapshot()
+      const lws = snapshot.logicalWorkspaces.find(w => w.logicalWorkspaceId === request.workspaceId)
+      return { workspace: lws !== undefined ? logicalToWorkspaceView(lws) : {} }
+    }
+    const decodedRemote = decodeRemoteWorkspaceId(request.workspaceId)
+    if (decodedRemote.isRemote) {
+      const client = registry.client(decodedRemote.deviceId)
+      const owner = registry.resolveSessionOwner(request.sessionId)
+      if (client !== undefined && owner !== undefined) {
+        const res = (await client.invokeUnary('workspace', 'insertSessionBefore', {
+          request: {
+            workspaceId: decodedRemote.rawWorkspaceId,
+            sessionId: owner.rawSessionId,
+            ...(request.beforeSessionId !== undefined
+              ? { beforeSessionId: decodeSessionId(request.beforeSessionId).rawSessionId }
+              : {}),
+          },
+        })) as { workspace: Record<string, unknown> }
+        return {
+          workspace: {
+            ...res.workspace,
+            workspaceId: request.workspaceId,
+          },
+        }
+      }
+    }
+    return origWorkspaceInsertSessionBefore(request)
   })
 
   patchMethod(workspaceController, 'archiveSession', async (request) => {

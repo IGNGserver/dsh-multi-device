@@ -106,6 +106,22 @@ export interface UpsertDeviceInput {
   readonly keepNativeAlive?: boolean
 }
 
+/** Explicitly create a Session on one remote device (per-conversation device choice). */
+export interface RemoteSessionCreateInput {
+  readonly deviceId: DeviceId
+  /** Remote workspace id on that device, when known. */
+  readonly workspaceId?: string
+  /** Remote working directory on that device, used when no workspace id is known. */
+  readonly cwd?: string
+  readonly agentPreset?: string
+}
+
+/** Register a new folder as a Workspace on one remote device. */
+export interface RemoteWorkspaceCreateInput {
+  readonly deviceId: DeviceId
+  readonly path: string
+}
+
 /** Connection lifecycle state of a device. */
 export type DeviceConnectionState =
   | 'disabled'
@@ -125,6 +141,16 @@ export interface DeviceView {
   readonly enabled: boolean
   readonly state: DeviceConnectionState
   readonly transportKind: 'ssh' | 'direct'
+  /** Sanitized SSH transport fields for the edit form (never includes a passphrase). */
+  readonly ssh?: {
+    readonly host: string
+    readonly port?: number
+    readonly username?: string
+    readonly privateKeyPath?: string
+    readonly proxyJump?: string
+    readonly remotePort?: number
+    readonly engine?: SshTunnelEngine
+  }
   /** Display target summary, e.g. `ssh://root@10.0.0.5:22 -> 127.0.0.1:3080` or `https://dev.internal:3080`. */
   readonly targetSummary: string
   /** Effective local URL when tunnel is up or direct URL. */
@@ -146,6 +172,20 @@ export interface DeviceView {
   readonly runningSessionCount: number
   readonly pendingApprovalCount: number
   readonly workspaceCount: number
+}
+
+/** A local private key discovered under `~/.ssh` for the device form. */
+export interface SshKeyEntry {
+  /** Absolute path on the local machine, e.g. `~/.ssh/id_ed25519` (expanded). */
+  readonly path: string
+  /** Basename shown in the picker. */
+  readonly name: string
+  /** Matching public key path when present. */
+  readonly publicKeyPath?: string
+  /** Whether the private key material is passphrase-protected. */
+  readonly encrypted: boolean
+  /** True when the file has group/other permission bits (ssh will reject it). */
+  readonly permissionsTooOpen: boolean
 }
 
 /** Parsed entry from the user's `~/.ssh/config`. */
@@ -203,6 +243,8 @@ export interface WorkspaceAggregationConfig {
   readonly preferredDeviceByLogicalId: Readonly<Record<string, DeviceId>>
   /** Custom display titles per logical workspace ID (`md-lws~...`). */
   readonly customTitleByLogicalId: Readonly<Record<string, string>>
+  /** Persisted display order of logical workspace IDs. */
+  readonly workspaceOrder: readonly string[]
   /** User-defined manual aggregation rules. */
   readonly manualRules: readonly ManualWorkspaceRule[]
 }

@@ -14,17 +14,18 @@
  *
  * @module dsh-multi-device/client/MultiDeviceHubPanel
  */
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import {
   type DeviceAuthMode,
   type DeviceId,
   type DeviceView,
   LOCAL_DEVICE_ID,
+  type SshKeyEntry,
   type SshTunnelEngine,
   type UpsertDeviceInput,
+  workspaceMemberKey,
 } from '../contract.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
-import { NativeViewport } from './NativeViewport.tsx'
 import { clientStore, type HubTabId, useMultiDeviceState } from './state.ts'
 
 export function MultiDeviceHubPanel({
@@ -42,15 +43,15 @@ export function MultiDeviceHubPanel({
   // Device Form State
   const [name, setName] = useState('')
   const [label, setLabel] = useState('')
-  const [transportKind, setTransportKind] = useState<'ssh' | 'direct'>('ssh')
   const [sshHost, setSshHost] = useState('')
   const [sshUser, setSshUser] = useState('')
   const [sshPort, setSshPort] = useState('22')
   const [sshKeyPath, setSshKeyPath] = useState('')
+  const [sshPassphrase, setSshPassphrase] = useState('')
+  const [sshKeys, setSshKeys] = useState<readonly SshKeyEntry[]>([])
   const [sshProxyJump, setSshProxyJump] = useState('')
   const [remotePort, setRemotePort] = useState('3080')
   const [sshEngine, setSshEngine] = useState<SshTunnelEngine>('auto')
-  const [directUrl, setDirectUrl] = useState('http://127.0.0.1:3081')
   const [authMode, setAuthMode] = useState<DeviceAuthMode>('auto')
   const [authCredential, setAuthCredential] = useState('')
   const [keepNativeAlive, setKeepNativeAlive] = useState(true)
@@ -63,6 +64,10 @@ export function MultiDeviceHubPanel({
   const [ruleTitle, setRuleTitle] = useState('')
   const [ruleGitRemote, setRuleGitRemote] = useState('')
   const [selectedMemberKeys, setSelectedMemberKeys] = useState<Set<string>>(() => new Set())
+  const [remoteWorkspaceDeviceId, setRemoteWorkspaceDeviceId] = useState('')
+  const [remoteWorkspacePath, setRemoteWorkspacePath] = useState('')
+  const [remoteWorkspaceError, setRemoteWorkspaceError] = useState<string | null>(null)
+  const [sessionNotice, setSessionNotice] = useState<string | null>(null)
 
   const resetForm = (dev?: DeviceView): void => {
     setTestFeedback(null)
@@ -71,15 +76,14 @@ export function MultiDeviceHubPanel({
       setEditingDevice(null)
       setName('')
       setLabel('')
-      setTransportKind('ssh')
       setSshHost('')
       setSshUser('')
       setSshPort('22')
       setSshKeyPath('')
+      setSshPassphrase('')
       setSshProxyJump('')
       setRemotePort('3080')
       setSshEngine('auto')
-      setDirectUrl('http://127.0.0.1:3081')
       setAuthMode('auto')
       setAuthCredential('')
       setKeepNativeAlive(true)
@@ -88,44 +92,55 @@ export function MultiDeviceHubPanel({
     setEditingDevice(dev)
     setName(dev.name)
     setLabel(dev.label ?? '')
-    setTransportKind(dev.transportKind)
+    setSshHost(dev.ssh?.host ?? '')
+    setSshUser(dev.ssh?.username ?? '')
+    setSshPort(String(dev.ssh?.port ?? 22))
+    setSshKeyPath(dev.ssh?.privateKeyPath ?? '')
+    setSshPassphrase('')
+    setSshProxyJump(dev.ssh?.proxyJump ?? '')
+    setRemotePort(String(dev.ssh?.remotePort ?? 3080))
+    setSshEngine(dev.ssh?.engine ?? 'auto')
+    setAuthMode('auto')
+    setAuthCredential('')
     setKeepNativeAlive(dev.keepNativeAlive)
   }
 
-  const buildInputFromForm = (): UpsertDeviceInput => {
-    return {
-      ...(editingDevice !== null ? { id: editingDevice.id } : {}),
-      name: name.trim() || sshHost.trim() || 'remote-device',
-      ...(label.trim() !== '' ? { label: label.trim() } : {}),
-      enabled: true,
-      keepNativeAlive,
-      transport:
-        transportKind === 'ssh'
-          ? {
-              kind: 'ssh',
-              host: sshHost.trim(),
-              ...(sshUser.trim() !== '' ? { username: sshUser.trim() } : {}),
-              ...(Number(sshPort) > 0 ? { port: Number(sshPort) } : {}),
-              ...(sshKeyPath.trim() !== '' ? { privateKeyPath: sshKeyPath.trim() } : {}),
-              ...(sshProxyJump.trim() !== '' ? { proxyJump: sshProxyJump.trim() } : {}),
-              remotePort: Number(remotePort) > 0 ? Number(remotePort) : 3080,
-              engine: sshEngine,
-            }
-          : {
-              kind: 'direct',
-              baseUrl: directUrl.trim(),
-            },
-      auth: {
-        mode: authMode,
-        ...(authCredential.trim() !== '' ? { credential: authCredential.trim() } : {}),
-      },
-    }
+  const buildInputFromForm = (): UpsertDeviceInput => ({
+    ...(editingDevice !== null ? { id: editingDevice.id } : {}),
+    name: name.trim() || sshHost.trim() || 'remote-device',
+    ...(label.trim() !== '' ? { label: label.trim() } : {}),
+    enabled: true,
+    keepNativeAlive,
+    transport: {
+      kind: 'ssh',
+      host: sshHost.trim(),
+      ...(sshUser.trim() !== '' ? { username: sshUser.trim() } : {}),
+      ...(Number(sshPort) > 0 ? { port: Number(sshPort) } : {}),
+      ...(sshKeyPath.trim() !== '' ? { privateKeyPath: sshKeyPath.trim() } : {}),
+      ...(sshPassphrase.trim() !== '' ? { passphrase: sshPassphrase.trim() } : {}),
+      ...(sshProxyJump.trim() !== '' ? { proxyJump: sshProxyJump.trim() } : {}),
+      remotePort: Number(remotePort) > 0 ? Number(remotePort) : 3080,
+      engine: sshEngine,
+    },
+    auth: {
+      mode: authMode,
+      ...(authCredential.trim() !== '' ? { credential: authCredential.trim() } : {}),
+    },
+  })
+
+  const refreshSshKeys = async (): Promise<void> => {
+    setSshKeys(await clientStore.listSshKeys())
   }
+
+  useEffect(() => {
+    if (showAddForm || editingDevice !== null) {
+      void refreshSshKeys()
+    }
+  }, [showAddForm, editingDevice])
 
   const handleImportSshHost = (alias: string): void => {
     const entry = state.snapshot.sshConfigHosts.find(h => h.alias === alias)
     if (entry === undefined) return
-    setTransportKind('ssh')
     setSshHost(entry.alias)
     if (name.trim() === '') setName(entry.alias)
     setSshUser(entry.user ?? '')
@@ -159,6 +174,33 @@ export function MultiDeviceHubPanel({
     }
     setShowAddForm(false)
     setEditingDevice(null)
+  }
+
+  const handleCreateRemoteWorkspace = async (): Promise<void> => {
+    setRemoteWorkspaceError(null)
+    if (remoteWorkspaceDeviceId === '' || remoteWorkspacePath.trim() === '') {
+      setRemoteWorkspaceError(t('remoteWorkspaceRequired'))
+      return
+    }
+    const res = await clientStore.createRemoteWorkspace({
+      deviceId: remoteWorkspaceDeviceId as DeviceId,
+      path: remoteWorkspacePath.trim(),
+    })
+    if (!res.ok) {
+      setRemoteWorkspaceError(res.error ?? t('remoteWorkspaceFailed'))
+      return
+    }
+    setRemoteWorkspacePath('')
+  }
+
+  const handleCreateSession = async (deviceId: DeviceId, workspaceId: string): Promise<void> => {
+    setSessionNotice(null)
+    const res = await clientStore.createRemoteSession({ deviceId, workspaceId })
+    setSessionNotice(
+      res.ok
+        ? `✓ ${t('newSessionCreated')} ${res.sessionId ?? ''}`
+        : `✕ ${t('newSessionFailed')}: ${res.error ?? ''}`,
+    )
   }
 
   const { snapshot } = state
@@ -285,101 +327,103 @@ export function MultiDeviceHubPanel({
                     onChange={e => setLabel(e.currentTarget.value)}
                   />
                 </div>
-                <div className="dsh-md-field">
-                  <label>{t('transportKind')}</label>
-                  <select
-                    className="dsh-md-select"
-                    value={transportKind}
-                    onChange={e => setTransportKind(e.currentTarget.value as 'ssh' | 'direct')}
-                  >
-                    <option value="ssh">{t('transportSsh')}</option>
-                    <option value="direct">{t('transportDirect')}</option>
-                  </select>
-                </div>
               </div>
 
-              {transportKind === 'ssh' ? (
-                <div className="dsh-md-grid">
-                  <div className="dsh-md-field">
-                    <label>{t('sshHost')}</label>
-                    <input
-                      className="dsh-md-input"
-                      required
-                      value={sshHost}
-                      placeholder={t('sshHostPlaceholder')}
-                      onChange={e => setSshHost(e.currentTarget.value)}
-                    />
-                  </div>
-                  <div className="dsh-md-field">
-                    <label>{t('sshUser')}</label>
-                    <input
-                      className="dsh-md-input"
-                      value={sshUser}
-                      placeholder="root / ubuntu"
-                      onChange={e => setSshUser(e.currentTarget.value)}
-                    />
-                  </div>
-                  <div className="dsh-md-field">
-                    <label>{t('sshPort')}</label>
-                    <input
-                      className="dsh-md-input"
-                      type="number"
-                      value={sshPort}
-                      onChange={e => setSshPort(e.currentTarget.value)}
-                    />
-                  </div>
-                  <div className="dsh-md-field">
-                    <label>{t('remoteDshPort')}</label>
-                    <input
-                      className="dsh-md-input"
-                      type="number"
-                      value={remotePort}
-                      onChange={e => setRemotePort(e.currentTarget.value)}
-                    />
-                  </div>
-                  <div className="dsh-md-field">
-                    <label>{t('sshKeyPath')}</label>
-                    <input
-                      className="dsh-md-input"
-                      value={sshKeyPath}
-                      placeholder="~/.ssh/id_ed25519"
-                      onChange={e => setSshKeyPath(e.currentTarget.value)}
-                    />
-                  </div>
-                  <div className="dsh-md-field">
-                    <label>{t('sshProxyJump')}</label>
-                    <input
-                      className="dsh-md-input"
-                      value={sshProxyJump}
-                      placeholder="bastion-host"
-                      onChange={e => setSshProxyJump(e.currentTarget.value)}
-                    />
-                  </div>
-                  <div className="dsh-md-field">
-                    <label>{t('sshEngine')}</label>
-                    <select
-                      className="dsh-md-select"
-                      value={sshEngine}
-                      onChange={e => setSshEngine(e.currentTarget.value as SshTunnelEngine)}
-                    >
-                      <option value="auto">{t('sshEngineAuto')}</option>
-                      <option value="system-ssh">{t('sshEngineSystem')}</option>
-                      <option value="ssh2">{t('sshEngineSsh2')}</option>
-                    </select>
-                  </div>
-                </div>
-              ) : (
+              <div className="dsh-md-grid">
                 <div className="dsh-md-field">
-                  <label>{t('directUrl')}</label>
+                  <label>{t('sshHost')}</label>
                   <input
                     className="dsh-md-input"
                     required
-                    value={directUrl}
-                    placeholder={t('directUrlPlaceholder')}
-                    onChange={e => setDirectUrl(e.currentTarget.value)}
+                    value={sshHost}
+                    placeholder={t('sshHostPlaceholder')}
+                    onChange={e => setSshHost(e.currentTarget.value)}
                   />
                 </div>
-              )}
+                <div className="dsh-md-field">
+                  <label>{t('sshUser')}</label>
+                  <input
+                    className="dsh-md-input"
+                    value={sshUser}
+                    placeholder="root / ubuntu"
+                    onChange={e => setSshUser(e.currentTarget.value)}
+                  />
+                </div>
+                <div className="dsh-md-field">
+                  <label>{t('sshPort')}</label>
+                  <input
+                    className="dsh-md-input"
+                    type="number"
+                    value={sshPort}
+                    onChange={e => setSshPort(e.currentTarget.value)}
+                  />
+                </div>
+                <div className="dsh-md-field">
+                  <label>{t('remoteDshPort')}</label>
+                  <input
+                    className="dsh-md-input"
+                    type="number"
+                    value={remotePort}
+                    onChange={e => setRemotePort(e.currentTarget.value)}
+                  />
+                </div>
+                <div className="dsh-md-field">
+                  <label>{t('sshKeySelect')}</label>
+                  <select
+                    className="dsh-md-select"
+                    value={sshKeyPath}
+                    onChange={e => setSshKeyPath(e.currentTarget.value)}
+                  >
+                    <option value="">{t('sshKeyAuto')}</option>
+                    {sshKeys.map(key => (
+                      <option key={key.path} value={key.path}>
+                        {key.name}{key.encrypted ? ' (🔒)' : ''}{key.permissionsTooOpen ? ' ⚠' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="dsh-md-field">
+                  <label>{t('sshKeyPath')}</label>
+                  <input
+                    className="dsh-md-input"
+                    value={sshKeyPath}
+                    placeholder="~/.ssh/id_ed25519"
+                    onChange={e => setSshKeyPath(e.currentTarget.value)}
+                  />
+                </div>
+                <div className="dsh-md-field">
+                  <label>{t('sshKeyPassphrase')}</label>
+                  <input
+                    className="dsh-md-input"
+                    type="password"
+                    autoComplete="new-password"
+                    value={sshPassphrase}
+                    placeholder={t('sshKeyPassphrasePlaceholder')}
+                    onChange={e => setSshPassphrase(e.currentTarget.value)}
+                  />
+                </div>
+                <div className="dsh-md-field">
+                  <label>{t('sshProxyJump')}</label>
+                  <input
+                    className="dsh-md-input"
+                    value={sshProxyJump}
+                    placeholder="bastion-host"
+                    onChange={e => setSshProxyJump(e.currentTarget.value)}
+                  />
+                </div>
+                <div className="dsh-md-field">
+                  <label>{t('sshEngine')}</label>
+                  <select
+                    className="dsh-md-select"
+                    value={sshEngine}
+                    onChange={e => setSshEngine(e.currentTarget.value as SshTunnelEngine)}
+                  >
+                    <option value="auto">{t('sshEngineAuto')}</option>
+                    <option value="system-ssh">{t('sshEngineSystem')}</option>
+                    <option value="ssh2">{t('sshEngineSsh2')}</option>
+                  </select>
+                </div>
+              </div>
 
               <div className="dsh-md-grid">
                 <div className="dsh-md-field">
@@ -533,6 +577,17 @@ export function MultiDeviceHubPanel({
                     </button>
                     <button
                       type="button"
+                      className="dsh-md-btn"
+                      onClick={() => {
+                        resetForm(dev)
+                        setTab('devices')
+                        setShowAddForm(true)
+                      }}
+                    >
+                      {t('editDevice')}
+                    </button>
+                    <button
+                      type="button"
                       className="dsh-md-btn dsh-md-btn-danger"
                       onClick={() => { void clientStore.removeDevice(dev.id) }}
                     >
@@ -548,6 +603,16 @@ export function MultiDeviceHubPanel({
 
       {tab === 'git' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div className="dsh-md-card" style={{ borderColor: 'rgba(96, 165, 250, 0.35)' }}>
+            <div style={{ fontSize: 12, color: 'var(--dsw-alias-label-secondary, #9ca3af)' }}>
+              {t('aggregatedScopeNotice')}
+            </div>
+            {sessionNotice !== null && (
+              <div style={{ fontSize: 12, color: sessionNotice.startsWith('✓') ? '#10b981' : '#ef4444' }}>
+                {sessionNotice}
+              </div>
+            )}
+          </div>
           <div className="dsh-md-card">
             <strong style={{ fontSize: 14 }}>{t('gitAutoTitle')}</strong>
             <div style={{ fontSize: 12, color: 'var(--dsw-alias-label-secondary, #9ca3af)' }}>
@@ -631,11 +696,28 @@ export function MultiDeviceHubPanel({
 
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                   {lws.members.map((m) => {
-                    const memberKey = `${m.deviceId}:${m.path}`
+                    const memberKey = workspaceMemberKey(m.deviceId, m.path)
                     const isExcluded = snapshot.aggregationConfig.excludedMemberKeys.includes(memberKey)
                     return (
                       <span key={memberKey} className="dsh-md-badge">
                         🖥 {m.deviceId === LOCAL_DEVICE_ID ? 'Local' : m.deviceName}: {m.path} ({m.sessionCount})
+                        {m.deviceId !== LOCAL_DEVICE_ID && (
+                          <button
+                            type="button"
+                            title={t('newSessionHere')}
+                            onClick={() => { void handleCreateSession(m.deviceId, m.remoteWorkspaceId) }}
+                            style={{
+                              border: 'none',
+                              background: 'transparent',
+                              color: '#60a5fa',
+                              cursor: 'pointer',
+                              marginLeft: 4,
+                              fontSize: 11,
+                            }}
+                          >
+                            ＋
+                          </button>
+                        )}
                         {lws.kind === 'git' && (
                           <button
                             type="button"
@@ -661,6 +743,53 @@ export function MultiDeviceHubPanel({
             ))}
           </div>
 
+          {snapshot.devices.length > 0 && (
+            <div className="dsh-md-card">
+              <strong style={{ fontSize: 14 }}>{t('remoteWorkspaceHeading')}</strong>
+              <div style={{ fontSize: 12, color: 'var(--dsw-alias-label-secondary, #9ca3af)' }}>
+                {t('remoteWorkspaceDesc')}
+              </div>
+              <div className="dsh-md-grid">
+                <div className="dsh-md-field">
+                  <label>{t('remoteWorkspaceDevice')}</label>
+                  <select
+                    className="dsh-md-select"
+                    value={remoteWorkspaceDeviceId}
+                    onChange={e => setRemoteWorkspaceDeviceId(e.currentTarget.value)}
+                  >
+                    <option value="">{t('remoteWorkspaceDevicePlaceholder')}</option>
+                    {snapshot.devices.map(device => (
+                      <option key={device.id} value={device.id}>
+                        {device.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="dsh-md-field">
+                  <label>{t('remoteWorkspacePath')}</label>
+                  <input
+                    className="dsh-md-input"
+                    value={remoteWorkspacePath}
+                    placeholder={t('remoteWorkspacePlaceholder')}
+                    onChange={e => setRemoteWorkspacePath(e.currentTarget.value)}
+                  />
+                </div>
+              </div>
+              {remoteWorkspaceError !== null && (
+                <div style={{ fontSize: 12, color: '#ef4444' }}>{remoteWorkspaceError}</div>
+              )}
+              <div>
+                <button
+                  type="button"
+                  className="dsh-md-btn dsh-md-btn-primary"
+                  onClick={() => { void handleCreateRemoteWorkspace() }}
+                >
+                  + {t('addRemoteWorkspace')}
+                </button>
+              </div>
+            </div>
+          )}
+
           {snapshot.allPhysicalWorkspaces.length > 0 && (
             <div className="dsh-md-card">
               <strong style={{ fontSize: 14 }}>{t('manualRuleBuilderTitle')}</strong>
@@ -684,7 +813,7 @@ export function MultiDeviceHubPanel({
               </div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                 {snapshot.allPhysicalWorkspaces.map((pw) => {
-                  const key = `${pw.deviceId}:${pw.path}`
+                  const key = workspaceMemberKey(pw.deviceId, pw.path)
                   const checked = selectedMemberKeys.has(key)
                   return (
                     <label
@@ -732,7 +861,26 @@ export function MultiDeviceHubPanel({
         </div>
       )}
 
-      {tab === 'native' && <NativeViewport t={t} embedded onOpenSettings={() => setTab('devices')} />}
+      {tab === 'native' && (
+        <div className="dsh-md-card" style={{ alignItems: 'flex-start' }}>
+          <strong style={{ fontSize: 14 }}>{t('nativeTabHintTitle')}</strong>
+          <div style={{ fontSize: 12, color: 'var(--dsw-alias-label-secondary, #9ca3af)' }}>
+            {t('nativeTabHint')}
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              type="button"
+              className="dsh-md-btn dsh-md-btn-primary"
+              onClick={() => clientStore.setDisplayMode('native')}
+            >
+              {t('openNative')}
+            </button>
+            <button type="button" className="dsh-md-btn" onClick={() => setTab('devices')}>
+              ⚙ {t('tabDevices')}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

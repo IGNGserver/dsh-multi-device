@@ -35,6 +35,12 @@ export interface Config {
         readonly sshTunnel?: boolean;
         /** Enable automatic Git remote workspace aggregation by default. Default: true. */
         readonly autoGitAggregate?: boolean;
+        /**
+         * Expose the legacy HTTP(S) direct transport. SSH is the supported user
+         * flow; direct exists only for advanced compatibility and tests.
+         * Default: false.
+         */
+        readonly directTransport?: boolean;
     };
 }
 export declare const Config: import("@deepseek-ai/schemastery").Schema<{
@@ -45,6 +51,7 @@ export declare const Config: import("@deepseek-ai/schemastery").Schema<{
         nativeMode?: boolean | undefined;
         sshTunnel?: boolean | undefined;
         autoGitAggregate?: boolean | undefined;
+        directTransport?: boolean | undefined;
     } | undefined;
 }, {
     dataFile: string;
@@ -54,6 +61,7 @@ export declare const Config: import("@deepseek-ai/schemastery").Schema<{
         nativeMode: boolean;
         sshTunnel: boolean;
         autoGitAggregate: boolean;
+        directTransport: boolean;
     };
 }>;
 export declare function apply(ctx: Context, config?: Config): void;

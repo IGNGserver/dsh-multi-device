@@ -1,4 +1,4 @@
-import type { SshConfigHostEntry, SshTransportConfig } from '../contract.ts';
+import type { SshConfigHostEntry, SshKeyEntry, SshTransportConfig } from '../contract.ts';
 export interface ParsedSshConfigBlock {
     readonly patterns: readonly string[];
     readonly options: Readonly<Record<string, string[]>>;
@@ -20,6 +20,15 @@ export interface ResolvedSshParameters {
 export declare function expandHomePath(inputPath: string, home?: string): string;
 /** Return existing default private key paths in `~/.ssh`. */
 export declare function discoverDefaultPrivateKeys(home?: string): string[];
+/**
+ * Discover candidate private keys under `<home>/.ssh` for the device form.
+ *
+ * Only files whose first bytes look like PEM/OpenSSH private-key material are
+ * returned. Passphrase detection is best-effort (OpenSSH PEM header or the
+ * legacy `Proc-Type: 4,ENCRYPTED` marker); the authoritative check remains the
+ * SSH client's prompt/agent.
+ */
+export declare function listLocalSshKeys(home?: string): SshKeyEntry[];
 /**
  * Parse a `user@host:port` or `ssh://user@host:port` shorthand into fields.
  */

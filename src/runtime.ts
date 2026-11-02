@@ -15,6 +15,8 @@ import type {
   DeviceId,
   ManualWorkspaceRule,
   MultiDeviceSnapshot,
+  RemoteSessionCreateInput,
+  RemoteWorkspaceCreateInput,
   UpsertDeviceInput,
   WorkspaceAggregationConfig,
 } from './contract.ts'
@@ -32,6 +34,9 @@ export interface ControlPlaneRequest {
     | 'removeDevice'
     | 'reconnectDevice'
     | 'testDevice'
+    | 'listSshKeys'
+    | 'createSession'
+    | 'createRemoteWorkspace'
     | 'updateAggregationConfig'
     | 'upsertManualRule'
     | 'removeManualRule'
@@ -81,6 +86,23 @@ export class MultiDeviceControlPlane {
           const res = await this.registry.testDeviceConnection(input)
           if (!res.ok) return res
           return { ok: true, value: res }
+        }
+
+        case 'listSshKeys':
+          return { ok: true, value: { keys: this.registry.listSshKeys() } }
+
+        case 'createSession': {
+          const input = payload as unknown as RemoteSessionCreateInput
+          const res = await this.registry.createRemoteSession(input)
+          if (!res.ok) return res
+          return { ok: true, value: { ...res, snapshot: this.registry.snapshot() } }
+        }
+
+        case 'createRemoteWorkspace': {
+          const input = payload as unknown as RemoteWorkspaceCreateInput
+          const res = await this.registry.createRemoteWorkspace(input)
+          if (!res.ok) return res
+          return { ok: true, value: { ...res, snapshot: this.registry.snapshot() } }
         }
 
         case 'updateAggregationConfig': {

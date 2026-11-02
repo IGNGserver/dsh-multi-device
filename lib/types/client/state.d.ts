@@ -1,4 +1,4 @@
-import { type DeviceId, type DisplayMode, type ManualWorkspaceRule, type MultiDeviceSnapshot, type UpsertDeviceInput, type WorkspaceAggregationConfig } from '../contract.ts';
+import { type DeviceId, type DisplayMode, type ManualWorkspaceRule, type MultiDeviceSnapshot, type RemoteSessionCreateInput, type RemoteWorkspaceCreateInput, type SshKeyEntry, type UpsertDeviceInput, type WorkspaceAggregationConfig } from '../contract.ts';
 import type { ControlPlaneRequest } from '../runtime.ts';
 export type HubTabId = 'native' | 'devices' | 'git';
 export interface MultiDeviceClientState {
@@ -60,6 +60,16 @@ declare class MultiDeviceClientStore {
     } | {
         ok: false;
         error: string;
+    }>;
+    listSshKeys(): Promise<SshKeyEntry[]>;
+    createRemoteSession(input: RemoteSessionCreateInput): Promise<{
+        ok: boolean;
+        sessionId?: string;
+        error?: string;
+    }>;
+    createRemoteWorkspace(input: RemoteWorkspaceCreateInput): Promise<{
+        ok: boolean;
+        error?: string;
     }>;
     updateAggregationConfig(patch: Partial<WorkspaceAggregationConfig>): Promise<void>;
     upsertManualRule(rule: ManualWorkspaceRule): Promise<void>;

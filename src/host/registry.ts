@@ -17,9 +17,13 @@ import {
   DeviceId,
   type DeviceView,
   decodeSessionId,
+  encodeRemoteSessionId,
   LOCAL_DEVICE_ID,
   type MultiDeviceSnapshot,
+  type RemoteSessionCreateInput,
+  type RemoteWorkspaceCreateInput,
   type SessionOriginMetadata,
+  type SshKeyEntry,
   type UpsertDeviceInput,
   type WorkspaceAggregationConfig,
 } from '../contract.ts'
@@ -29,10 +33,32 @@ import {
   type PhysicalWorkspaceInput,
   WorkspaceAggregator,
 } from './git-aggregator.ts'
+import { requestRemote } from './http-request.ts'
 import { NativeProxyManager } from './native-proxy.ts'
 import { RemoteDeviceClient, type RemoteDeviceCallbacks } from './remote-client.ts'
-import { listSshConfigHosts } from './ssh-config.ts'
+import { listLocalSshKeys, listSshConfigHosts } from './ssh-config.ts'
 import { probeSshTunnel } from './tunnel.ts'
+
+/**
+ * Credentials never belong in the device/aggregation document. Keep the
+ * public config free of launch tokens, cookies, bearer tokens and SSH
+ * passphrases; `DeviceAuthManager` owns them in the 0600 secrets file.
+ */
+function sanitizeDeviceConfig(config: DeviceConfig): DeviceConfig {
+  return {
+    ...config,
+    auth: {
+      mode: config.auth?.mode ?? 'auto',
+    },
+    transport:
+      config.transport.kind === 'ssh'
+        ? {
+            ...config.transport,
+            passphrase: undefined,
+          }
+        : config.transport,
+  }
+}
 
 interface PersistedRegistryDocument {
   readonly version: 1
@@ -80,10 +106,15 @@ export class DeviceRegistry {
     private readonly dataFilePath: string,
     secretsFilePath: string,
     private readonly localHost: LocalHostProvider,
-    private readonly options: { enableTunnels?: boolean; enableNativeProxy?: boolean } = {},
+    private readonly options: {
+      enableTunnels?: boolean
+      enableNativeProxy?: boolean
+      localOrigin?: () => string | undefined
+      allowDirectTransport?: boolean
+    } = {},
   ) {
     this.authManager = new DeviceAuthManager(secretsFilePath)
-    this.nativeProxyManager = new NativeProxyManager(this.authManager)
+    this.nativeProxyManager = new NativeProxyManager(this.authManager, options.localOrigin)
     this.aggregator = new WorkspaceAggregator()
     this.nativeProxyActive = options.enableNativeProxy !== false
     this.loadFromDisk()
@@ -166,6 +197,12 @@ export class DeviceRegistry {
     if (input.transport.kind === 'ssh' && this.options.enableTunnels === false) {
       return { ok: false, error: 'SSH tunnels are disabled in plugin configuration' }
     }
+    if (input.transport.kind === 'direct' && this.options.allowDirectTransport !== true) {
+      return {
+        ok: false,
+        error: 'HTTP(S) direct transport is disabled; add the device over SSH',
+      }
+    }
 
     const id = input.id ? DeviceId(input.id.trim()) : DeviceId(`dev-${randomUUID().slice(0, 8)}`)
     if (id === LOCAL_DEVICE_ID) {
@@ -182,10 +219,17 @@ export class DeviceRegistry {
       keepNativeAlive: input.keepNativeAlive !== false,
     }
 
-    this.configs.set(id, config)
+    if (input.auth?.credential !== undefined) {
+      this.authManager.setAuthCredential(id, input.auth.credential)
+    }
+    if (input.transport.kind === 'ssh' && input.transport.passphrase !== undefined) {
+      this.authManager.setSshPassphrase(id, input.transport.passphrase)
+    }
+    const sanitized = sanitizeDeviceConfig(config)
+    this.configs.set(id, sanitized)
     this.saveToDisk()
 
-    const client = await this.mountClient(config)
+    const client = await this.mountClient(sanitized)
     this.bumpRevision()
     this.notifyWorkspacesChanged()
     return { ok: true, device: client.toView() }
@@ -215,12 +259,71 @@ export class DeviceRegistry {
     return true
   }
 
+  /** List local private-key candidates for the add/edit device form. */
+  listSshKeys(): SshKeyEntry[] {
+    return listLocalSshKeys()
+  }
+
+  /**
+   * Create a Session directly on an explicitly chosen remote device. The
+   * returned ID is namespaced exactly like a Session discovered by polling, so
+   * the official Session view can open it immediately.
+   */
+  async createRemoteSession(
+    input: RemoteSessionCreateInput,
+  ): Promise<{ ok: true; sessionId: string; agentPreset?: string } | { ok: false; error: string }> {
+    const client = this.clients.get(input.deviceId)
+    if (client === undefined) return { ok: false, error: 'Device is not configured' }
+    try {
+      const created = (await client.invokeUnary('session', 'create', {
+        request: {
+          ...(input.workspaceId !== undefined ? { workspaceId: input.workspaceId } : {}),
+          ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
+          ...(input.agentPreset !== undefined ? { agentPreset: input.agentPreset } : {}),
+        },
+      })) as { sessionId: string; agentPreset?: string }
+      this.bumpRevision()
+      this.notifyWorkspacesChanged()
+      return {
+        ok: true,
+        sessionId: encodeRemoteSessionId(input.deviceId, created.sessionId),
+        ...(created.agentPreset !== undefined ? { agentPreset: created.agentPreset } : {}),
+      }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  /** Register one folder as a Workspace on a remote device. */
+  async createRemoteWorkspace(
+    input: RemoteWorkspaceCreateInput,
+  ): Promise<{ ok: true; workspace: unknown } | { ok: false; error: string }> {
+    const client = this.clients.get(input.deviceId)
+    if (client === undefined) return { ok: false, error: 'Device is not configured' }
+    try {
+      const created = await client.invokeUnary('workspace', 'create', {
+        request: { path: input.path },
+      })
+      this.bumpRevision()
+      this.notifyWorkspacesChanged()
+      return { ok: true, workspace: created }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
   /** Test reachability & authentication of a candidate device without saving it. */
   async testDeviceConnection(
     input: UpsertDeviceInput,
   ): Promise<{ ok: true; protocolVersion: string; remoteDshVersion?: string; latencyMs: number } | { ok: false; error: string }> {
     if (this.isSelfLoop(input.transport)) {
       return { ok: false, error: 'Self-loop rejected: target points to this local DSH host' }
+    }
+    if (input.transport.kind === 'direct' && this.options.allowDirectTransport !== true) {
+      return {
+        ok: false,
+        error: 'HTTP(S) direct transport is disabled; add the device over SSH',
+      }
     }
 
     let baseUrl: string
@@ -254,7 +357,7 @@ export class DeviceRegistry {
       }
 
       // Probe 0.2
-      const res02 = await fetch(new URL('/api/session/list', baseUrl).href, {
+      const res02 = await requestRemote(new URL('/api/session/list', baseUrl).href, {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -263,9 +366,10 @@ export class DeviceRegistry {
           method: 'session/list',
           payload: { args: { _request: {} } },
         }),
+        timeoutMs: 15_000,
       }).catch(() => undefined)
 
-      if (res02?.ok) {
+      if (res02 !== undefined && res02.status >= 200 && res02.status < 300) {
         return {
           ok: true,
           protocolVersion: '0.2',
@@ -275,7 +379,7 @@ export class DeviceRegistry {
       }
 
       // Probe 0.1
-      const res01 = await fetch(new URL('/api/host.describe', baseUrl).href, {
+      const res01 = await requestRemote(new URL('/api/host.describe', baseUrl).href, {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -284,10 +388,16 @@ export class DeviceRegistry {
           method: 'host.describe',
           payload: {},
         }),
+        timeoutMs: 15_000,
       }).catch(() => undefined)
 
-      if (res01?.ok) {
-        const body = (await res01.json().catch(() => ({}))) as { result?: { value?: { version?: string } } }
+      if (res01 !== undefined && res01.status >= 200 && res01.status < 300) {
+        let body: { result?: { value?: { version?: string } } } = {}
+        try {
+          body = JSON.parse(res01.body.toString('utf8')) as typeof body
+        } catch {
+          // Keep the default version label.
+        }
         return {
           ok: true,
           protocolVersion: '0.1',
@@ -406,7 +516,25 @@ export class DeviceRegistry {
     return { client, rawSessionId: decoded.rawSessionId }
   }
 
-  private async mountClient(config: DeviceConfig): Promise<RemoteDeviceClient> {
+  private hydrateConfig(config: DeviceConfig): DeviceConfig {
+    const secret = this.authManager.storedSecret(config.id)
+    const credential = secret?.authCredential
+    const passphrase = secret?.sshPassphrase
+    return {
+      ...config,
+      auth: {
+        ...config.auth,
+        ...(credential !== undefined && credential !== '' ? { credential } : {}),
+      },
+      transport:
+        config.transport.kind === 'ssh' && passphrase !== undefined && passphrase !== ''
+          ? { ...config.transport, passphrase }
+          : config.transport,
+    }
+  }
+
+  private async mountClient(storedConfig: DeviceConfig): Promise<RemoteDeviceClient> {
+    const config = this.hydrateConfig(storedConfig)
     let client = this.clients.get(config.id)
     const callbacks: RemoteDeviceCallbacks = {
       onStateChanged: () => {
@@ -461,7 +589,13 @@ export class DeviceRegistry {
         return false
       }
     }
-    return false
+    // An SSH tunnel pointing back at this same DSH listener creates a loop.
+    const hostPart = transport.host.trim().replace(/^.*@/, '').replace(/:\d+$/, '')
+    const remotePort = transport.remotePort ?? 3080
+    return (
+      ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(hostPart.toLowerCase()) &&
+      remotePort === localPort
+    )
   }
 
   private bumpRevision(): void {
@@ -479,18 +613,32 @@ export class DeviceRegistry {
 
   private loadFromDisk(): void {
     if (!existsSync(this.dataFilePath)) return
+    let migratedSecrets = false
     try {
       const raw = JSON.parse(readFileSync(this.dataFilePath, 'utf8')) as Partial<PersistedRegistryDocument>
       if (Array.isArray(raw.devices)) {
         for (const dev of raw.devices) {
           if (dev && typeof dev.id === 'string' && typeof dev.name === 'string' && dev.transport) {
-            this.configs.set(DeviceId(dev.id), dev)
+            const id = DeviceId(dev.id)
+            // Migrate credentials that older builds wrote into the device file.
+            const legacyCredential = dev.auth?.credential
+            const legacyPassphrase = dev.transport.kind === 'ssh' ? dev.transport.passphrase : undefined
+            if (legacyCredential !== undefined && legacyCredential.trim() !== '') {
+              this.authManager.setAuthCredential(id, legacyCredential)
+              migratedSecrets = true
+            }
+            if (legacyPassphrase !== undefined && legacyPassphrase.trim() !== '') {
+              this.authManager.setSshPassphrase(id, legacyPassphrase)
+              migratedSecrets = true
+            }
+            this.configs.set(id, sanitizeDeviceConfig(dev))
           }
         }
       }
       if (raw.aggregation && typeof raw.aggregation === 'object') {
         this.aggregator.setConfig({ ...DEFAULT_AGGREGATION_CONFIG, ...raw.aggregation })
       }
+      if (migratedSecrets) this.saveToDisk()
     } catch {
       // Ignore corrupt config file
     }

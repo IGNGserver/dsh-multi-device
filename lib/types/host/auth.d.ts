@@ -8,6 +8,10 @@ export interface StoredDeviceSecret {
     /** Raw 32-byte base64url HMAC secret from remote `.credentials.yaml` if bootstrapped via SSH */
     readonly signingSecret?: string;
     readonly bearerToken?: string;
+    /** Launch URL/token or explicit cookie/bearer credential entered by the user. */
+    readonly authCredential?: string;
+    /** Passphrase for an encrypted local SSH private key. */
+    readonly sshPassphrase?: string;
     readonly updatedAt: number;
 }
 /** Compute the exact DSH 0.2 cookie name for an HTTP Host authority (`127.0.0.1:3080`). */
@@ -33,6 +37,15 @@ export declare function parseSigningSecretFromCredentialsYaml(yamlText: string):
  */
 export declare function resolveRemoteAuthority(device: DeviceConfig): string;
 /**
+ * Authority used inside a DSH browser-session cookie. DSH 0.2 hashes the
+ * normalized request authority into the cookie name and signs it into the
+ * payload. Plain HTTP cookies use `host:port`; TLS listeners use `origin`
+ * (`https://host:port`).
+ */
+export declare function resolveRemoteCookieAuthority(device: DeviceConfig): string;
+/** HTTP scheme used when constructing the remote `Origin` header. */
+export declare function resolveRemoteScheme(device: DeviceConfig): 'http' | 'https';
+/**
  * Manages persisted authentication state and headers for all configured devices.
  */
 export declare class DeviceAuthManager {
@@ -42,6 +55,12 @@ export declare class DeviceAuthManager {
     load(): void;
     private save;
     removeDevice(deviceId: DeviceId): void;
+    /** Read the persisted secret record for a device (never exposed to the Client). */
+    storedSecret(deviceId: DeviceId): StoredDeviceSecret | undefined;
+    /** Persist or clear the explicit auth credential entered in the device form. */
+    setAuthCredential(deviceId: DeviceId, credential: string | undefined): void;
+    /** Persist or clear the passphrase for an encrypted local SSH key. */
+    setSshPassphrase(deviceId: DeviceId, passphrase: string | undefined): void;
     /**
      * Build the HTTP headers (`Host`, `Origin`, `Cookie`, `Authorization`) needed to authenticate
      * against `device` over `effectiveBaseUrl`.
@@ -60,7 +79,7 @@ export declare class DeviceAuthManager {
     /**
      * Exchange a DSH launch token (`/?token=<launchToken>`) for a persistent `dsh-auth-*` cookie.
      */
-    exchangeLaunchToken(deviceId: DeviceId, effectiveBaseUrl: string, authority: string, launchToken: string): Promise<{
+    exchangeLaunchToken(deviceId: DeviceId, effectiveBaseUrl: string, authority: string, cookieAuthority: string, launchToken: string): Promise<{
         ok: true;
     } | {
         ok: false;

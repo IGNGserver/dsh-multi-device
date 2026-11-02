@@ -7,12 +7,11 @@
 ## 核心特性
 
 ### 1. 多设备连接与系统 SSH 深度复用
-- **SSH 隧道（默认推荐）**：远端 `dsh web` 保持默认环回监听（`127.0.0.1:3080`），无需暴露公网端口。插件自动在本地分配回环端口、建立隧道、探活保活并按指数退避 + 抖动自动重连。
-- **100% 复用 `~/.ssh/config`**：
-  - 内置 `~/.ssh/config`（含 `Include` 指令、通配符、`!negation`、`HostName`、`User`、`Port`、`IdentityFile`、`ProxyJump`、`ProxyCommand`、`%h/%p/%r/%u` 占位符）解析器。
-  - UI 支持**一键从 `~/.ssh/config` 导入主机别名**。
-  - 支持双引擎：`system-ssh`（默认调用系统 `ssh -N -L`，原生支持 `ProxyJump`、macOS Keychain `UseKeychain`、`SSH_AUTH_SOCK` / 1Password Agent）与 `ssh2` 内置库回退。
-- **HTTP(S) 直连**：支持已配置外部隧道或 TLS 的远端 `http(s)://host:port` 直接接入。
+- **只提供 SSH 隧道**：远端 `dsh web` 保持默认环回监听（`127.0.0.1:3080`），无需暴露公网端口。插件自动在本地分配回环端口、建立隧道、探活保活并按指数退避 + 抖动自动重连。HTTP(S) direct 仅作为默认关闭的高级兼容开关保留，UI 不提供。
+- **复用 `~/.ssh/config`**：
+  - 内置常见指令解析器（`Include`、通配符、`!negation`、`HostName`、`User`、`Port`、`IdentityFile`、`ProxyJump`、`ProxyCommand`、`%h/%p/%r/%u`）。
+  - UI 支持**一键从 `~/.ssh/config` 导入主机别名**，并从本机 `~/.ssh` 私钥列表中选择密钥。
+  - 默认引擎是 `system-ssh`（系统 `ssh -N -L`，完整继承 `ProxyJump`、macOS Keychain、`SSH_AUTH_SOCK` / 1Password Agent）。`ssh2` 引擎仅作为回退，要求 known_hosts 中已有主机密钥，且不支持 `ProxyJump`/`ProxyCommand`；遇到这两类配置会明确报错而不是静默降级。
 - **自动鉴权与持久登录**：
   - **SSH 自动鉴权（Auto）**：通过 SSH 连接时可自动只读提取远端 `$DSH_HOME/.credentials.yaml` 的 `client-connection/browser-session` 签名密钥，在本地签发 30 天有效期的 `dsh-auth-*` Cookie，免去手动复制启动 Token。
   - **Token / 启动链接兑换**：支持粘贴 `dsh web` 启动输出的 `http://127.0.0.1:3080/?token=...`，自动兑换并持久化签名 Cookie（`0600` 权限原子写入），跨远端重启持久有效。
@@ -24,11 +23,11 @@
   - 原生支持跨设备新建会话、发送提示词、实时流式输出（`assistant-stream`）、工具调用卡片、取消生成、重命名、Fork、归档/取消归档、置顶、全文搜索，以及跨设备**工具越权审批（`approval/request`）**与**交互式提问（`user-questions/request`）**。
   - 会话行显示设备徽标，悬停卡片展示所属设备、状态、目录路径与 Git 仓库，会话 `...` 菜单支持一键跳转至所属设备的原生模式。
 - **原生模式（Native Mode）与页面保活（Keep-Alive）**：
-  - 在 DSH Desktop / Web 内直接加载指定设备完整的远端 DSH Web 页面，100% 保留远端自己的 DSH 版本、主题、已装插件与界面效果。
-  - 每个设备拥有独立的本地环回反向代理（自动完成 `Host`/`Origin` 归一化、Cookie 注入、WebSocket `/api/remote.mux` 升级转发与 `X-Frame-Options` / `frame-ancestors` 剥离），同时适配 Electron Desktop `<webview>`（`dshDesktop.browser`）与标准 `<iframe>`。
+  - 在 DSH Desktop / Web 内直接加载指定设备完整的远端 DSH Web 页面，保留远端自己的 DSH 版本、主题、已装插件与界面效果。
+  - 每个设备拥有独立的本地环回反向代理（自动完成 `Host`/`Origin` 归一化、Cookie 注入、WebSocket `/api/remote.mux` 升级转发、一次性代理 token 与 `frame-ancestors` 本地白名单），同时适配 Electron Desktop `<webview>`（`dshDesktop.browser`）与标准 `<iframe>`。
   - **DOM 级后台保活**：已打开的设备页面在切换模式或切换设备时常驻 DOM（`display: none`），实现 **0ms 瞬时切换**，不丢失滚动位置、未发送草稿与实时流连接。
 - **双向故障隔离**：
-  - 聚合模式网关（`AggregatedGateway`）与原生模式代理/控制面（`NativeProxyManager` + `/multi-device/api`）完全解耦。即使远端 DSH 版本升级导致 `/api` 聚合接口不兼容，原生模式与设备管理中枢依然 100% 可用；反之亦然。
+  - 聚合模式网关（`AggregatedGateway`）与原生模式代理/控制面（`NativeProxyManager` + `/multi-device/api`）完全解耦。即使远端 DSH 版本升级导致 `/api` 聚合接口不兼容，原生模式与设备管理中枢依然可用；反之亦然。
   - 支持右上角悬浮胶囊栏一键切换或快捷键 `Cmd/Ctrl + Shift + M` 快速切换。
 
 ### 3. Git Remote 自动工作区聚合
@@ -41,7 +40,15 @@
 
 ### 4. 设备独立性与跨版本兼容
 - 每台远端设备独立运行自己的 `dsh web`，本插件不接管远端 Agent 循环、模型配置、工具执行或沙箱环境。
-- 远端零插件要求，自动探测并同时兼容 **DSH 0.2.x**（`/api/<ns>/<method>` + `/api/remote.mux`）与 **DSH 0.1.x**（`/api/<domain>.<method>` + `/api/events.mux`）。
+- 远端零插件要求，自动探测并同时兼容 **DSH 0.2.x**（`/api/<ns>/<method>` + `/api/remote.mux`）与 **DSH 0.1.x**（`/api/<domain>.<method>` + `/api/events.mux`）。DSH 0.1.x 只支持冷读/轮询，不提供实时会话流。
+- 开发基线为 DSH `0.2.0-rc.2`，并针对 `0.2.1-rc.5` 的 Host/Origin 校验、模型目录和原生代理行为补了回归测试；peer 版本允许 `0.2.x`。
+
+### 5. 聚合模式的能力边界
+
+- **原生模式**才是完整的远端环境：远端版本、主题、插件、设置、模型目录、文件上传、终端与文件浏览都来自远端。
+- **聚合模式**是“会话与工作区聚合”：它会合并远端模型目录，并路由会话列表、创建、提示词、取消、重命名、Fork、队列、审批与问答；但 `fileUploads`、`/api/session/uploadFileBinary`、终端、远端文件打开和全局设置仍属于本地 DSH 或原生模式。
+- 需要附件、终端、远端设置或完整远端文件操作时，请切到原生模式；聚合模式不会伪装成完整远端客户端。
+- SSH 自动鉴权会读取远端 `$DSH_HOME/.credentials.yaml` 并在本机保存 30 天 Owner Cookie。共享远端环境请改用 Token 模式或原生模式手工登录，避免把 Owner 权限长期留在本机。
 
 ---
 
@@ -68,7 +75,7 @@ dsh plugin --profile desktop add file:$(pwd)
    - 点击左侧边栏导航图标 **「多设备中枢 (Multi-Device Hub)」**，或点击窗口右上角悬浮切换栏的 `⚙` 按钮，或前往 **设置 → 内置插件 → 多设备管理**。
 2. **添加远端设备**：
    - 点击 **「+ 添加设备」**。
-   - 若系统已有 `~/.ssh/config`，直接在右上角下拉框 **「从 ~/.ssh/config 快速导入」** 选择主机别名即可自动填充；也可手动填写 `host`、端口、用户名与远端 DSH 端口（默认 `3080`）。
+   - 若系统已有 `~/.ssh/config`，直接在右上角下拉框 **「从 ~/.ssh/config 快速导入」** 选择主机别名即可自动填充；私钥可从本机 `~/.ssh` 列表选择，也可手动填写路径。加密私钥可在表单里输入口令（口令存放在 0600 secrets 文件，不写入设备 JSON）。
    - 点击 **「测试连接」** 验证连通性、远端 DSH 版本与延迟，然后点击 **「保存设备」**。
 3. **使用双模式与 Git 聚合**：
    - **聚合模式**：直接在官方左侧边栏查看自动按 Git 仓库聚合的逻辑工作区与跨机セッション，点击任意会话即可在官方对话区流式对话、审批工具调用。
@@ -93,6 +100,7 @@ dsh plugin --profile desktop add file:$(pwd)
       nativeMode: true        # 启用原生模式本地反向代理与保活视图
       sshTunnel: true         # 启用 SSH 隧道托管
       autoGitAggregate: true  # 默认开启 Git Remote 自动工作区聚合
+      directTransport: false  # 高级兼容：HTTP(S) 直连；默认关闭，UI 不提供
 ```
 
 ---
@@ -108,7 +116,8 @@ dsh plugin --profile desktop add file:$(pwd)
 │   ├── contract.ts                  # 前后端共享类型契约、碰撞安全 ID 编解码与 Git URL 归一化
 │   ├── runtime.ts                   # 控制面 HTTP (/multi-device/api) 与实时 SSE (/multi-device/events)
 │   ├── host/
-│   │   ├── ssh-config.ts            # ~/.ssh/config 解析器与参数决议
+│   │   ├── ssh-config.ts            # ~/.ssh/config 解析器、私钥发现与参数决议
+│   │   ├── http-request.ts          # 保留 Host/Origin 的 Node HTTP(S) 载体
 │   │   ├── tunnel.ts                # 双引擎 SSH 本地端口转发与退避重连 (system-ssh + ssh2)
 │   │   ├── auth.ts                  # DSH 0.2/0.1 鉴权管理、Token 兑换与 SSH 自动密钥引导
 │   │   ├── native-proxy.ts          # 原生模式独立本地反向代理（HTTP + WebSocket 升级转发）

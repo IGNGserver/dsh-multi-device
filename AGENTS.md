@@ -12,7 +12,7 @@ Worktree: `~/项目/.wt/DSH多设备插件/<slug>`
 
 ## 这是什么
 
-DeepSeek Harness（DSH）多设备管理插件：支持 SSH 隧道与 HTTP(S) 直连、系统 `~/.ssh/config` 复用、Git Remote 自动工作区聚合，以及聚合模式与原生模式（Keep-Alive 保活）双模式切换。`main` 是开发线，不代表稳定版。
+DeepSeek Harness（DSH）多设备管理插件：以 SSH 隧道连接远端 DSH（HTTP(S) direct 仅保留为默认关闭的高级兼容开关），复用系统 `~/.ssh/config` 与本机私钥，支持 Git Remote 自动工作区聚合，以及聚合模式与原生模式（Keep-Alive 保活）双模式切换。`main` 是开发线，不代表稳定版。
 
 ## 开工与工作区纪律（主目录无代码 + 从远端 `origin/main` 拉取）
 
@@ -59,5 +59,5 @@ DeepSeek Harness（DSH）多设备管理插件：支持 SSH 隧道与 HTTP(S) �
 ## 环境事实（不含凭据）
 
 - 远端仓库：`https://github.com/IGNGserver/dsh-multi-device`
-- 运行方式：作为 Cordis 插件安装于本地 DSH Desktop（`$DSH_HOME/profiles/desktop`）或 DSH Web（`$DSH_HOME/profiles/web`）中，通过 SSH 隧道或 HTTP(S) 连接多台远端 `dsh web` 开发机。
+- 运行方式：作为 Cordis 插件安装于本地 DSH Desktop（`$DSH_HOME/profiles/desktop`）或 DSH Web（`$DSH_HOME/profiles/web`）中，通过 SSH 隧道连接多台远端 `dsh web` 开发机（HTTP(S) direct 仅默认关闭的高级兼容）。
 - CI/发布触发器：`ci.yml` 由 push `main` 与所有 PR 触发；`release.yml` 由 `v*.*.*` tag 推送触发（默认 `test` 渠道 prerelease），亦支持在 tag 上手动 `workflow_dispatch` 指定 `test` / `stable` 渠道。
