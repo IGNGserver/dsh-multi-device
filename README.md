@@ -20,7 +20,7 @@
 ### 2. 双模式界面（聚合模式 + 原生模式，互不依赖）
 - **聚合模式（Aggregated Mode）**：
   - 将所有设备的逻辑工作区与会话无缝整合进 DSH 官方左侧边栏工作区树与官方对话区。
-  - 原生支持跨设备新建会话、发送提示词、实时流式输出（`assistant-stream`）、工具调用卡片、取消生成、重命名、Fork、归档/取消归档、置顶、全文搜索，以及跨设备**工具越权审批（`approval/request`）**与**交互式提问（`user-questions/request`）**。
+  - 原生支持跨设备新建会话、发送提示词、实时流式输出（`assistant-stream`）、工具调用卡片、取消生成、重命名、Fork、归档/取消归档、置顶、全文搜索，以及跨设备**工具越权审批（`approval/request`）**、**交互式提问（`user-questions/request`）**与**计划评审（`plan-review/request`）**。
   - 会话行显示设备徽标，悬停卡片展示所属设备、状态、目录路径与 Git 仓库，会话 `...` 菜单支持一键跳转至所属设备的原生模式。
 - **原生模式（Native Mode）与页面保活（Keep-Alive）**：
   - 在 DSH Desktop / Web 内直接加载指定设备完整的远端 DSH Web 页面，保留远端自己的 DSH 版本、主题、已装插件与界面效果。
@@ -46,7 +46,7 @@
 ### 5. 聚合模式的能力边界
 
 - **原生模式**才是完整的远端环境：远端版本、主题、插件、设置、模型目录、文件上传、终端与文件浏览都来自远端。
-- **聚合模式**是“会话与工作区聚合”：它会合并远端模型目录，并路由会话列表、创建、提示词、取消、重命名、Fork、队列、审批与问答；但 `fileUploads`、`/api/session/uploadFileBinary`、终端、远端文件打开和全局设置仍属于本地 DSH 或原生模式。
+- **聚合模式**是“会话与工作区聚合”：它会合并远端模型目录（同名 provider 按设备分开展示），并路由会话列表、创建、提示词、取消、重命名、Fork、队列、审批、问答与计划评审；但 `fileUploads`、`/api/session/uploadFileBinary`、终端、远端文件打开和全局设置仍属于本地 DSH 或原生模式。
 - 需要附件、终端、远端设置或完整远端文件操作时，请切到原生模式；聚合模式不会伪装成完整远端客户端。
 - 默认的 SSH 自动鉴权不会读取远端 `.credentials.yaml`。显式开启 `bootstrapFromRemoteCredentials` 后，本机只保存兑换出的 Cookie，不保存签名密钥。共享远端环境仍建议使用 Token 模式或原生模式手工登录。
 
@@ -143,5 +143,5 @@ dsh plugin --profile desktop add file:$(pwd)
 pnpm run typecheck   # TypeScript 严格类型检查
 pnpm run build       # 构建 lib/index.js、lib/client.js、lib/contract.js 与 lib/types/
 pnpm run test        # 运行 Vitest 单元与端到端集成测试
-pnpm run check       # 依次执行 typecheck + build + test
+pnpm run check       # 依次执行 verify:version + build（含 tsc 类型检查）+ test
 ```

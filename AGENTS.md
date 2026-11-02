@@ -34,7 +34,7 @@ DeepSeek Harness（DSH）多设备管理插件：以 SSH 隧道连接远端 DSH�
 - 类型检查：`pnpm run typecheck`
 - 构建：`pnpm run build`
 - 单元与集成测试：`pnpm run test`
-- 全量一键校验：`pnpm run check`（依次执行 `verify:version`、`typecheck`、`build`、`test`）
+- 全量一键校验：`pnpm run check`（依次执行 `verify:version`、`build`、`test`；`build` 内部会跑 `tsc`，不再单独重复 `typecheck`）
 - CI workflow：`.github/workflows/ci.yml`（在 push `main` 与 `pull_request` 时自动运行全套校验）。
 
 ## 与全局规范的差异（本仓库特有约束）

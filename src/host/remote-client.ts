@@ -25,12 +25,28 @@ import {
   type DeviceView,
   encodeRemoteEventId,
   encodeRemoteSessionId,
+  type PendingInteractionKind,
   type RemoteProtocolVersion,
 } from '../contract.ts'
 import { DeviceAuthManager } from './auth.ts'
 import { discoverRemoteGitRemotesViaSsh } from './git-aggregator.ts'
 import { headerValue, requestRemote, responseAsFetchResponse } from './http-request.ts'
+import { BoundedStreamQueue } from './stream-queue.ts'
 import { SshTunnel } from './tunnel.ts'
+
+/** Map a remote waterfall event name to the pending kind shown in the UI. */
+export function pendingInteractionKind(event: string): PendingInteractionKind | undefined {
+  switch (event) {
+    case 'approval/request':
+      return 'approval'
+    case 'user-questions/request':
+      return 'question'
+    case 'plan-review/request':
+      return 'plan-review'
+    default:
+      return undefined
+  }
+}
 
 export interface RemoteSessionSummary {
   readonly sessionId: string
@@ -63,7 +79,7 @@ export interface RemotePendingInteraction {
   readonly deviceId: DeviceId
   readonly rawSessionId: string
   readonly namespacedSessionId: string
-  readonly kind: 'approval' | 'question'
+  readonly kind: PendingInteractionKind
   readonly eventName: string
   readonly request: Record<string, unknown>
 }
@@ -329,26 +345,20 @@ export class RemoteDeviceClient {
     }
 
     const streamId = randomUUID()
-    const queue: Array<
+    const queue = new BoundedStreamQueue<
       | { type: 'item'; value?: unknown }
       | { type: 'end' }
       | { type: 'error'; error: { code: string; message: string; details: object } }
-    > = []
-    let wake: (() => void) | undefined
+    >()
 
     this.muxStreams.set(streamId, {
       push: (frame) => {
         queue.push(frame)
-        const w = wake
-        wake = undefined
-        w?.()
       },
     })
 
     const onAbort = (): void => {
-      const w = wake
-      wake = undefined
-      w?.()
+      queue.notify()
     }
     signal.addEventListener('abort', onAbort, { once: true })
 
@@ -363,9 +373,12 @@ export class RemoteDeviceClient {
       )
 
       while (!signal.aborted) {
+        if (queue.overflow) {
+          throw new Error(`Remote ${endpoint} stream consumer fell behind; reconnect to replay history`)
+        }
         const frame = queue.shift()
         if (frame === undefined) {
-          await new Promise<void>((r) => { wake = r })
+          await queue.wait()
           continue
         }
         if (frame.type === 'item') {
@@ -670,14 +683,15 @@ export class RemoteDeviceClient {
       ) {
         const namespacedSessionId = encodeRemoteSessionId(this.id, item.agentId)
         const namespacedEventId = encodeRemoteEventId(this.id, item.eventId)
-        if (item.event === 'approval/request' || item.event === 'user-questions/request') {
+        const kind = pendingInteractionKind(item.event)
+        if (kind !== undefined) {
           this.pendingInteractions.set(item.eventId, {
             eventId: item.eventId,
             namespacedEventId,
             deviceId: this.id,
             rawSessionId: item.agentId,
             namespacedSessionId,
-            kind: item.event === 'approval/request' ? 'approval' : 'question',
+            kind,
             eventName: item.event,
             request: item.request,
           })

@@ -247,7 +247,7 @@ export function loadSystemSshConfigBlocks(
   return parseSshConfigText(
     content,
     expanded,
-    (pattern, fromFile) => expandIncludeFiles(pattern, fromFile),
+    (pattern) => expandIncludeFiles(pattern),
     visited,
   )
 }
@@ -513,28 +513,24 @@ function unquoteValue(value: string): string {
   return value
 }
 
-function expandIncludeFiles(pattern: string, fromFile: string): { path: string; content: string }[] {
-  const sshRoot = join(homedir(), '.ssh')
-  // OpenSSH resolves a relative Include against the file that contains it,
-  // which for the user config is `~/.ssh`. Absolute and `~/` patterns stay absolute.
-  const baseDir = isAbsolute(fromFile) ? dirname(fromFile) : sshRoot
-  const expandedPattern = isAbsolute(expandHomePath(pattern))
-    ? expandHomePath(pattern)
-    : resolve(baseDir, pattern)
+/**
+ * Resolve an `Include` pattern from the user's ssh config.
+ *
+ * ssh_config(5): "Files without absolute paths are assumed to be in ~/.ssh if
+ * included in a user configuration file". The base is the user config root,
+ * not the directory of the file that contains the directive, so nested
+ * includes still resolve under ~/.ssh. Absolute and `~/` patterns are kept.
+ */
+export function resolveUserIncludePattern(pattern: string): string {
+  const expanded = expandHomePath(pattern)
+  return isAbsolute(expanded) ? expanded : resolve(join(homedir(), '.ssh'), expanded)
+}
 
+function expandIncludeFiles(pattern: string): { path: string; content: string }[] {
+  const expandedPattern = resolveUserIncludePattern(pattern)
   const dir = dirname(expandedPattern)
   const filePattern = expandedPattern.slice(dir.length + 1)
-  if (!existsSync(dir)) {
-    const alt = resolve(baseDir, pattern)
-    if (existsSync(alt) && ! alt.includes('*')) {
-      try {
-        return [{ path: alt, content: readFileSync(alt, 'utf8') }]
-      } catch {
-        return []
-      }
-    }
-    return []
-  }
+  if (!existsSync(dir)) return []
 
   try {
     if (!filePattern.includes('*') && !filePattern.includes('?')) {

@@ -28,6 +28,7 @@ import {
 } from '../contract.ts'
 import type { PhysicalWorkspaceInput } from './git-aggregator.ts'
 import type { DeviceRegistry } from './registry.ts'
+import { BoundedStreamQueue } from './stream-queue.ts'
 
 export interface SessionControllerLike {
   list(_request: { cursor?: string }, signal: AbortSignal): Promise<{ items: readonly Record<string, unknown>[] }>
@@ -77,7 +78,7 @@ export interface WorkspaceRegistryLike {
   readonly pinnedSessionIds: readonly string[]
 }
 
-interface ModelCatalogLike {
+export interface ModelCatalogLike {
   readonly default: Record<string, unknown>
   readonly routableProviders: readonly string[]
   readonly groups: {
@@ -95,6 +96,80 @@ interface ModelCatalogLike {
     readonly name: string
     readonly message: string
   }[]
+}
+
+export interface RemoteModelCatalog {
+  readonly deviceId: DeviceId
+  readonly deviceName: string
+  readonly catalog: ModelCatalogLike
+}
+
+/**
+ * Provider ids in the merged picker carry their device. Two devices may both
+ * expose `openai` with different models or endpoints; merging them by id makes
+ * the second device unreachable and can send a model id to the wrong host.
+ */
+const CATALOG_DEVICE_PREFIX = 'md-cat~'
+
+function escapeCatalogSegment(value: string): string {
+  return value.replaceAll('%', '%25').replaceAll('~', '%7E')
+}
+
+export function deviceCatalogGroupId(deviceId: DeviceId, groupId: string): string {
+  return `${CATALOG_DEVICE_PREFIX}${escapeCatalogSegment(deviceId)}~${groupId}`
+}
+
+/** Undo {@link deviceCatalogGroupId} when dispatching `selectModel`. */
+export function stripDeviceCatalogPrefix(provider: string, deviceId: DeviceId): string {
+  const prefix = `${CATALOG_DEVICE_PREFIX}${escapeCatalogSegment(deviceId)}~`
+  return provider.startsWith(prefix) ? provider.slice(prefix.length) : provider
+}
+
+/** Merge local and remote catalogs without collapsing same-named providers. */
+export function mergeModelCatalog(
+  local: ModelCatalogLike,
+  remotes: readonly RemoteModelCatalog[],
+): ModelCatalogLike {
+  const groups = (local.groups ?? []).map(group => ({
+    ...group,
+    models: [...group.models],
+  }))
+  const byId = new Map(groups.map(group => [group.id, group]))
+  const routableProviders = new Set(local.routableProviders ?? [])
+  const failures = [...(local.failures ?? [])]
+
+  for (const remote of remotes) {
+    for (const group of remote.catalog.groups ?? []) {
+      const id = deviceCatalogGroupId(remote.deviceId, group.id)
+      const existing = byId.get(id)
+      if (existing === undefined) {
+        const copy = {
+          ...group,
+          id,
+          name: `${remote.deviceName} — ${group.name}`,
+          models: [...group.models],
+        }
+        groups.push(copy)
+        byId.set(id, copy)
+      } else {
+        const known = new Set(existing.models.map(model => model.id))
+        for (const model of group.models) {
+          if (!known.has(model.id)) existing.models.push(model)
+        }
+      }
+      routableProviders.add(id)
+    }
+    for (const failure of remote.catalog.failures ?? []) {
+      failures.push({ ...failure, id: `${remote.deviceId}:${failure.id}` })
+    }
+  }
+
+  return {
+    ...local,
+    groups,
+    routableProviders: [...routableProviders],
+    failures,
+  }
 }
 
 export interface TypertGatewayLike {
@@ -345,7 +420,11 @@ export function installAggregatedGateway02(
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner === undefined) return origSessionSelectModel(request)
     return (await owner.client.invokeUnary('session', 'selectModel', {
-      request: { ...request, sessionId: owner.rawSessionId },
+      request: {
+        ...request,
+        sessionId: owner.rawSessionId,
+        provider: stripDeviceCatalogPrefix(request.provider, owner.client.id),
+      },
     })) as { selected: Record<string, unknown> }
   })
 
@@ -354,52 +433,26 @@ export function installAggregatedGateway02(
   // click itself is routed by `selectModel` above.
   patchMethod(sessionController, 'modelCatalog', async () => {
     const local = (await origSessionModelCatalog()) as unknown as ModelCatalogLike
-    const groups = (local.groups ?? []).map(group => ({
-      ...group,
-      models: [...group.models],
-    }))
-    const byId = new Map(groups.map(group => [group.id, group]))
-    const routableProviders = new Set(local.routableProviders ?? [])
-    const failures = [...(local.failures ?? [])]
-
-    await Promise.all(
-      registry.clientList().map(async (client) => {
-        if (client.toView().state !== 'connected') return
-        try {
-          const remote = (await client.invokeUnary('session', 'modelCatalog', {})) as unknown as ModelCatalogLike
-          for (const group of remote.groups ?? []) {
-            const existing = byId.get(group.id)
-            if (existing === undefined) {
-              const copy = {
-                ...group,
-                name: `${client.toView().name} — ${group.name}`,
-                models: [...group.models],
-              }
-              groups.push(copy)
-              byId.set(group.id, copy)
-            } else {
-              const known = new Set(existing.models.map(model => model.id))
-              for (const model of group.models) {
-                if (!known.has(model.id)) existing.models.push(model)
-              }
-            }
-            routableProviders.add(group.id)
+    const remotes = (
+      await Promise.all(
+        registry.clientList().map(async (client): Promise<RemoteModelCatalog | undefined> => {
+          if (client.toView().state !== 'connected') return undefined
+          try {
+            const catalog = (await client.invokeUnary(
+              'session',
+              'modelCatalog',
+              {},
+            )) as unknown as ModelCatalogLike
+            return { deviceId: client.id, deviceName: client.toView().name, catalog }
+          } catch {
+            // A disconnected/incompatible device must not break the local picker.
+            return undefined
           }
-          for (const failure of remote.failures ?? []) {
-            failures.push({ ...failure, id: `${String(client.id)}:${failure.id}` })
-          }
-        } catch {
-          // A disconnected/incompatible device must not break the local picker.
-        }
-      }),
-    )
+        }),
+      )
+    ).filter((remote): remote is RemoteModelCatalog => remote !== undefined)
 
-    return {
-      ...local,
-      groups,
-      routableProviders: [...routableProviders],
-      failures,
-    }
+    return mergeModelCatalog(local, remotes) as unknown as Record<string, unknown>
   })
 
   patchMethod(sessionController, 'rename', async (request) => {
@@ -784,6 +837,16 @@ export function installAggregatedGateway02(
 // Multiplexing & Routing Helpers
 // ============================================================================
 
+/**
+ * A subagent address may only be routed to the device that owns the parent
+ * when the child is namespaced to that same device. A local or foreign child
+ * id must fall back instead of being sent to the parent's remote host.
+ */
+export function isSameDeviceChildSession(parentDeviceId: DeviceId, childSessionId: string): boolean {
+  const child = decodeSessionId(childSessionId)
+  return child.isRemote && child.deviceId === parentDeviceId
+}
+
 function routeSessionAddress(
   registry: DeviceRegistry,
   address: Record<string, unknown> | undefined,
@@ -804,6 +867,9 @@ function routeSessionAddress(
   ) {
     const parentOwner = registry.resolveSessionOwner(address.parentSessionId)
     if (parentOwner === undefined) return undefined
+    if (!isSameDeviceChildSession(parentOwner.client.id, address.childSessionId)) {
+      return undefined
+    }
     const childDecoded = decodeSessionId(address.childSessionId)
     return {
       client: parentOwner.client,
@@ -878,13 +944,9 @@ async function* multiplexControlStream(
   localStream: AsyncIterable<Record<string, unknown>>,
   signal: AbortSignal,
 ): AsyncIterable<Record<string, unknown>> {
-  const queue: Record<string, unknown>[] = []
-  let wake: (() => void) | undefined
+  const queue = new BoundedStreamQueue<Record<string, unknown>>()
   const push = (item: Record<string, unknown>): void => {
     queue.push(item)
-    const w = wake
-    wake = undefined
-    w?.()
   }
 
   const offRemote = registry.onControlProjection((_deviceId, frame) => {
@@ -918,20 +980,21 @@ async function* multiplexControlStream(
   })()
 
   const onAbort = (): void => {
-    const w = wake
-    wake = undefined
-    w?.()
+    queue.notify()
   }
   signal.addEventListener('abort', onAbort, { once: true })
 
   try {
     while (!signal.aborted) {
+      if (queue.overflow) {
+        throw new Error('Aggregated control stream consumer fell behind; reconnect for a fresh baseline')
+      }
       const next = queue.shift()
       if (next !== undefined) {
         yield next
         continue
       }
-      await new Promise<void>((r) => { wake = r })
+      await queue.wait()
     }
   } finally {
     signal.removeEventListener('abort', onAbort)
@@ -946,8 +1009,7 @@ async function* multiplexWorkspaceFollow(
   localStream: AsyncIterable<Record<string, unknown>>,
   signal: AbortSignal,
 ): AsyncIterable<Record<string, unknown>> {
-  const queue: Record<string, unknown>[] = []
-  let wake: (() => void) | undefined
+  const queue = new BoundedStreamQueue<Record<string, unknown>>()
   let baselineSent = false
   let prevById = new Map<string, string>()
   let prevOrder = ''
@@ -956,9 +1018,6 @@ async function* multiplexWorkspaceFollow(
 
   const push = (item: Record<string, unknown>): void => {
     queue.push(item)
-    const w = wake
-    wake = undefined
-    w?.()
   }
 
   const computeCurrentState = () => {
@@ -1051,20 +1110,21 @@ async function* multiplexWorkspaceFollow(
   })()
 
   const onAbort = (): void => {
-    const w = wake
-    wake = undefined
-    w?.()
+    queue.notify()
   }
   signal.addEventListener('abort', onAbort, { once: true })
 
   try {
     while (!signal.aborted) {
+      if (queue.overflow) {
+        throw new Error('Aggregated workspace stream consumer fell behind; reconnect for a fresh baseline')
+      }
       const next = queue.shift()
       if (next !== undefined) {
         yield next
         continue
       }
-      await new Promise<void>((r) => { wake = r })
+      await queue.wait()
     }
   } finally {
     signal.removeEventListener('abort', onAbort)
@@ -1078,15 +1138,11 @@ async function* multiplexRemoteEventsStream(
   localEvents: AsyncIterable<unknown>,
   signal: AbortSignal,
 ): AsyncIterable<unknown> {
-  const queue: unknown[] = []
-  let wake: (() => void) | undefined
+  const queue = new BoundedStreamQueue<unknown>()
   let readySent = false
 
   const push = (item: unknown): void => {
     queue.push(item)
-    const w = wake
-    wake = undefined
-    w?.()
   }
 
   const offRemote = registry.onRemoteEvent((_deviceId, frame) => {
@@ -1117,20 +1173,21 @@ async function* multiplexRemoteEventsStream(
   })()
 
   const onAbort = (): void => {
-    const w = wake
-    wake = undefined
-    w?.()
+    queue.notify()
   }
   signal.addEventListener('abort', onAbort, { once: true })
 
   try {
     while (!signal.aborted) {
+      if (queue.overflow) {
+        throw new Error('Aggregated event stream consumer fell behind; reconnect for a fresh baseline')
+      }
       const next = queue.shift()
       if (next !== undefined) {
         yield next
         continue
       }
-      await new Promise<void>((r) => { wake = r })
+      await queue.wait()
     }
   } finally {
     signal.removeEventListener('abort', onAbort)
