@@ -68,6 +68,7 @@ export function MultiDeviceHubPanel({
   const [remoteWorkspacePath, setRemoteWorkspacePath] = useState('')
   const [remoteWorkspaceError, setRemoteWorkspaceError] = useState<string | null>(null)
   const [sessionNotice, setSessionNotice] = useState<string | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
 
   const resetForm = (dev?: DeviceView): void => {
     setTestFeedback(null)
@@ -499,6 +500,10 @@ export function MultiDeviceHubPanel({
             </form>
           )}
 
+          {actionError !== null && tab === 'devices' && (
+            <div style={{ fontSize: 12, color: '#ef4444' }}>{actionError}</div>
+          )}
+
           {snapshot.devices.length === 0 ? (
             <div className="dsh-md-card" style={{ alignItems: 'center', textAlign: 'center', padding: 32 }}>
               <div style={{ fontSize: 15, fontWeight: 600 }}>{t('noDevicesTitle')}</div>
@@ -571,7 +576,11 @@ export function MultiDeviceHubPanel({
                     <button
                       type="button"
                       className="dsh-md-btn"
-                      onClick={() => { void clientStore.reconnectDevice(dev.id) }}
+                      onClick={() => {
+                        void clientStore.reconnectDevice(dev.id).then((res) => {
+                          setActionError(res.ok ? null : `${t('actionFailed')}: ${res.error ?? ''}`)
+                        })
+                      }}
                     >
                       {t('reconnect')}
                     </button>
@@ -589,7 +598,11 @@ export function MultiDeviceHubPanel({
                     <button
                       type="button"
                       className="dsh-md-btn dsh-md-btn-danger"
-                      onClick={() => { void clientStore.removeDevice(dev.id) }}
+                      onClick={() => {
+                        void clientStore.removeDevice(dev.id).then((res) => {
+                          setActionError(res.ok ? null : `${t('actionFailed')}: ${res.error ?? ''}`)
+                        })
+                      }}
                     >
                       {t('remove')}
                     </button>
@@ -612,6 +625,9 @@ export function MultiDeviceHubPanel({
                 {sessionNotice}
               </div>
             )}
+            {actionError !== null && (
+              <div style={{ fontSize: 12, color: '#ef4444' }}>{actionError}</div>
+            )}
           </div>
           <div className="dsh-md-card">
             <strong style={{ fontSize: 14 }}>{t('gitAutoTitle')}</strong>
@@ -623,8 +639,11 @@ export function MultiDeviceHubPanel({
                 type="checkbox"
                 checked={snapshot.aggregationConfig.autoGitAggregate}
                 onChange={(e) => {
+                  const enabled = e.currentTarget.checked
                   void clientStore.updateAggregationConfig({
-                    autoGitAggregate: e.currentTarget.checked,
+                    autoGitAggregate: enabled,
+                  }).then((res) => {
+                    setActionError(res.ok ? null : `${t('actionFailed')}: ${res.error ?? ''}`)
                   })
                 }}
               />
@@ -635,8 +654,11 @@ export function MultiDeviceHubPanel({
                 type="checkbox"
                 checked={snapshot.aggregationConfig.prefixUnmatchedWithDevice}
                 onChange={(e) => {
+                  const enabled = e.currentTarget.checked
                   void clientStore.updateAggregationConfig({
-                    prefixUnmatchedWithDevice: e.currentTarget.checked,
+                    prefixUnmatchedWithDevice: enabled,
+                  }).then((res) => {
+                    setActionError(res.ok ? null : `${t('actionFailed')}: ${res.error ?? ''}`)
                   })
                 }}
               />
@@ -722,7 +744,11 @@ export function MultiDeviceHubPanel({
                           <button
                             type="button"
                             title={t('splitWorkspace')}
-                            onClick={() => { void clientStore.setMemberExcluded(memberKey, !isExcluded) }}
+                            onClick={() => {
+                              void clientStore.setMemberExcluded(memberKey, !isExcluded).then((res) => {
+                                setActionError(res.ok ? null : `${t('actionFailed')}: ${res.error ?? ''}`)
+                              })
+                            }}
                             style={{
                               border: 'none',
                               background: 'transparent',

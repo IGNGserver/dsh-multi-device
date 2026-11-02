@@ -16,7 +16,7 @@
  * @module dsh-multi-device/host/auth
  */
 import { createHash, createHmac, randomUUID } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { DeviceAuthConfig, DeviceConfig, DeviceId } from '../contract.ts'
 import { requestRemote } from './http-request.ts'
@@ -192,11 +192,15 @@ export class DeviceAuthManager {
     try {
       const raw = JSON.parse(readFileSync(this.secretsFilePath, 'utf8')) as Partial<SecretStoreDocument>
       if (raw && typeof raw.secrets === 'object' && raw.secrets !== null) {
+        let stripped = false
         for (const [id, entry] of Object.entries(raw.secrets)) {
           if (entry && typeof entry === 'object') {
-            this.secrets.set(id as DeviceId, entry)
+            if (entry.signingSecret !== undefined) stripped = true
+            const { signingSecret: _dropped, ...rest } = entry
+            this.secrets.set(id as DeviceId, rest)
           }
         }
+        if (stripped) this.save()
       }
     } catch {
       // Ignore corrupt secrets cache; will re-bootstrap
@@ -205,19 +209,22 @@ export class DeviceAuthManager {
 
   private save(): void {
     if (this.secretsFilePath === undefined) return
+    const dir = dirname(this.secretsFilePath)
+    mkdirSync(dir, { recursive: true })
+    const tmp = `${this.secretsFilePath}.${randomUUID()}.tmp`
+    const doc: SecretStoreDocument = {
+      version: 1,
+      secrets: Object.fromEntries(this.secrets),
+    }
     try {
-      const dir = dirname(this.secretsFilePath)
-      mkdirSync(dir, { recursive: true })
-      const tmp = `${this.secretsFilePath}.${randomUUID()}.tmp`
-      const doc: SecretStoreDocument = {
-        version: 1,
-        secrets: Object.fromEntries(this.secrets),
-      }
+      // CIFS can drop a file when rename replaces it. Write a sibling, then
+      // copy the bytes onto the destination and remove the sibling.
       writeFileSync(tmp, JSON.stringify(doc, null, 2), { mode: 0o600 })
       try { chmodSync(tmp, 0o600) } catch { /* Windows fallback */ }
-      renameSync(tmp, this.secretsFilePath)
-    } catch {
-      // Non-fatal if disk is read-only
+      copyFileSync(tmp, this.secretsFilePath)
+      try { chmodSync(this.secretsFilePath, 0o600) } catch { /* Windows fallback */ }
+    } finally {
+      try { unlinkSync(tmp) } catch { /* sibling may not exist if the write failed */ }
     }
   }
 
@@ -248,18 +255,21 @@ export class DeviceAuthManager {
     this.save()
   }
 
-  /** Persist or clear the passphrase for an encrypted local SSH key. */
-  setSshPassphrase(deviceId: DeviceId, passphrase: string | undefined): void {
+  /**
+   * Persist a passphrase for an encrypted local SSH key.
+   * `undefined` and `''` mean "the form did not supply a new value" and keep
+   * the stored passphrase. Callers that intend to clear it pass `null`.
+   */
+  setSshPassphrase(deviceId: DeviceId, passphrase: string | null | undefined): void {
+    if (passphrase === undefined || (typeof passphrase === 'string' && passphrase.trim() === '')) return
     const current = this.secrets.get(deviceId)
     const next: StoredDeviceSecret = {
       ...(current ?? { deviceId, updatedAt: Date.now() }),
       deviceId,
       updatedAt: Date.now(),
-      ...(passphrase !== undefined && passphrase.trim() !== ''
-        ? { sshPassphrase: passphrase }
-        : {}),
+      ...(passphrase === null ? {} : { sshPassphrase: passphrase }),
     }
-    if (passphrase === undefined || passphrase.trim() === '') delete (next as { sshPassphrase?: string }).sshPassphrase
+    if (passphrase === null) delete (next as { sshPassphrase?: string }).sshPassphrase
     this.secrets.set(deviceId, next)
     this.save()
   }
@@ -292,14 +302,6 @@ export class DeviceAuthManager {
       headers['Cookie'] = credential.includes('=') ? credential : `${dshCookieName(cookieAuthority)}=${credential}`
       return headers
     }
-    if (stored?.signingSecret !== undefined) {
-      const minted = mintDshBrowserCookie(cookieAuthority, stored.signingSecret)
-      if (minted !== undefined) {
-        headers['Cookie'] = minted
-        return headers
-      }
-    }
-
     if (stored?.cookie !== undefined && stored.cookieAuthority === cookieAuthority) {
       headers['Cookie'] = stored.cookie
       return headers
@@ -330,10 +332,8 @@ export class DeviceAuthManager {
     }
 
     const existing = this.secrets.get(device.id)
-    if (!forceRefresh && existing !== undefined) {
-      if (existing.signingSecret !== undefined || (existing.cookie !== undefined && existing.cookieAuthority === cookieAuthority)) {
-        return { ok: true }
-      }
+    if (!forceRefresh && existing?.cookie !== undefined && existing.cookieAuthority === cookieAuthority) {
+      return { ok: true }
     }
 
     // 1. If a launch token or URL is configured, exchange it via GET /?token=...
@@ -342,6 +342,20 @@ export class DeviceAuthManager {
       const rawCred = configuredCredential
       // Check if user pasted a 43-char base64url signing secret directly
       if (decodeBase64Url(rawCred)?.byteLength === 32) {
+        const minted = mintDshBrowserCookie(cookieAuthority, rawCred)
+        if (minted !== undefined) {
+          const next: StoredDeviceSecret = {
+            ...(existing ?? { deviceId: device.id, updatedAt: Date.now() }),
+            deviceId: device.id,
+            cookie: minted,
+            cookieAuthority,
+            updatedAt: Date.now(),
+          }
+          delete (next as { signingSecret?: string }).signingSecret
+          this.secrets.set(device.id, next)
+          this.save()
+          return { ok: true }
+        }
         const exchanged = await this.exchangeLaunchToken(
           device.id,
           effectiveBaseUrl,
@@ -350,19 +364,6 @@ export class DeviceAuthManager {
           extractLaunchToken(rawCred),
         )
         if (exchanged.ok) return exchanged
-        // Or treat as signingSecret
-        const minted = mintDshBrowserCookie(cookieAuthority, rawCred)
-        if (minted !== undefined) {
-          this.secrets.set(device.id, {
-            deviceId: device.id,
-            signingSecret: rawCred,
-            cookie: minted,
-            cookieAuthority,
-            updatedAt: Date.now(),
-          })
-          this.save()
-          return { ok: true }
-        }
       } else {
         const token = extractLaunchToken(rawCred)
         const exchanged = await this.exchangeLaunchToken(
@@ -377,27 +378,33 @@ export class DeviceAuthManager {
       }
     }
 
-    // 2. If transport is SSH and mode is 'auto', bootstrap signing secret from remote ~/.dsh/.credentials.yaml
-    if (device.transport.kind === 'ssh' && (auth.mode === 'auto' || auth.mode === 'token')) {
+    // 2. Opt-in SSH bootstrap. Default `auto` never reads the remote signing
+    // secret. When explicitly enabled, mint a cookie and persist only that
+    // cookie — the 32-byte HMAC secret stays on the remote machine.
+    if (
+      device.transport.kind === 'ssh' &&
+      auth.mode === 'auto' &&
+      device.transport.bootstrapFromRemoteCredentials === true
+    ) {
       const dshHome = device.transport.remoteDshHome?.trim() || '~/.dsh'
       const escapedHome = `'${dshHome.replaceAll("'", "'\\''")}'`
       const cmd = `cat ${escapedHome}/.credentials.yaml 2>/dev/null || true`
       const sshRes = await execSshCommand(device.transport, cmd, 6_000)
       if (sshRes.ok && sshRes.stdout.trim() !== '') {
         const secret = parseSigningSecretFromCredentialsYaml(sshRes.stdout)
-        if (secret !== undefined) {
-          const minted = mintDshBrowserCookie(cookieAuthority, secret)
-          if (minted !== undefined) {
-            this.secrets.set(device.id, {
-              deviceId: device.id,
-              signingSecret: secret,
-              cookie: minted,
-              cookieAuthority,
-              updatedAt: Date.now(),
-            })
-            this.save()
-            return { ok: true }
+        const minted = secret === undefined ? undefined : mintDshBrowserCookie(cookieAuthority, secret)
+        if (minted !== undefined) {
+          const next: StoredDeviceSecret = {
+            ...(existing ?? { deviceId: device.id, updatedAt: Date.now() }),
+            deviceId: device.id,
+            cookie: minted,
+            cookieAuthority,
+            updatedAt: Date.now(),
           }
+          delete (next as { signingSecret?: string }).signingSecret
+          this.secrets.set(device.id, next)
+          this.save()
+          return { ok: true }
         }
       }
     }

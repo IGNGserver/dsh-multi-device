@@ -515,10 +515,12 @@ function unquoteValue(value: string): string {
 
 function expandIncludeFiles(pattern: string, fromFile: string): { path: string; content: string }[] {
   const sshRoot = join(homedir(), '.ssh')
+  // OpenSSH resolves a relative Include against the file that contains it,
+  // which for the user config is `~/.ssh`. Absolute and `~/` patterns stay absolute.
   const baseDir = isAbsolute(fromFile) ? dirname(fromFile) : sshRoot
   const expandedPattern = isAbsolute(expandHomePath(pattern))
     ? expandHomePath(pattern)
-    : resolve(sshRoot, pattern)
+    : resolve(baseDir, pattern)
 
   const dir = dirname(expandedPattern)
   const filePattern = expandedPattern.slice(dir.length + 1)

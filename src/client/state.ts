@@ -113,6 +113,8 @@ class MultiDeviceClientStore {
   private readonly listeners = new Set<() => void>()
   private eventSource: EventSource | undefined
   private pollTimer: ReturnType<typeof setInterval> | undefined
+  private sseRetryTimer: ReturnType<typeof setTimeout> | undefined
+  private sseAttempt = 0
   private started = false
 
   constructor() {
@@ -163,15 +165,21 @@ class MultiDeviceClientStore {
       }
       this.eventSource?.close()
       this.eventSource = undefined
+      if (this.sseRetryTimer !== undefined) {
+        clearTimeout(this.sseRetryTimer)
+        this.sseRetryTimer = undefined
+      }
     }
   }
 
   private connectSse(): void {
-    if (typeof EventSource === 'undefined') return
+    if (typeof EventSource === 'undefined' || !this.started) return
+    this.eventSource?.close()
     try {
       const es = new EventSource('/multi-device/events')
       this.eventSource = es
       es.addEventListener('snapshot', (ev) => {
+        this.sseAttempt = 0
         try {
           const snap = JSON.parse((ev as MessageEvent<string>).data) as MultiDeviceSnapshot
           this.applyIncomingSnapshot(snap)
@@ -180,7 +188,15 @@ class MultiDeviceClientStore {
         }
       })
       es.onerror = () => {
-        // Browser EventSource reconnects automatically
+        es.close()
+        if (this.eventSource === es) this.eventSource = undefined
+        if (!this.started || this.sseRetryTimer !== undefined) return
+        const delay = Math.min(15_000, 500 * 2 ** this.sseAttempt)
+        this.sseAttempt = Math.min(this.sseAttempt + 1, 6)
+        this.sseRetryTimer = setTimeout(() => {
+          this.sseRetryTimer = undefined
+          this.connectSse()
+        }, delay)
       }
     } catch {
       // Fallback to polling
@@ -188,18 +204,22 @@ class MultiDeviceClientStore {
   }
 
   private applyIncomingSnapshot(snap: MultiDeviceSnapshot): void {
-    const validIds = new Set(snap.devices.map(d => d.id))
+    if (snap.revision < this.state.snapshot.revision) return
+    const alive = new Set(
+      snap.devices.filter(device => device.keepNativeAlive !== false).map(device => device.id),
+    )
     let activeNative = this.state.activeNativeDeviceId
-    if (activeNative === undefined || !validIds.has(activeNative)) {
-      activeNative = snap.devices[0]?.id
+    if (activeNative === undefined || !alive.has(activeNative)) {
+      activeNative = snap.devices.find(device => alive.has(device.id))?.id
     }
-    const keepAlive = this.state.keepAliveDeviceIds.filter(id => validIds.has(id))
+    const keepAlive = this.state.keepAliveDeviceIds.filter(id => alive.has(id)).slice(-MAX_KEEP_ALIVE_PAGES)
     if (
       this.state.displayMode === 'native' &&
       activeNative !== undefined &&
       !keepAlive.includes(activeNative)
     ) {
       keepAlive.push(activeNative)
+      while (keepAlive.length > MAX_KEEP_ALIVE_PAGES) keepAlive.shift()
     }
     this.setState({
       snapshot: snap,
@@ -220,8 +240,11 @@ class MultiDeviceClientStore {
       this.state.activeNativeDeviceId ??
       this.state.snapshot.devices[0]?.id
 
-    const keepAlive = [...this.state.keepAliveDeviceIds]
-    if (mode === 'native' && nextDeviceId !== undefined) {
+    const alive = new Set(
+      this.state.snapshot.devices.filter(device => device.keepNativeAlive !== false).map(device => device.id),
+    )
+    const keepAlive = this.state.keepAliveDeviceIds.filter(id => alive.has(id))
+    if (mode === 'native' && nextDeviceId !== undefined && alive.has(nextDeviceId)) {
       const existingIdx = keepAlive.indexOf(nextDeviceId)
       if (existingIdx !== -1) keepAlive.splice(existingIdx, 1)
       keepAlive.push(nextDeviceId)
@@ -326,7 +349,7 @@ class MultiDeviceClientStore {
     return { ok: false, error: res.error }
   }
 
-  async removeDevice(deviceId: DeviceId): Promise<void> {
+  async removeDevice(deviceId: DeviceId): Promise<{ ok: boolean; error?: string }> {
     const res = await this.callControlPlane<{ snapshot: MultiDeviceSnapshot }>({
       action: 'removeDevice',
       payload: { deviceId },
@@ -334,17 +357,25 @@ class MultiDeviceClientStore {
     if (res.ok) {
       this.releaseKeepAliveDevice(deviceId)
       this.applyIncomingSnapshot(res.value.snapshot)
+      this.setState({ error: undefined })
+      return { ok: true }
     }
+    this.setState({ error: res.error })
+    return { ok: false, error: res.error }
   }
 
-  async reconnectDevice(deviceId: DeviceId): Promise<void> {
+  async reconnectDevice(deviceId: DeviceId): Promise<{ ok: boolean; error?: string }> {
     const res = await this.callControlPlane<{ snapshot: MultiDeviceSnapshot }>({
       action: 'reconnectDevice',
       payload: { deviceId },
     })
     if (res.ok) {
       this.applyIncomingSnapshot(res.value.snapshot)
+      this.setState({ error: undefined })
+      return { ok: true }
     }
+    this.setState({ error: res.error })
+    return { ok: false, error: res.error }
   }
 
   async testDevice(
@@ -394,12 +425,18 @@ class MultiDeviceClientStore {
     return { ok: false, error: res.error }
   }
 
-  async updateAggregationConfig(patch: Partial<WorkspaceAggregationConfig>): Promise<void> {
+  async updateAggregationConfig(patch: Partial<WorkspaceAggregationConfig>): Promise<{ ok: boolean; error?: string }> {
     const res = await this.callControlPlane<MultiDeviceSnapshot>({
       action: 'updateAggregationConfig',
       payload: patch as unknown as Record<string, unknown>,
     })
-    if (res.ok) this.applyIncomingSnapshot(res.value)
+    if (res.ok) {
+      this.applyIncomingSnapshot(res.value)
+      this.setState({ error: undefined })
+      return { ok: true }
+    }
+    this.setState({ error: res.error })
+    return { ok: false, error: res.error }
   }
 
   async upsertManualRule(rule: ManualWorkspaceRule): Promise<void> {
@@ -418,12 +455,18 @@ class MultiDeviceClientStore {
     if (res.ok) this.applyIncomingSnapshot(res.value)
   }
 
-  async setMemberExcluded(memberKey: string, excluded: boolean): Promise<void> {
+  async setMemberExcluded(memberKey: string, excluded: boolean): Promise<{ ok: boolean; error?: string }> {
     const res = await this.callControlPlane<MultiDeviceSnapshot>({
       action: 'setMemberExcluded',
       payload: { memberKey, excluded },
     })
-    if (res.ok) this.applyIncomingSnapshot(res.value)
+    if (res.ok) {
+      this.applyIncomingSnapshot(res.value)
+      this.setState({ error: undefined })
+      return { ok: true }
+    }
+    this.setState({ error: res.error })
+    return { ok: false, error: res.error }
   }
 
   async setPreferredDevice(logicalWorkspaceId: string, deviceId: DeviceId): Promise<void> {

@@ -10,7 +10,7 @@
  *
  * @module dsh-multi-device/runtime
  */
-import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http'
 import type {
   DeviceId,
   ManualWorkspaceRule,
@@ -26,6 +26,40 @@ export const MULTI_DEVICE_API_PATH = '/multi-device/api'
 export const MULTI_DEVICE_EVENTS_PATH = '/multi-device/events'
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024
+const LOOPBACK_NAMES = new Set(['127.0.0.1', 'localhost', '[::1]'])
+
+/** True when the Host header is this machine's loopback, including `[::1]`. */
+export function isLoopbackHostHeader(hostHeader: string | undefined): boolean {
+  const host = (hostHeader ?? '').trim().toLowerCase()
+  if (LOOPBACK_NAMES.has(host)) return true
+  return host.startsWith('127.0.0.1:') || host.startsWith('localhost:') || host.startsWith('[::1]:')
+}
+
+/**
+ * Admit a control-plane request only from loopback, and only when Origin
+ * matches that host. `extraRejection` may add a rejection; a missing hook
+ * does not admit a non-loopback caller.
+ */
+export function admitControlPlaneRequest(
+  headers: IncomingHttpHeaders,
+  extraRejection?: (headers: IncomingHttpHeaders) => number | undefined,
+): boolean {
+  const host = headers.host ?? ''
+  if (!isLoopbackHostHeader(host)) return false
+  if (headers['sec-fetch-site'] === 'cross-site') return false
+  const origin = headers.origin
+  if (typeof origin === 'string' && origin !== '') {
+    try {
+      const parsed = new URL(origin)
+      if (!LOOPBACK_NAMES.has(parsed.hostname.toLowerCase())) return false
+      if (parsed.host.toLowerCase() !== host.toLowerCase()) return false
+    } catch {
+      return false
+    }
+  }
+  if (extraRejection?.(headers) !== undefined) return false
+  return true
+}
 
 export interface ControlPlaneRequest {
   readonly action:
@@ -71,13 +105,17 @@ export class MultiDeviceControlPlane {
 
         case 'removeDevice': {
           const deviceId = String(payload.deviceId ?? '') as DeviceId
+          if (deviceId === '') return { ok: false, error: 'Device id is required' }
           const removed = this.registry.removeDevice(deviceId)
+          if (!removed) return { ok: false, error: 'Device is not configured' }
           return { ok: true, value: { removed, snapshot: this.registry.snapshot() } }
         }
 
         case 'reconnectDevice': {
           const deviceId = String(payload.deviceId ?? '') as DeviceId
+          if (deviceId === '') return { ok: false, error: 'Device id is required' }
           const triggered = this.registry.reconnectDevice(deviceId)
+          if (!triggered) return { ok: false, error: 'Device is not configured' }
           return { ok: true, value: { triggered, snapshot: this.registry.snapshot() } }
         }
 
@@ -107,7 +145,11 @@ export class MultiDeviceControlPlane {
 
         case 'updateAggregationConfig': {
           const patch = payload as Partial<WorkspaceAggregationConfig>
-          this.registry.updateAggregationConfig(patch)
+          try {
+            this.registry.updateAggregationConfig(patch)
+          } catch (error) {
+            return { ok: false, error: error instanceof Error ? error.message : String(error) }
+          }
           return { ok: true, value: this.registry.snapshot() }
         }
 
@@ -127,9 +169,14 @@ export class MultiDeviceControlPlane {
 
         case 'setMemberExcluded': {
           const memberKey = String(payload.memberKey ?? '')
+          if (memberKey === '') return { ok: false, error: 'Member key is required' }
           const excluded = Boolean(payload.excluded)
-          this.registry.aggregator.setMemberExcluded(memberKey, excluded)
-          this.registry.saveToDisk()
+          try {
+            this.registry.aggregator.setMemberExcluded(memberKey, excluded)
+            this.registry.saveToDisk()
+          } catch (error) {
+            return { ok: false, error: error instanceof Error ? error.message : String(error) }
+          }
           return { ok: true, value: this.registry.snapshot() }
         }
 
@@ -252,13 +299,7 @@ export class MultiDeviceControlPlane {
     if (this.admitRequest !== undefined) {
       return this.admitRequest(req)
     }
-    const host = req.headers.host ?? ''
-    return (
-      host.startsWith('127.0.0.1:') ||
-      host.startsWith('localhost:') ||
-      host === '127.0.0.1' ||
-      host === 'localhost'
-    )
+    return isLoopbackHostHeader(req.headers.host)
   }
 }
 

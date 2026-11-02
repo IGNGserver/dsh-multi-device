@@ -48,6 +48,7 @@ function KeepAliveDeviceFrame({
   const containerRef = useRef<HTMLDivElement | null>(null)
   const webviewLeaseRef = useRef<string | undefined>(undefined)
   const [webviewFailed, setWebviewFailed] = useState(false)
+  const [reconnectError, setReconnectError] = useState<string | null>(null)
 
   useEffect(() => {
     setWebviewFailed(false)
@@ -136,13 +137,15 @@ function KeepAliveDeviceFrame({
           <span className="dsh-md-dot" data-state={device.state} />
           <div style={{ fontSize: 15, fontWeight: 600 }}>{device.name}</div>
           <div style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary, #9ca3af)' }}>
-            {device.lastError ?? device.targetSummary}
+            {reconnectError ?? device.lastError ?? device.targetSummary}
           </div>
           <button
             type="button"
             className="dsh-md-btn dsh-md-btn-primary"
             onClick={() => {
-              void clientStore.reconnectDevice(device.id)
+              void clientStore.reconnectDevice(device.id).then((res) => {
+                setReconnectError(res.ok ? null : res.error ?? 'Reconnect failed')
+              })
             }}
           >
             Reconnect

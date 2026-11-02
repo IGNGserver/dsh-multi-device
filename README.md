@@ -11,9 +11,9 @@
 - **复用 `~/.ssh/config`**：
   - 内置常见指令解析器（`Include`、通配符、`!negation`、`HostName`、`User`、`Port`、`IdentityFile`、`ProxyJump`、`ProxyCommand`、`%h/%p/%r/%u`）。
   - UI 支持**一键从 `~/.ssh/config` 导入主机别名**，并从本机 `~/.ssh` 私钥列表中选择密钥。
-  - 默认引擎是 `system-ssh`（系统 `ssh -N -L`，完整继承 `ProxyJump`、macOS Keychain、`SSH_AUTH_SOCK` / 1Password Agent）。`ssh2` 引擎仅作为回退，要求 known_hosts 中已有主机密钥，且不支持 `ProxyJump`/`ProxyCommand`；遇到这两类配置会明确报错而不是静默降级。
+  - 默认引擎是 `system-ssh`（系统 `ssh -N -L`，完整继承 `ProxyJump`、macOS Keychain、`SSH_AUTH_SOCK` / 1Password Agent）。隧道固定 `StrictHostKeyChecking=yes`，不沿用配置里的 `accept-new` 或 `no`。远端转发目标只允许 `127.0.0.1`、`localhost` 和 `::1`。`ssh2` 引擎仅作为回退，用 `ssh-keygen -F` 核对 known_hosts（含哈希主机行），且不支持 `ProxyJump`/`ProxyCommand`；遇到这两类配置会明确报错而不是静默降级。
 - **自动鉴权与持久登录**：
-  - **SSH 自动鉴权（Auto）**：通过 SSH 连接时可自动只读提取远端 `$DSH_HOME/.credentials.yaml` 的 `client-connection/browser-session` 签名密钥，在本地签发 30 天有效期的 `dsh-auth-*` Cookie，免去手动复制启动 Token。
+  - **SSH 自动鉴权（Auto）**：默认只复用已经保存的 Cookie，或兑换用户粘贴的启动 Token。不会主动读取远端 `$DSH_HOME/.credentials.yaml`。只有把传输配置里的 `bootstrapFromRemoteCredentials` 设为 `true` 时，才会通过 SSH 只读该文件并在本地签发 Cookie；签发用的签名密钥不写入本机。
   - **Token / 启动链接兑换**：支持粘贴 `dsh web` 启动输出的 `http://127.0.0.1:3080/?token=...`，自动兑换并持久化签名 Cookie（`0600` 权限原子写入），跨远端重启持久有效。
   - 同时支持自定义 Cookie、Bearer Token 与无鉴权模式（兼容 DSH 0.1.x）。
 
@@ -40,7 +40,7 @@
 
 ### 4. 设备独立性与跨版本兼容
 - 每台远端设备独立运行自己的 `dsh web`，本插件不接管远端 Agent 循环、模型配置、工具执行或沙箱环境。
-- 远端零插件要求，自动探测并同时兼容 **DSH 0.2.x**（`/api/<ns>/<method>` + `/api/remote.mux`）与 **DSH 0.1.x**（`/api/<domain>.<method>` + `/api/events.mux`）。DSH 0.1.x 只支持冷读/轮询，不提供实时会话流。
+- 远端零插件要求。协议代次看响应里的版本字段，不能只凭 `items` 数组判断。**DSH 0.2.x** 走 `/api/<ns>/<method>` 和 `/api/remote.mux`。**DSH 0.1.x** 只刷新会话和工作区列表，不维持实时会话流。
 - 开发基线为 DSH `0.2.0-rc.2`，并针对 `0.2.1-rc.5` 的 Host/Origin 校验、模型目录和原生代理行为补了回归测试；peer 版本允许 `0.2.x`。
 
 ### 5. 聚合模式的能力边界
@@ -48,7 +48,7 @@
 - **原生模式**才是完整的远端环境：远端版本、主题、插件、设置、模型目录、文件上传、终端与文件浏览都来自远端。
 - **聚合模式**是“会话与工作区聚合”：它会合并远端模型目录，并路由会话列表、创建、提示词、取消、重命名、Fork、队列、审批与问答；但 `fileUploads`、`/api/session/uploadFileBinary`、终端、远端文件打开和全局设置仍属于本地 DSH 或原生模式。
 - 需要附件、终端、远端设置或完整远端文件操作时，请切到原生模式；聚合模式不会伪装成完整远端客户端。
-- SSH 自动鉴权会读取远端 `$DSH_HOME/.credentials.yaml` 并在本机保存 30 天 Owner Cookie。共享远端环境请改用 Token 模式或原生模式手工登录，避免把 Owner 权限长期留在本机。
+- 默认的 SSH 自动鉴权不会读取远端 `.credentials.yaml`。显式开启 `bootstrapFromRemoteCredentials` 后，本机只保存兑换出的 Cookie，不保存签名密钥。共享远端环境仍建议使用 Token 模式或原生模式手工登录。
 
 ---
 
