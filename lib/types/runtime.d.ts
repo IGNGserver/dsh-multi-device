@@ -10,10 +10,50 @@
  *
  * @module dsh-multi-device/runtime
  */
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http';
+import type { Context } from '@deepseek-ai/cordis';
 import type { DeviceRegistry } from './host/registry.ts';
 export declare const MULTI_DEVICE_API_PATH = "/multi-device/api";
 export declare const MULTI_DEVICE_EVENTS_PATH = "/multi-device/events";
+/** True when the Host header is this machine's loopback, including `[::1]`. */
+export declare function isLoopbackHostHeader(hostHeader: string | undefined): boolean;
+/**
+ * Admit a control-plane request only from loopback, and only when Origin
+ * matches that host. `extraRejection` may add a rejection; a missing hook
+ * does not admit a non-loopback caller.
+ */
+export declare function admitControlPlaneRequest(headers: IncomingHttpHeaders, extraRejection?: (headers: IncomingHttpHeaders) => number | undefined): boolean;
+/**
+ * Host connection fence consulted on every control-plane request.
+ *
+ * The method must be invoked on the object returned by `get('connection')`.
+ * Cordis wraps that service in a traceable proxy whose methods are not safe
+ * to detach: a bare `reject(req)` runs with `this === undefined` and throws
+ * inside `requestRejection` (`Cannot read properties of undefined (reading 'admit')`),
+ * which DSH treats as a fatal load failure.
+ */
+export interface ConnectionRejectionService {
+    requestRejection?: (request: {
+        headers: IncomingHttpHeaders;
+    }) => number | undefined;
+}
+/** Read `connection` from the plugin context. A missing service is not an error. */
+export declare function readConnectionService(ctx: Context): ConnectionRejectionService | undefined;
+/**
+ * Ask the Host connection service whether this request is rejected.
+ *
+ * Re-reads the service on every call and invokes `requestRejection` as a
+ * method, matching `dsh-host-open-in-app`. A missing hook admits nothing
+ * extra (returns `undefined`). A throwing hook fails closed (`403`) so the
+ * exception never leaves the HTTP handler.
+ */
+export declare function connectionRequestRejection(ctx: Context, headers: IncomingHttpHeaders): number | undefined;
+/**
+ * Admit one control-plane request: loopback fence first, then the Host
+ * connection service. Setup failures and a throwing connection hook both
+ * fail closed instead of crashing the host.
+ */
+export declare function admitMultiDeviceRequest(ctx: Context, req: IncomingMessage): boolean;
 export interface ControlPlaneRequest {
     readonly action: 'snapshot' | 'upsertDevice' | 'removeDevice' | 'reconnectDevice' | 'testDevice' | 'listSshKeys' | 'createSession' | 'createRemoteWorkspace' | 'updateAggregationConfig' | 'upsertManualRule' | 'removeManualRule' | 'setMemberExcluded' | 'setPreferredDevice' | 'setCustomTitle';
     readonly payload?: Record<string, unknown>;

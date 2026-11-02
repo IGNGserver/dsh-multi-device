@@ -11,6 +11,7 @@
  * @module dsh-multi-device/runtime
  */
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http'
+import type { Context } from '@deepseek-ai/cordis'
 import type {
   DeviceId,
   ManualWorkspaceRule,
@@ -59,6 +60,64 @@ export function admitControlPlaneRequest(
   }
   if (extraRejection?.(headers) !== undefined) return false
   return true
+}
+
+/**
+ * Host connection fence consulted on every control-plane request.
+ *
+ * The method must be invoked on the object returned by `get('connection')`.
+ * Cordis wraps that service in a traceable proxy whose methods are not safe
+ * to detach: a bare `reject(req)` runs with `this === undefined` and throws
+ * inside `requestRejection` (`Cannot read properties of undefined (reading 'admit')`),
+ * which DSH treats as a fatal load failure.
+ */
+export interface ConnectionRejectionService {
+  requestRejection?: (request: { headers: IncomingHttpHeaders }) => number | undefined
+}
+
+/** Read `connection` from the plugin context. A missing service is not an error. */
+export function readConnectionService(ctx: Context): ConnectionRejectionService | undefined {
+  try {
+    return (ctx as unknown as { get?: (key: string) => unknown }).get?.('connection') as
+      | ConnectionRejectionService
+      | undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Ask the Host connection service whether this request is rejected.
+ *
+ * Re-reads the service on every call and invokes `requestRejection` as a
+ * method, matching `dsh-host-open-in-app`. A missing hook admits nothing
+ * extra (returns `undefined`). A throwing hook fails closed (`403`) so the
+ * exception never leaves the HTTP handler.
+ */
+export function connectionRequestRejection(
+  ctx: Context,
+  headers: IncomingHttpHeaders,
+): number | undefined {
+  const connection = readConnectionService(ctx)
+  if (connection === undefined || typeof connection.requestRejection !== 'function') return undefined
+  try {
+    return connection.requestRejection({ headers })
+  } catch {
+    return 403
+  }
+}
+
+/**
+ * Admit one control-plane request: loopback fence first, then the Host
+ * connection service. Setup failures and a throwing connection hook both
+ * fail closed instead of crashing the host.
+ */
+export function admitMultiDeviceRequest(ctx: Context, req: IncomingMessage): boolean {
+  try {
+    return admitControlPlaneRequest(req.headers, (headers) => connectionRequestRejection(ctx, headers))
+  } catch {
+    return false
+  }
 }
 
 export interface ControlPlaneRequest {
