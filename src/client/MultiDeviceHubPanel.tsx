@@ -80,7 +80,9 @@ function hasCustomAdvancedFields(dev: DeviceView | undefined): boolean {
     (dev.ssh.port !== undefined && dev.ssh.port !== 22) ||
     (dev.ssh.username !== undefined && dev.ssh.username !== '') ||
     (dev.ssh.privateKeyPath !== undefined && dev.ssh.privateKeyPath !== '') ||
-    (dev.ssh.proxyJump !== undefined && dev.ssh.proxyJump !== '')
+    (dev.ssh.proxyJump !== undefined && dev.ssh.proxyJump !== '') ||
+    (dev.ssh.remoteDshHome !== undefined && dev.ssh.remoteDshHome !== '') ||
+    dev.ssh.bootstrapFromRemoteCredentials === false
   )
 }
 
@@ -173,6 +175,10 @@ function DeviceEditorForm({
   const [sshKeyPath, setSshKeyPath] = useState(device?.ssh?.privateKeyPath ?? '')
   const [sshPassphrase, setSshPassphrase] = useState('')
   const [sshProxyJump, setSshProxyJump] = useState(device?.ssh?.proxyJump ?? '')
+  const [remoteDshHome, setRemoteDshHome] = useState(device?.ssh?.remoteDshHome ?? '')
+  const [bootstrapCredentials, setBootstrapCredentials] = useState(
+    device?.ssh?.bootstrapFromRemoteCredentials !== false,
+  )
 
   const [testing, setTesting] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -209,6 +215,8 @@ function DeviceEditorForm({
         ...(sshPassphrase.trim() !== '' ? { passphrase: sshPassphrase.trim() } : {}),
         ...(sshProxyJump.trim() !== '' ? { proxyJump: sshProxyJump.trim() } : {}),
         remotePort: parsedRemotePort > 0 ? parsedRemotePort : 3080,
+        ...(remoteDshHome.trim() !== '' ? { remoteDshHome: remoteDshHome.trim() } : {}),
+        ...(bootstrapCredentials ? { bootstrapFromRemoteCredentials: true } : {}),
         engine: device?.ssh?.engine ?? 'auto',
       },
       auth: {
@@ -440,6 +448,28 @@ function DeviceEditorForm({
               placeholder={t('sshProxyJumpPlaceholder')}
               disabled={busy}
               onChange={(e) => setSshProxyJump(e.currentTarget.value)}
+            />
+          </div>
+
+          <div className="dsh-md-field">
+            <label className="dsh-md-field-label" htmlFor={`${formId}-home`}>
+              {t('remoteDshHome')}
+            </label>
+            <Input
+              id={`${formId}-home`}
+              value={remoteDshHome}
+              placeholder={t('remoteDshHomePlaceholder')}
+              disabled={busy}
+              onChange={(e) => setRemoteDshHome(e.currentTarget.value)}
+            />
+          </div>
+
+          <div className="dsh-md-field dsh-md-field-span">
+            <Switch
+              checked={bootstrapCredentials}
+              disabled={busy}
+              label={t('authBootstrap')}
+              onChange={setBootstrapCredentials}
             />
           </div>
         </div>

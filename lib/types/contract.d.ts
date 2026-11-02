@@ -39,8 +39,15 @@ export interface SshTransportConfig {
     readonly remoteBindHost?: string;
     /** Remote port where `dsh web` listens; defaults to `3080`. */
     readonly remotePort?: number;
-    /** Remote `$DSH_HOME` directory for auto-ssh credential bootstrap; defaults to `~/.dsh`. */
+    /** Remote `$DSH_HOME` directory used only when bootstrap is explicitly enabled; defaults to `~/.dsh`. */
     readonly remoteDshHome?: string;
+    /**
+     * When true, `auto` reads the remote `.credentials.yaml` over SSH and mints a
+     * browser cookie. The signing secret itself is never persisted. The device
+     * form turns this on for SSH + auto. Omit it (or set false) to keep `auto`
+     * limited to a saved cookie or a pasted launch token.
+     */
+    readonly bootstrapFromRemoteCredentials?: boolean;
     /** Preferred SSH tunnel engine (`auto` prefers `system-ssh` for 100% `~/.ssh/config` fidelity). */
     readonly engine?: SshTunnelEngine;
 }
@@ -55,7 +62,7 @@ export interface DirectTransportConfig {
 export type DeviceTransportConfig = SshTransportConfig | DirectTransportConfig;
 /**
  * Authentication mode for reaching the remote DSH server:
- * - `'auto'`: tries existing persisted cookie -> launch token exchange -> SSH `.credentials.yaml` bootstrap -> unauthenticated (0.1.x).
+ * - `'auto'`: saved cookie, then a pasted launch token, then (SSH only, when `bootstrapFromRemoteCredentials` is set) a cookie minted from the remote `.credentials.yaml`. The form enables that read for SSH devices. Unauthenticated 0.1.x still works when none of those yield a credential.
  * - `'token'`: exchanges a `?token=...` launch URL or raw launch token for a persistent 30-day signed cookie.
  * - `'cookie'`: sends an explicit Cookie header (e.g. `dsh-auth-...=v1...`).
  * - `'bearer'`: sends `Authorization: Bearer <token>`.
@@ -127,6 +134,9 @@ export interface DeviceView {
         readonly privateKeyPath?: string;
         readonly proxyJump?: string;
         readonly remotePort?: number;
+        readonly remoteDshHome?: string;
+        /** Whether auto auth may mint a cookie from the remote signing secret. */
+        readonly bootstrapFromRemoteCredentials?: boolean;
         readonly engine?: SshTunnelEngine;
     };
     /** Display target summary, e.g. `ssh://root@10.0.0.5:22 -> 127.0.0.1:3080` or `https://dev.internal:3080`. */

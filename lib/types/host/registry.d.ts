@@ -3,6 +3,11 @@ import { DeviceAuthManager } from './auth.ts';
 import { type PhysicalWorkspaceInput, WorkspaceAggregator } from './git-aggregator.ts';
 import { NativeProxyManager } from './native-proxy.ts';
 import { RemoteDeviceClient } from './remote-client.ts';
+/**
+ * The SSH tunnel can be up while DSH itself still rejects the HTTP call.
+ * Say so, instead of pointing the user at the private key.
+ */
+export declare function describeProbeFailure(status: number | undefined, input: UpsertDeviceInput): string;
 export interface LocalHostProvider {
     /** Local webserver port, used for self-loop prevention. */
     readonly localPort: () => number | undefined;

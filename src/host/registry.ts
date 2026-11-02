@@ -45,6 +45,32 @@ import { listLocalSshKeys, listSshConfigHosts } from './ssh-config.ts'
 import { probeSshTunnel } from './tunnel.ts'
 
 /**
+ * The SSH tunnel can be up while DSH itself still rejects the HTTP call.
+ * Say so, instead of pointing the user at the private key.
+ */
+export function describeProbeFailure(
+  status: number | undefined,
+  input: UpsertDeviceInput,
+): string {
+  if (status === undefined) {
+    return 'Could not reach remote DSH HTTP endpoint over the connection'
+  }
+  if (status === 401 || status === 403) {
+    const ssh = input.transport.kind === 'ssh' ? input.transport : undefined
+    const sshAuto = ssh !== undefined && (input.auth?.mode ?? 'auto') === 'auto'
+    const bootstrapping = sshAuto && ssh?.bootstrapFromRemoteCredentials === true
+    if (sshAuto && !bootstrapping) {
+      return `SSH tunnel is up, but remote DSH answered HTTP ${String(status)}. Auto auth did not read the remote credentials; enable SSH credential bootstrap or paste the launch URL.`
+    }
+    if (bootstrapping) {
+      return `SSH tunnel is up, but remote DSH rejected the minted cookie (HTTP ${String(status)}). Check the remote DSH port (${input.transport.kind === 'ssh' ? String(input.transport.remotePort ?? 3080) : 'direct'}) and that dsh web is the process listening there.`
+    }
+    return `SSH tunnel is up, but remote DSH answered HTTP ${String(status)}. Check the authentication token or DSH port.`
+  }
+  return `Remote DSH answered HTTP ${String(status)} (check authentication token or DSH port)`
+}
+
+/**
  * Credentials never belong in the device/aggregation document. Keep the
  * public config free of launch tokens, cookies, bearer tokens and SSH
  * passphrases; `DeviceAuthManager` owns them in the 0600 secrets file.
@@ -411,9 +437,7 @@ export class DeviceRegistry {
 
       return {
         ok: false,
-        error: res02
-          ? `Remote DSH answered HTTP ${String(res02.status)} (check authentication token or DSH port)`
-          : 'Could not reach remote DSH HTTP endpoint over the connection',
+        error: describeProbeFailure(res02?.status, input),
       }
     } finally {
       this.authManager.removeDevice(tempConfig.id)

@@ -1,6 +1,11 @@
+import { type ChildProcess, type SpawnOptions } from 'node:child_process';
 import type { SshTransportConfig } from '../contract.ts';
 import { type ResolvedSshParameters } from './ssh-config.ts';
 export type TunnelState = 'connecting' | 'up' | 'error' | 'stopped';
+/** Test seam. Production always uses `node:child_process` `spawn`. */
+export type SpawnFn = (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
+/** Replace or restore the process spawner. Tests pass `null` to restore. */
+export declare function setSshSpawn(spawnFn: SpawnFn | null): void;
 export interface TunnelStatus {
     readonly state: TunnelState;
     readonly localPort?: number;

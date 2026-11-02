@@ -11,6 +11,7 @@
  *    - `NativeDeviceProxy` authenticated HTTP + WebSocket reverse proxy (header rewriting, X-Frame-Options stripping).
  *    - `AggregatedGateway` + `MultiDeviceControlPlane` mode independence & fallback verification.
  */
+import { EventEmitter } from 'node:events'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -59,7 +60,7 @@ import {
 } from '../src/host/gateway.ts'
 import { requestRemote } from '../src/host/http-request.ts'
 import { NativeDeviceProxy } from '../src/host/native-proxy.ts'
-import { DeviceRegistry } from '../src/host/registry.ts'
+import { describeProbeFailure, DeviceRegistry } from '../src/host/registry.ts'
 import {
   listLocalSshKeys,
   parseSshConfigText,
@@ -71,6 +72,7 @@ import {
   assertLoopbackForward,
   buildSystemSshArgs as buildTunnelSshArgs,
   hostKeyMatchesKnownHostsLine,
+  setSshSpawn,
 } from '../src/host/tunnel.ts'
 import {
   classifyRemoteProtocol,
@@ -1154,6 +1156,98 @@ describe('6. Stability guards', () => {
       protocol: '0.1',
       version: '0.1.0-rc.6',
     })
+  })
+
+  it('tells a 401 apart from an SSH key failure', () => {
+    const ssh = { kind: 'ssh' as const, host: 'macos-dev', remotePort: 3080 }
+    expect(describeProbeFailure(undefined, {
+      name: 'macos-dev',
+      transport: ssh,
+      auth: { mode: 'auto' },
+    })).toMatch(/Could not reach/)
+    expect(describeProbeFailure(401, {
+      name: 'macos-dev',
+      transport: ssh,
+      auth: { mode: 'auto' },
+    })).toMatch(/did not read the remote credentials/)
+    expect(describeProbeFailure(401, {
+      name: 'macos-dev',
+      transport: { ...ssh, bootstrapFromRemoteCredentials: true },
+      auth: { mode: 'auto' },
+    })).toMatch(/rejected the minted cookie/)
+    expect(describeProbeFailure(401, {
+      name: 'macos-dev',
+      transport: ssh,
+      auth: { mode: 'token', credential: 'launch' },
+    })).toMatch(/authentication token or DSH port/)
+    expect(describeProbeFailure(502, {
+      name: 'macos-dev',
+      transport: ssh,
+    })).toMatch(/HTTP 502/)
+  })
+
+  it('mints a cookie from a remote credentials file and never stores the signing secret', async () => {
+    const dir = makeTempDir('dsh-md-bootstrap-')
+    const auth = new DeviceAuthManager(join(dir, 'secrets.json'))
+    const secret = 'Lmbm2Ybqc9aKKkxPULPgyA0SbQBUlKtboujV41nWgJw'
+    const yaml = `client-connection/browser-session:\n  payload:\n    secret: ${secret}\n`
+    let spawnCalls = 0
+    setSshSpawn(() => {
+      spawnCalls += 1
+      const stdout = new EventEmitter()
+      const stderr = new EventEmitter()
+      const proc = new EventEmitter() as EventEmitter & {
+        stdout: EventEmitter
+        stderr: EventEmitter
+        stdin: null
+        kill: () => boolean
+      }
+      proc.stdout = stdout
+      proc.stderr = stderr
+      proc.stdin = null
+      proc.kill = () => true
+      queueMicrotask(() => {
+        stdout.emit('data', Buffer.from(yaml))
+        proc.emit('close', 0)
+      })
+      return proc as never
+    })
+    const device = {
+      id: DeviceId('macos-dev'),
+      name: 'macos-dev',
+      enabled: true,
+      transport: {
+        kind: 'ssh' as const,
+        host: 'macos-dev',
+        remotePort: 3080,
+        bootstrapFromRemoteCredentials: true,
+      },
+      auth: { mode: 'auto' as const },
+    }
+    try {
+      const minted = await auth.ensureAuthenticated(device, 'http://127.0.0.1:9', true)
+      expect(minted).toEqual({ ok: true })
+      const stored = auth.storedSecret(device.id)
+      expect(stored?.cookie?.startsWith(`${dshCookieName('127.0.0.1:3080')}=v1.`)).toBe(true)
+      expect(stored?.signingSecret).toBeUndefined()
+      expect(readFileSync(join(dir, 'secrets.json'), 'utf8')).not.toContain(secret)
+      expect(auth.getAuthHeaders(device).Cookie).toBe(stored?.cookie)
+      expect(spawnCalls).toBe(1)
+
+      const skipped = new DeviceAuthManager(join(dir, 'skipped.json'))
+      const withoutBootstrap = {
+        ...device,
+        id: DeviceId('no-bootstrap'),
+        transport: { kind: 'ssh' as const, host: 'macos-dev', remotePort: 3080 },
+      }
+      const callsBeforeSkip = spawnCalls
+      const plain = await skipped.ensureAuthenticated(withoutBootstrap, 'http://127.0.0.1:9', true)
+      expect(plain).toEqual({ ok: true })
+      expect(spawnCalls).toBe(callsBeforeSkip)
+      expect(skipped.getAuthHeaders(withoutBootstrap).Cookie).toBeUndefined()
+    } finally {
+      setSshSpawn(null)
+    }
   })
 
   it('keeps a stored SSH passphrase when the edit form sends an empty value', () => {

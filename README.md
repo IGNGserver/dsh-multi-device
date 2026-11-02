@@ -13,7 +13,7 @@
   - UI 支持**一键从 `~/.ssh/config` 导入主机别名**，并从本机 `~/.ssh` 私钥列表中选择密钥。
   - 默认引擎是 `system-ssh`（系统 `ssh -N -L`，完整继承 `ProxyJump`、macOS Keychain、`SSH_AUTH_SOCK` / 1Password Agent）。隧道固定 `StrictHostKeyChecking=yes`，不沿用配置里的 `accept-new` 或 `no`。远端转发目标只允许 `127.0.0.1`、`localhost` 和 `::1`。`ssh2` 引擎仅作为回退，用 `ssh-keygen -F` 核对 known_hosts（含哈希主机行），且不支持 `ProxyJump`/`ProxyCommand`；遇到这两类配置会明确报错而不是静默降级。
 - **自动鉴权与持久登录**：
-  - **SSH 自动鉴权（Auto）**：默认只复用已经保存的 Cookie，或兑换用户粘贴的启动 Token。不会主动读取远端 `$DSH_HOME/.credentials.yaml`。只有把传输配置里的 `bootstrapFromRemoteCredentials` 设为 `true` 时，才会通过 SSH 只读该文件并在本地签发 Cookie；签发用的签名密钥不写入本机。
+  - **SSH 自动鉴权（Auto）**：添加 SSH 设备时默认开启 `bootstrapFromRemoteCredentials`。隧道打通后通过 SSH 只读远端 `$DSH_HOME/.credentials.yaml`，在本地签发 Cookie，签名密钥不写入本机。取消勾选后只复用已保存的 Cookie，或兑换粘贴的启动 Token。读取失败会直接说明 SSH 已登录、缺的是远端凭据，而不是报成密钥 401。
   - **Token / 启动链接兑换**：支持粘贴 `dsh web` 启动输出的 `http://127.0.0.1:3080/?token=...`，自动兑换并持久化签名 Cookie（`0600` 权限原子写入），跨远端重启持久有效。
   - 同时支持自定义 Cookie、Bearer Token 与无鉴权模式（兼容 DSH 0.1.x）。
 
@@ -48,7 +48,7 @@
 - **原生模式**才是完整的远端环境：远端版本、主题、插件、设置、模型目录、文件上传、终端与文件浏览都来自远端。
 - **聚合模式**是“会话与工作区聚合”：它会合并远端模型目录（同名 provider 按设备分开展示），并路由会话列表、创建、提示词、取消、重命名、Fork、队列、审批、问答与计划评审；但 `fileUploads`、`/api/session/uploadFileBinary`、终端、远端文件打开和全局设置仍属于本地 DSH 或原生模式。
 - 需要附件、终端、远端设置或完整远端文件操作时，请切到原生模式；聚合模式不会伪装成完整远端客户端。
-- 默认的 SSH 自动鉴权不会读取远端 `.credentials.yaml`。显式开启 `bootstrapFromRemoteCredentials` 后，本机只保存兑换出的 Cookie，不保存签名密钥。共享远端环境仍建议使用 Token 模式或原生模式手工登录。
+- SSH 自动鉴权默认读取远端 `.credentials.yaml` 并只在本机保存签发出的 Cookie，不保存签名密钥。共享远端环境仍建议改用 Token 模式或原生模式手工登录，并取消「通过 SSH 读取远端凭据」。
 
 ---
 
