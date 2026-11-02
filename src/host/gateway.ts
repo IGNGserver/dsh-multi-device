@@ -24,6 +24,7 @@ import {
   encodeRemoteSessionId,
   encodeRemoteWorkspaceId,
   LOCAL_DEVICE_ID,
+  workspaceMemberKey,
 } from '../contract.ts'
 import type { PhysicalWorkspaceInput } from './git-aggregator.ts'
 import type { DeviceRegistry } from './registry.ts'
@@ -570,7 +571,7 @@ export function installAggregatedGateway02(
         const lws = registry.snapshot().logicalWorkspaces.find(w => w.logicalWorkspaceId === request.workspaceId)
         if (lws !== undefined) {
           for (const m of lws.members) {
-            registry.aggregator.setMemberExcluded(`${m.deviceId}:${m.path}`, true)
+            registry.aggregator.setMemberExcluded(workspaceMemberKey(m.deviceId, m.path), true)
           }
           registry.saveToDisk()
         }

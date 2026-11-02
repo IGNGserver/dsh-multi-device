@@ -27,6 +27,7 @@ import {
 } from './host/gateway.ts'
 import { DeviceRegistry } from './host/registry.ts'
 import {
+  admitControlPlaneRequest,
   MULTI_DEVICE_API_PATH,
   MULTI_DEVICE_EVENTS_PATH,
   MultiDeviceControlPlane,
@@ -194,35 +195,19 @@ export function apply(ctx: Context, config?: Config): void {
 
   // 1. Mount Control Plane HTTP + SSE routes (independent of Aggregated Mode!)
   const admitRequest = (req: import('node:http').IncomingMessage): boolean => {
+    let extraRejection: ((headers: import('node:http').IncomingHttpHeaders) => number | undefined) | undefined
     try {
       const connection = (ctx as unknown as { get?: (k: string) => unknown }).get?.('connection') as
         | { requestRejection?: (r: { headers: import('node:http').IncomingHttpHeaders }) => number | undefined }
         | undefined
       if (connection?.requestRejection !== undefined) {
-        return connection.requestRejection({ headers: req.headers }) === undefined
+        const reject = connection.requestRejection
+        extraRejection = (headers) => reject({ headers })
       }
     } catch {
-      // Fallback to loopback check
+      return false
     }
-    const host = req.headers.host ?? ''
-    const isLoopbackHost =
-      host.startsWith('127.0.0.1:') ||
-      host.startsWith('localhost:') ||
-      host === '127.0.0.1' ||
-      host === 'localhost'
-    if (!isLoopbackHost) return false
-    if (req.headers['sec-fetch-site'] === 'cross-site') return false
-    const origin = req.headers.origin
-    if (origin !== undefined) {
-      try {
-        const parsed = new URL(origin)
-        const originLoopback = ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname.toLowerCase())
-        return originLoopback && parsed.host === host
-      } catch {
-        return false
-      }
-    }
-    return true
+    return admitControlPlaneRequest(req.headers, extraRejection)
   }
 
   const controlPlane = new MultiDeviceControlPlane(registry, admitRequest)

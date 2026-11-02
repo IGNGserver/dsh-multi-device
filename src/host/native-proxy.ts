@@ -32,6 +32,58 @@ import { DeviceAuthManager, resolveRemoteAuthority } from './auth.ts'
 const PROXY_TOKEN_QUERY = 'md_token'
 const PROXY_COOKIE_NAME = 'dsh-md-native'
 
+const HOP_BY_HOP_HEADERS = new Set([
+  'connection',
+  'keep-alive',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+])
+
+/** Headers the browser must not be allowed to inject into the upstream request. */
+const CLIENT_AUTH_HEADERS = new Set(['cookie', 'authorization', 'proxy-authorization'])
+
+function isHopByHopHeader(name: string): boolean {
+  return HOP_BY_HOP_HEADERS.has(name.toLowerCase())
+}
+
+/**
+ * Copy a client request onto the upstream connection.
+ * The plugin supplies Cookie and Authorization itself; client values, proxy
+ * headers, and `x-forwarded-*` are dropped so a page cannot smuggle credentials
+ * or rewrite the remote's view of the caller.
+ */
+export function buildForwardHeaders(
+  incoming: IncomingMessage['headers'],
+  injected: {
+    readonly host: string
+    readonly origin?: string
+    readonly cookie?: string
+    readonly authorization?: string
+  },
+): Record<string, string | string[]> {
+  const out: Record<string, string | string[]> = {}
+  for (const [key, val] of Object.entries(incoming)) {
+    if (val === undefined) continue
+    const lower = key.toLowerCase()
+    if (lower === 'host' || lower === 'origin' || lower === 'referer') continue
+    // `connection` and `upgrade` are hop-by-hop, but a WebSocket proxy has to
+    // forward them or the upstream answers with a normal HTTP response.
+    if (lower !== 'connection' && lower !== 'upgrade' && isHopByHopHeader(lower)) continue
+    if (CLIENT_AUTH_HEADERS.has(lower)) continue
+    if (lower.startsWith('proxy-') || lower.startsWith('x-forwarded-')) continue
+    out[key] = val
+  }
+  out['host'] = injected.host
+  if (injected.origin !== undefined) out['origin'] = injected.origin
+  if (injected.cookie !== undefined) out['cookie'] = injected.cookie
+  if (injected.authorization !== undefined) out['authorization'] = injected.authorization
+  return out
+}
+
 export class NativeDeviceProxy {
   private server: Server | undefined
   private localPort: number | undefined
@@ -157,33 +209,19 @@ export class NativeDeviceProxy {
     const authority = resolveRemoteAuthority(this.device)
     const authHeaders = this.authManager.getAuthHeaders(this.device)
 
-    const outHeaders: Record<string, string | string[]> = {}
-    for (const [key, val] of Object.entries(req.headers)) {
-      if (val === undefined) continue
-      const lower = key.toLowerCase()
-      if (lower === 'host' || lower === 'origin' || lower === 'referer') continue
-      outHeaders[key] = val
-    }
-
-    outHeaders['host'] = authority
-    if (req.headers['origin'] !== undefined) {
-      outHeaders['origin'] = authHeaders['Origin'] ?? `${isHttps ? 'https' : 'http'}://${authority}`
-    }
-    if (authHeaders['Cookie'] !== undefined) {
-      const existingCookie = typeof outHeaders['cookie'] === 'string' ? outHeaders['cookie'] : undefined
-      outHeaders['cookie'] = existingCookie
-        ? `${existingCookie}; ${authHeaders['Cookie']}`
-        : authHeaders['Cookie']
-    }
-    if (authHeaders['Authorization'] !== undefined) {
-      outHeaders['authorization'] = authHeaders['Authorization']
-    }
+    const outHeaders = buildForwardHeaders(req.headers, {
+      host: authority,
+      origin: req.headers['origin'] !== undefined
+        ? authHeaders['Origin'] ?? `${isHttps ? 'https' : 'http'}://${authority}`
+        : undefined,
+      cookie: authHeaders['Cookie'],
+      authorization: authHeaders['Authorization'],
+    })
 
     const reqFn = isHttps ? httpsRequest : httpRequest
-    const rejectUnauthorized =
-      this.device.transport.kind === 'direct'
-        ? this.device.transport.rejectUnauthorized !== false
-        : false
+    const rejectUnauthorized = this.device.transport.kind === 'direct'
+      ? this.device.transport.rejectUnauthorized !== false
+      : true
 
     const proxyReq = reqFn(
       upstreamUrl,
@@ -277,30 +315,17 @@ export class NativeDeviceProxy {
     const authority = resolveRemoteAuthority(this.device)
     const authHeaders = this.authManager.getAuthHeaders(this.device)
 
-    const outHeaders: Record<string, string | string[]> = {}
-    for (const [key, val] of Object.entries(req.headers)) {
-      if (val === undefined) continue
-      const lower = key.toLowerCase()
-      if (lower === 'host' || lower === 'origin') continue
-      outHeaders[key] = val
-    }
-    outHeaders['host'] = authority
-    outHeaders['origin'] = authHeaders['Origin'] ?? `${isHttps ? 'https' : 'http'}://${authority}`
-    if (authHeaders['Cookie'] !== undefined) {
-      const existingCookie = typeof outHeaders['cookie'] === 'string' ? outHeaders['cookie'] : undefined
-      outHeaders['cookie'] = existingCookie
-        ? `${existingCookie}; ${authHeaders['Cookie']}`
-        : authHeaders['Cookie']
-    }
-    if (authHeaders['Authorization'] !== undefined) {
-      outHeaders['authorization'] = authHeaders['Authorization']
-    }
+    const outHeaders = buildForwardHeaders(req.headers, {
+      host: authority,
+      origin: authHeaders['Origin'] ?? `${isHttps ? 'https' : 'http'}://${authority}`,
+      cookie: authHeaders['Cookie'],
+      authorization: authHeaders['Authorization'],
+    })
 
     const reqFn = isHttps ? httpsRequest : httpRequest
-    const rejectUnauthorized =
-      this.device.transport.kind === 'direct'
-        ? this.device.transport.rejectUnauthorized !== false
-        : false
+    const rejectUnauthorized = this.device.transport.kind === 'direct'
+      ? this.device.transport.rejectUnauthorized !== false
+      : true
 
     const proxyReq = reqFn(upstreamUrl, {
       method: 'GET',
@@ -313,9 +338,11 @@ export class NativeDeviceProxy {
       for (let i = 0; i < proxyRes.rawHeaders.length; i += 2) {
         const k = proxyRes.rawHeaders[i]
         const v = proxyRes.rawHeaders[i + 1]
-        if (k !== undefined && v !== undefined) {
-          rawResponse += `${k}: ${v}\r\n`
-        }
+        if (k === undefined || v === undefined) continue
+        const lower = k.toLowerCase()
+        if (lower === 'set-cookie') continue
+        if (lower !== 'connection' && lower !== 'upgrade' && isHopByHopHeader(lower)) continue
+        rawResponse += `${k}: ${v}\r\n`
       }
       rawResponse += '\r\n'
       clientSocket.write(rawResponse)

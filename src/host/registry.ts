@@ -10,7 +10,7 @@
  * @module dsh-multi-device/host/registry
  */
 import { randomUUID } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import {
   type DeviceConfig,
@@ -35,7 +35,12 @@ import {
 } from './git-aggregator.ts'
 import { requestRemote } from './http-request.ts'
 import { NativeProxyManager } from './native-proxy.ts'
-import { RemoteDeviceClient, type RemoteDeviceCallbacks } from './remote-client.ts'
+import {
+  classifyRemoteProtocol,
+  RemoteDeviceClient,
+  resolveProbedProtocol,
+  type RemoteDeviceCallbacks,
+} from './remote-client.ts'
 import { listLocalSshKeys, listSshConfigHosts } from './ssh-config.ts'
 import { probeSshTunnel } from './tunnel.ts'
 
@@ -369,39 +374,37 @@ export class DeviceRegistry {
         timeoutMs: 15_000,
       }).catch(() => undefined)
 
-      if (res02 !== undefined && res02.status >= 200 && res02.status < 300) {
-        return {
-          ok: true,
-          protocolVersion: '0.2',
-          remoteDshVersion: '0.2.x',
-          latencyMs: Date.now() - t0,
+      const listValue = res02 !== undefined && res02.status >= 200 && res02.status < 300
+        ? parseProbeBody(res02.body).result?.value
+        : undefined
+      const listGen = classifyRemoteProtocol(listValue)
+
+      // Probe 0.1 only when session/list did not already declare 0.2.
+      // A versionless items body stays 0.2 unless host.describe says 0.1.
+      let describeValue: unknown
+      if (listGen !== '0.2') {
+        const res01 = await requestRemote(new URL('/api/host.describe', baseUrl).href, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            type: 'client-request',
+            rpcId: randomUUID(),
+            method: 'host.describe',
+            payload: {},
+          }),
+          timeoutMs: 15_000,
+        }).catch(() => undefined)
+        if (res01 !== undefined && res01.status >= 200 && res01.status < 300) {
+          describeValue = parseProbeBody(res01.body).result?.value
         }
       }
 
-      // Probe 0.1
-      const res01 = await requestRemote(new URL('/api/host.describe', baseUrl).href, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          type: 'client-request',
-          rpcId: randomUUID(),
-          method: 'host.describe',
-          payload: {},
-        }),
-        timeoutMs: 15_000,
-      }).catch(() => undefined)
-
-      if (res01 !== undefined && res01.status >= 200 && res01.status < 300) {
-        let body: { result?: { value?: { version?: string } } } = {}
-        try {
-          body = JSON.parse(res01.body.toString('utf8')) as typeof body
-        } catch {
-          // Keep the default version label.
-        }
+      const resolved = resolveProbedProtocol(listValue, describeValue)
+      if (resolved !== undefined) {
         return {
           ok: true,
-          protocolVersion: '0.1',
-          remoteDshVersion: body.result?.value?.version ?? '0.1.x',
+          protocolVersion: resolved.protocol,
+          remoteDshVersion: resolved.version ?? (resolved.protocol === '0.2' ? '0.2.x' : '0.1.x'),
           latencyMs: Date.now() - t0,
         }
       }
@@ -645,20 +648,29 @@ export class DeviceRegistry {
   }
 
   saveToDisk(): void {
+    const dir = dirname(this.dataFilePath)
+    mkdirSync(dir, { recursive: true })
+    const tmp = `${this.dataFilePath}.${randomUUID()}.tmp`
+    const doc: PersistedRegistryDocument = {
+      version: 1,
+      devices: [...this.configs.values()],
+      aggregation: this.aggregator.getConfig(),
+    }
     try {
-      const dir = dirname(this.dataFilePath)
-      mkdirSync(dir, { recursive: true })
-      const tmp = `${this.dataFilePath}.${randomUUID()}.tmp`
-      const doc: PersistedRegistryDocument = {
-        version: 1,
-        devices: [...this.configs.values()],
-        aggregation: this.aggregator.getConfig(),
-      }
       writeFileSync(tmp, JSON.stringify(doc, null, 2), { mode: 0o600 })
       try { chmodSync(tmp, 0o600) } catch { /* Windows fallback */ }
-      renameSync(tmp, this.dataFilePath)
-    } catch {
-      // Non-fatal
+      copyFileSync(tmp, this.dataFilePath)
+      try { chmodSync(this.dataFilePath, 0o600) } catch { /* Windows fallback */ }
+    } finally {
+      try { unlinkSync(tmp) } catch { /* sibling may not exist if the write failed */ }
     }
+  }
+}
+
+function parseProbeBody(body: Buffer): { result?: { value?: { version?: string } } } {
+  try {
+    return JSON.parse(body.toString('utf8')) as { result?: { value?: { version?: string } } }
+  } catch {
+    return {}
   }
 }

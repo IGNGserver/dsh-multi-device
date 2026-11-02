@@ -45,8 +45,14 @@ export interface SshTransportConfig {
   readonly remoteBindHost?: string
   /** Remote port where `dsh web` listens; defaults to `3080`. */
   readonly remotePort?: number
-  /** Remote `$DSH_HOME` directory for auto-ssh credential bootstrap; defaults to `~/.dsh`. */
+  /** Remote `$DSH_HOME` directory used only when bootstrap is explicitly enabled; defaults to `~/.dsh`. */
   readonly remoteDshHome?: string
+  /**
+   * When true, `auto` may read the remote `.credentials.yaml` over SSH to mint
+   * a browser cookie. The signing secret itself is never persisted. Defaults to
+   * false: `auto` only exchanges a configured launch token or uses an existing cookie.
+   */
+  readonly bootstrapFromRemoteCredentials?: boolean
   /** Preferred SSH tunnel engine (`auto` prefers `system-ssh` for 100% `~/.ssh/config` fidelity). */
   readonly engine?: SshTunnelEngine
 }
@@ -64,7 +70,7 @@ export type DeviceTransportConfig = SshTransportConfig | DirectTransportConfig
 
 /**
  * Authentication mode for reaching the remote DSH server:
- * - `'auto'`: tries existing persisted cookie -> launch token exchange -> SSH `.credentials.yaml` bootstrap -> unauthenticated (0.1.x).
+ * - `'auto'`: tries existing persisted cookie -> launch token exchange -> unauthenticated (0.1.x). Reading the remote `.credentials.yaml` requires `bootstrapFromRemoteCredentials`.
  * - `'token'`: exchanges a `?token=...` launch URL or raw launch token for a persistent 30-day signed cookie.
  * - `'cookie'`: sends an explicit Cookie header (e.g. `dsh-auth-...=v1...`).
  * - `'bearer'`: sends `Authorization: Bearer <token>`.
@@ -162,6 +168,11 @@ export interface DeviceView {
   readonly nativeProxyUrl?: string
   readonly keepNativeAlive: boolean
   readonly protocolVersion: RemoteProtocolVersion
+  /**
+   * Whether this device has a live event stream. DSH 0.1 is list-only: the
+   * client polls session and workspace lists and does not follow history.
+   */
+  readonly realtime: boolean
   readonly remoteDshVersion?: string
   readonly remoteHome?: string
   readonly latencyMs?: number
@@ -472,6 +483,11 @@ export function normalizeGitRemote(rawUrl: string | undefined | null): string | 
       const parsed = new URL(trimmed)
       if (parsed.protocol === 'file:') return undefined
       host = parsed.hostname.toLowerCase()
+      const port = parsed.port
+      const defaultPort = parsed.protocol === 'ssh:' || parsed.protocol === 'git+ssh:' ? '22' : ''
+      if (port !== '' && port !== defaultPort && port !== '443' && port !== '80') {
+        host = `${host}:${port}`
+      }
       pathPart = parsed.pathname
     } catch {
       return undefined

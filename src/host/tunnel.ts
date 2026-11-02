@@ -62,14 +62,39 @@ export async function allocateLoopbackPort(): Promise<number> {
   })
 }
 
+const LOOPBACK_REMOTE_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
+
+/**
+ * The tunnel may only forward to the remote machine's own loopback DSH listener.
+ * An arbitrary `remoteBindHost` would turn the local port into a jump into the remote LAN.
+ */
+export function assertLoopbackForward(transport: SshTransportConfig): { host: string; port: number } {
+  const host = (transport.remoteBindHost ?? '127.0.0.1').trim()
+  const port = transport.remotePort ?? 3080
+  if (!LOOPBACK_REMOTE_HOSTS.has(host.toLowerCase())) {
+    throw new Error(`SSH remote bind host must be loopback (127.0.0.1, localhost, or ::1), got ${host}`)
+  }
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`SSH remote DSH port must be an integer between 1 and 65535, got ${String(port)}`)
+  }
+  return { host: host.toLowerCase() === '[::1]' ? '::1' : host, port }
+}
+
+/**
+ * Always force `yes`. User config values such as `accept-new`, `no`, or `off`
+ * must not be copied onto the command line: the tunnel later reads remote credentials.
+ */
+export function strictHostKeyCheckingArg(): string {
+  return 'StrictHostKeyChecking=yes'
+}
+
 /** Build the CLI arguments for `ssh -N -L ...` given transport and resolved parameters. */
 export function buildSystemSshArgs(
   transport: SshTransportConfig,
   resolved: ResolvedSshParameters,
   localPort: number,
 ): string[] {
-  const remoteBindHost = transport.remoteBindHost ?? '127.0.0.1'
-  const remotePort = transport.remotePort ?? 3080
+  const forward = assertLoopbackForward(transport)
   const parsedSpec = parseSshTargetSpec(transport.host)
 
   const args: string[] = [
@@ -80,8 +105,8 @@ export function buildSystemSshArgs(
     '-o', `ServerAliveInterval=${resolved.serverAliveInterval ?? KEEPALIVE_INTERVAL_SEC}`,
     '-o', 'ServerAliveCountMax=3',
     '-o', 'ConnectTimeout=10',
-    '-o', `StrictHostKeyChecking=${resolved.strictHostKeyChecking ?? 'accept-new'}`,
-    '-L', `127.0.0.1:${localPort}:${remoteBindHost}:${remotePort}`,
+    '-o', strictHostKeyCheckingArg(),
+    '-L', `127.0.0.1:${localPort}:${forward.host}:${forward.port}`,
   ]
 
   const explicitPort = transport.port ?? parsedSpec.port
@@ -136,7 +161,7 @@ export async function execSshCommand(
     '-T',
     '-o', 'BatchMode=yes',
     '-o', 'ConnectTimeout=6',
-    '-o', `StrictHostKeyChecking=${resolved.strictHostKeyChecking ?? 'accept-new'}`,
+    '-o', strictHostKeyCheckingArg(),
   ]
   const explicitPort = transport.port ?? parsedSpec.port
   if (explicitPort !== undefined) args.push('-p', String(explicitPort))
@@ -155,30 +180,30 @@ export async function execSshCommand(
     let stderr = ''
     let settled = false
     const proc = spawn('ssh', args, { stdio: ['ignore', 'pipe', 'pipe'] })
-    const timer = setTimeout(() => {
+    const finish = (res: { ok: true; stdout: string } | { ok: false; error: string }): void => {
       if (settled) return
       settled = true
-      proc.kill('SIGTERM')
-      resolve({ ok: false, error: 'ssh command timed out' })
+      clearTimeout(timer)
+      clearTimeout(killTimer)
+      resolve(res)
+    }
+    const timer = setTimeout(() => {
+      try { proc.kill('SIGTERM') } catch { /* ignore */ }
     }, timeoutMs)
+    // A stuck ProxyCommand can ignore SIGTERM. Escalate so the promise settles.
+    const killTimer = setTimeout(() => {
+      try { proc.kill('SIGKILL') } catch { /* ignore */ }
+      finish({ ok: false, error: 'ssh command timed out' })
+    }, timeoutMs + 500)
 
     proc.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString('utf8') })
     proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8') })
     proc.on('error', (err) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      resolve({ ok: false, error: err.message })
+      finish({ ok: false, error: err.message })
     })
     proc.on('close', (code) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      if (code === 0) {
-        resolve({ ok: true, stdout })
-      } else {
-        resolve({ ok: false, error: stderr.trim() || `ssh exited with code ${String(code)}` })
-      }
+      if (code === 0) finish({ ok: true, stdout })
+      else finish({ ok: false, error: stderr.trim() || `ssh exited with code ${String(code)}` })
     })
   })
 }
@@ -286,6 +311,9 @@ export class SshTunnel {
   private ssh2Conn: Ssh2ClientLike | undefined
   private ssh2Server: Server | undefined
   private readonly sockets = new Set<Socket>()
+  /** Monotonic generation so a late `close`/`fail` cannot tear down a newer tunnel. */
+  private generation = 0
+  private openInFlight = false
 
   constructor(
     private readonly transport: SshTransportConfig,
@@ -316,6 +344,7 @@ export class SshTunnel {
 
   stop(): void {
     this.stopped = true
+    this.generation += 1
     if (this.retryTimer !== undefined) {
       clearTimeout(this.retryTimer)
       this.retryTimer = undefined
@@ -325,6 +354,17 @@ export class SshTunnel {
     this.notify()
   }
 
+  /** Kill a child and wait until it exits, escalating to SIGKILL. */
+  private killChild(proc: ChildProcess): void {
+    proc.removeAllListeners()
+    try { proc.kill('SIGTERM') } catch { /* ignore */ }
+    const killTimer = setTimeout(() => {
+      try { proc.kill('SIGKILL') } catch { /* ignore */ }
+    }, 400)
+    proc.once('close', () => clearTimeout(killTimer))
+    if (killTimer.unref) killTimer.unref()
+  }
+
   private teardown(): void {
     for (const socket of this.sockets) socket.destroy()
     this.sockets.clear()
@@ -332,8 +372,7 @@ export class SshTunnel {
     if (this.sshProc !== undefined) {
       const proc = this.sshProc
       this.sshProc = undefined
-      proc.removeAllListeners()
-      try { proc.kill('SIGTERM') } catch { /* ignore */ }
+      this.killChild(proc)
     }
 
     if (this.ssh2Server !== undefined) {
@@ -350,57 +389,85 @@ export class SshTunnel {
     this.localPort = undefined
   }
 
-  private scheduleRetry(): void {
-    if (this.stopped || this.retryTimer !== undefined) return
-    const delay = Math.min(BACKOFF_BASE_MS * 2 ** this.attempt, BACKOFF_MAX_MS)
+  private scheduleRetry(generation: number): void {
+    if (this.stopped || generation !== this.generation || this.retryTimer !== undefined) return
+    const exponent = Math.min(this.attempt, 8)
+    const delay = Math.min(BACKOFF_BASE_MS * 2 ** exponent, BACKOFF_MAX_MS)
     this.attempt += 1
+    const jitter = Math.floor(Math.random() * Math.min(delay, 1_000))
     this.retryTimer = setTimeout(() => {
       this.retryTimer = undefined
+      if (generation !== this.generation || this.stopped) return
       void this.open()
-    }, delay + Math.floor(Math.random() * 250))
+    }, delay + jitter)
   }
 
-  private fail(message: string, retryable = true): void {
+  private fail(message: string, generation: number, retryable = true): void {
+    if (generation !== this.generation || this.stopped) return
     this.lastError = message
     this.state = 'error'
+    this.generation += 1
     this.teardown()
     this.notify()
-    if (retryable) this.scheduleRetry()
+    if (retryable) this.scheduleRetry(this.generation)
   }
 
   private async open(): Promise<void> {
-    if (this.stopped) return
+    if (this.stopped || this.openInFlight || this.state === 'up') return
+    const generation = this.generation
+    this.openInFlight = true
     this.state = 'connecting'
     this.notify()
 
-    const resolved = resolveSshConfigForTransport(this.transport)
+    try {
+      await this.openOnce(generation)
+    } finally {
+      this.openInFlight = false
+    }
+  }
+
+  private async openOnce(generation: number): Promise<void> {
+    if (this.stopped || generation !== this.generation) return
+
+    let resolved: ResolvedSshParameters
+    let forward: { host: string; port: number }
+    try {
+      forward = assertLoopbackForward(this.transport)
+      resolved = resolveSshConfigForTransport(this.transport)
+    } catch (error) {
+      this.fail(error instanceof Error ? error.message : String(error), generation, false)
+      return
+    }
+
     const preferSsh2 =
       this.transport.engine === 'ssh2' ||
       (this.transport.passphrase !== undefined && this.transport.passphrase !== '' && this.transport.engine !== 'system-ssh')
 
     if (!preferSsh2) {
-      const ok = await this.openWithSystemSsh(resolved)
-      if (ok || this.stopped || this.transport.engine === 'system-ssh') return
+      const ok = await this.openWithSystemSsh(resolved, generation)
+      if (ok || this.stopped || generation !== this.generation || this.transport.engine === 'system-ssh') return
     }
 
     if (resolved.proxyJump !== undefined || resolved.proxyCommand !== undefined) {
       this.fail(
         'ssh2 engine cannot honor ProxyJump/ProxyCommand; use system-ssh with an SSH agent',
+        generation,
         false,
       )
       return
     }
 
-    await this.openWithSsh2(resolved)
+    await this.openWithSsh2(resolved, forward, generation)
   }
 
-  private async openWithSystemSsh(resolved: ResolvedSshParameters): Promise<boolean> {
+  private async openWithSystemSsh(resolved: ResolvedSshParameters, generation: number): Promise<boolean> {
+    if (generation !== this.generation) return true
     if (
       this.transport.privateKeyPath !== undefined &&
       this.transport.privateKeyPath.trim() !== '' &&
       !existsSync(expandHomePath(this.transport.privateKeyPath.trim()))
     ) {
-      this.fail(`SSH private key not found: ${this.transport.privateKeyPath}`, false)
+      this.fail(`SSH private key not found: ${this.transport.privateKeyPath}`, generation, false)
       return false
     }
 
@@ -408,9 +475,10 @@ export class SshTunnel {
     try {
       port = await allocateLoopbackPort()
     } catch (error) {
-      this.fail(`Failed to allocate local port: ${error instanceof Error ? error.message : String(error)}`)
+      this.fail(`Failed to allocate local port: ${error instanceof Error ? error.message : String(error)}`, generation)
       return false
     }
+    if (generation !== this.generation || this.stopped) return true
 
     const args = buildSystemSshArgs(this.transport, resolved, port)
     let stderr = ''
@@ -419,9 +487,13 @@ export class SshTunnel {
       proc = spawn('ssh', args, { stdio: ['ignore', 'ignore', 'pipe'] })
     } catch (error) {
       if (this.transport.engine === 'system-ssh') {
-        this.fail(`Failed to spawn ssh: ${error instanceof Error ? error.message : String(error)}`)
+        this.fail(`Failed to spawn ssh: ${error instanceof Error ? error.message : String(error)}`, generation)
       }
       return false
+    }
+    if (generation !== this.generation || this.stopped) {
+      this.killChild(proc)
+      return true
     }
 
     this.sshProc = proc
@@ -431,18 +503,24 @@ export class SshTunnel {
     })
 
     const readyResult = await waitForLocalForwardReady(proc, port, READY_TIMEOUT_MS)
+    if (generation !== this.generation) {
+      this.killChild(proc)
+      return true
+    }
     if (!readyResult.ok) {
       const detail = stderr.trim() || readyResult.error
       if (this.transport.engine === 'system-ssh' || !detail.includes('ENOENT')) {
-        this.fail(`SSH tunnel failed (${resolved.hostName}): ${detail}`)
+        this.fail(`SSH tunnel failed (${resolved.hostName}): ${detail}`, generation)
         return true // Handled via fail+retry
       }
-      this.teardown()
+      this.killChild(proc)
+      if (this.sshProc === proc) this.sshProc = undefined
       return false
     }
 
-    if (this.stopped) {
-      this.teardown()
+    if (this.stopped || generation !== this.generation) {
+      this.killChild(proc)
+      if (this.sshProc === proc) this.sshProc = undefined
       return true
     }
 
@@ -454,25 +532,30 @@ export class SshTunnel {
     this.notify()
 
     proc.on('close', (code) => {
-      if (this.stopped || this.sshProc !== proc) return
+      if (this.stopped || this.sshProc !== proc || generation !== this.generation) return
       const msg = stderr.trim() || `ssh tunnel exited (code ${String(code)})`
-      this.fail(msg, true)
+      this.fail(msg, generation, true)
     })
     proc.on('error', (err) => {
-      if (this.stopped || this.sshProc !== proc) return
-      this.fail(err.message, true)
+      if (this.stopped || this.sshProc !== proc || generation !== this.generation) return
+      this.fail(err.message, generation, true)
     })
 
     return true
   }
 
-  private async openWithSsh2(resolved: ResolvedSshParameters): Promise<void> {
+  private async openWithSsh2(
+    resolved: ResolvedSshParameters,
+    forward: { host: string; port: number },
+    generation: number,
+  ): Promise<void> {
+    if (generation !== this.generation || this.stopped) return
     let ClientCtor: new () => Ssh2ClientLike
     try {
       const mod = (await import('ssh2')) as unknown as { Client: new () => Ssh2ClientLike }
       ClientCtor = mod.Client
     } catch {
-      this.fail('Neither system ssh nor ssh2 succeeded; check SSH configuration', true)
+      this.fail('Neither system ssh nor ssh2 succeeded; check SSH configuration', generation, true)
       return
     }
 
@@ -484,6 +567,7 @@ export class SshTunnel {
       } catch (error) {
         this.fail(
           `Cannot read private key ${keyFile}: ${error instanceof Error ? error.message : String(error)}`,
+          generation,
           false,
         )
         return
@@ -501,17 +585,16 @@ export class SshTunnel {
       }
     }
 
+    if (generation !== this.generation || this.stopped) return
     const conn = new ClientCtor()
     this.ssh2Conn = conn
-    const remoteBindHost = this.transport.remoteBindHost ?? '127.0.0.1'
-    const remotePort = this.transport.remotePort ?? 3080
 
     const connected = new Promise<void>((res, rej) => {
       conn.on('ready', () => res())
       conn.on('error', (err) => rej(err instanceof Error ? err : new Error(String(err))))
       conn.on('close', () => {
-        if (!this.stopped && this.state === 'up' && this.ssh2Conn === conn) {
-          this.fail('SSH connection closed', true)
+        if (!this.stopped && generation === this.generation && this.state === 'up' && this.ssh2Conn === conn) {
+          this.fail('SSH connection closed', generation, true)
         }
       })
       conn.connect({
@@ -530,11 +613,11 @@ export class SshTunnel {
     try {
       await connected
     } catch (error) {
-      this.fail(error instanceof Error ? error.message : String(error), true)
+      this.fail(error instanceof Error ? error.message : String(error), generation, true)
       return
     }
 
-    if (this.stopped) {
+    if (this.stopped || generation !== this.generation) {
       this.teardown()
       return
     }
@@ -543,7 +626,7 @@ export class SshTunnel {
       this.sockets.add(socket)
       socket.on('close', () => this.sockets.delete(socket))
       socket.on('error', () => socket.destroy())
-      conn.forwardOut('127.0.0.1', 0, remoteBindHost, remotePort, (err, stream) => {
+      conn.forwardOut('127.0.0.1', 0, forward.host, forward.port, (err, stream) => {
         if (err || !stream) {
           socket.destroy()
           return
@@ -560,13 +643,18 @@ export class SshTunnel {
         server.listen(0, '127.0.0.1', () => res())
       })
     } catch (error) {
-      this.fail(`Cannot bind local forward port: ${error instanceof Error ? error.message : String(error)}`, true)
+      this.fail(`Cannot bind local forward port: ${error instanceof Error ? error.message : String(error)}`, generation, true)
+      return
+    }
+
+    if (generation !== this.generation || this.stopped) {
+      this.teardown()
       return
     }
 
     const address = server.address()
     if (address === null || typeof address === 'string') {
-      this.fail('Local forward server did not report a port', true)
+      this.fail('Local forward server did not report a port', generation, true)
       return
     }
 
@@ -640,6 +728,26 @@ function tryTcpConnect(port: number, timeoutMs: number): Promise<boolean> {
  * entry and tells the user to connect once with `ssh` / `ssh-keyscan` when the
  * host is new.
  */
+/**
+ * Compare one `ssh-keygen -F` output line with the key ssh2 presented.
+ *
+ * `-F` reprints matching `known_hosts` lines, including hashed hosts
+ * (`|1|salt|hash type base64`). The host token can itself contain spaces, so
+ * the key is the field after the key-type token, not a fixed index. Comment
+ * lines (`# Host … found`) and markers (`@cert-authority`) are not keys.
+ */
+export function hostKeyMatchesKnownHostsLine(line: string, key: Buffer): boolean {
+  const trimmed = line.trim()
+  if (trimmed === '' || trimmed.startsWith('#') || trimmed.startsWith('@')) return false
+  const parts = trimmed.split(/\s+/)
+  if (parts.length < 3) return false
+  const typeIndex = parts.findIndex(part => /^(?:ssh|ecdsa|sk-ssh|sk-ecdsa)-/.test(part))
+  if (typeIndex < 1 || parts[typeIndex + 1] === undefined) return false
+  const knownKey = Buffer.from(parts[typeIndex + 1], 'base64')
+  if (knownKey.byteLength === 0 || knownKey.byteLength !== key.byteLength) return false
+  return knownKey.equals(key)
+}
+
 function verifySsh2HostKey(host: string, port: number, key: Buffer): boolean {
   const knownHosts = join(homedir(), '.ssh', 'known_hosts')
   if (!existsSync(knownHosts)) return false
@@ -650,10 +758,7 @@ function verifySsh2HostKey(host: string, port: number, key: Buffer): boolean {
       stdio: ['ignore', 'pipe', 'ignore'],
     })
     for (const line of output.split(/\r?\n/)) {
-      const parts = line.trim().split(/\s+/)
-      if (parts.length < 3 || parts[2] === undefined) continue
-      const knownKey = Buffer.from(parts[2], 'base64')
-      if (knownKey.equals(key)) return true
+      if (hostKeyMatchesKnownHostsLine(line, key)) return true
     }
   } catch {
     // Missing ssh-keygen or unknown host: reject rather than trust blindly.

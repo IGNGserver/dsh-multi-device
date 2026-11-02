@@ -93,6 +93,8 @@ export class RemoteDeviceClient {
   private tunnel: SshTunnel | undefined
   private state: DeviceConnectionState = 'connecting'
   private protocolVersion: RemoteProtocolVersion = 'unknown'
+  /** 0.1 has no live stream. The UI uses this to show a list-only device. */
+  private realtime = false
   private remoteDshVersion: string | undefined
   private remoteHome: string | undefined
   private latencyMs: number | undefined
@@ -121,6 +123,7 @@ export class RemoteDeviceClient {
 
   private running = false
   private loopAbort: AbortController | undefined
+  private iterationAbort: AbortController | undefined
 
   constructor(
     config: DeviceConfig,
@@ -192,6 +195,7 @@ export class RemoteDeviceClient {
       ...(this.nativeProxyUrl !== undefined ? { nativeProxyUrl: this.nativeProxyUrl } : {}),
       keepNativeAlive: this.config.keepNativeAlive !== false,
       protocolVersion: this.protocolVersion,
+      realtime: this.realtime,
       ...(this.remoteDshVersion !== undefined ? { remoteDshVersion: this.remoteDshVersion } : {}),
       ...(this.remoteHome !== undefined ? { remoteHome: this.remoteHome } : {}),
       ...(this.latencyMs !== undefined ? { latencyMs: this.latencyMs } : {}),
@@ -245,6 +249,8 @@ export class RemoteDeviceClient {
     this.running = false
     this.loopAbort?.abort()
     this.loopAbort = undefined
+    this.iterationAbort?.abort()
+    this.iterationAbort = undefined
     this.closeMuxSocket()
     this.tunnel?.stop()
     this.tunnel = undefined
@@ -446,7 +452,9 @@ export class RemoteDeviceClient {
 
   private async superviseLoop(outerSignal: AbortSignal): Promise<void> {
     while (this.running && !outerSignal.aborted) {
+      this.iterationAbort?.abort()
       const iterAbort = new AbortController()
+      this.iterationAbort = iterAbort
       const signal = AbortSignal.any([outerSignal, iterAbort.signal])
       try {
         this.state = this.reconnectAttempt === 0 ? 'connecting' : 'reconnecting'
@@ -469,6 +477,7 @@ export class RemoteDeviceClient {
         const probed = await this.handshakeAndLoadInitial(baseUrl, signal)
         this.latencyMs = Date.now() - t0
         this.protocolVersion = probed.protocolVersion
+        this.realtime = probed.protocolVersion === '0.2'
         if (probed.remoteDshVersion !== undefined) {
           this.remoteDshVersion = probed.remoteDshVersion
         }
@@ -492,6 +501,7 @@ export class RemoteDeviceClient {
         this.callbacks.onStateChanged(this.id)
       } finally {
         iterAbort.abort()
+        if (this.iterationAbort === iterAbort) this.iterationAbort = undefined
         this.closeMuxSocket()
       }
 
@@ -537,20 +547,30 @@ export class RemoteDeviceClient {
       res02 = await this.rawRpcPost('session/list', { args: { _request: {} } }, signal)
     }
 
-    if (res02.ok && isRecord(res02.value) && Array.isArray(res02.value.items)) {
-      this.summaries = res02.value.items as RemoteSessionSummary[]
-      return { protocolVersion: '0.2', remoteDshVersion: '0.2.x' }
+    const body02 = res02.ok ? res02.value : undefined
+    const listGen = classifyRemoteProtocol(body02)
+    // A versionless `items` body is the normal 0.2 list. Ask host.describe
+    // before trusting it, because a 0.1 server can return `items` too.
+    let hostValue: unknown
+    if (listGen !== '0.2') {
+      const res01 = await this.rawRpcPost('host.describe', {}, signal, 'host.describe')
+      if (res01.ok) hostValue = res01.value
     }
-
-    // Try DSH 0.1 `/api/host.describe` + `/api/session.list`
-    const res01 = await this.rawRpcPost('host.describe', {}, signal, 'host.describe')
-    if (res01.ok && isRecord(res01.value)) {
-      const version = typeof res01.value.version === 'string' ? res01.value.version : '0.1.x'
-      if (typeof res01.value.cwd === 'string') {
-        this.remoteHome = res01.value.cwd
+    const resolved = resolveProbedProtocol(body02, hostValue)
+    if (resolved?.protocol === '0.2') {
+      if (isRecord(body02) && Array.isArray(body02.items)) {
+        this.summaries = body02.items as RemoteSessionSummary[]
+      }
+      this.realtime = true
+      return { protocolVersion: '0.2', remoteDshVersion: resolved.version ?? '0.2.x' }
+    }
+    if (resolved?.protocol === '0.1') {
+      if (isRecord(hostValue) && typeof hostValue.cwd === 'string') {
+        this.remoteHome = hostValue.cwd
       }
       await this.refreshLegacy01Lists(signal)
-      return { protocolVersion: '0.1', remoteDshVersion: version }
+      this.realtime = false
+      return { protocolVersion: '0.1', remoteDshVersion: resolved.version ?? '0.1.x' }
     }
 
     throw new Error(res02.ok ? 'Unrecognized DSH /api response' : res02.error.message)
@@ -566,7 +586,7 @@ export class RemoteDeviceClient {
       rejectUnauthorized:
         this.config.transport.kind === 'direct'
           ? this.config.transport.rejectUnauthorized !== false
-          : false,
+          : true,
     })
     this.muxSocket = socket
 
@@ -907,7 +927,7 @@ export class RemoteDeviceClient {
     }
   }
 
-  private async runProtocol01Polling(baseUrl: string, signal: AbortSignal): Promise<void> {
+  private async runProtocol01Polling(_baseUrl: string, signal: AbortSignal): Promise<void> {
     while (!signal.aborted && this.running) {
       await sleepWithSignal(3_000, signal)
       if (signal.aborted) return
@@ -944,19 +964,17 @@ export class RemoteDeviceClient {
       signal,
       'session.history',
     )
-    const records = res.ok && isRecord(res.value) && Array.isArray(res.value.events)
-      ? res.value.events
-      : []
-    const lastSeq = records.length > 0 && isRecord(records.at(-1)) && isRecord((records.at(-1) as Record<string, unknown>).event)
-      ? Number(((records.at(-1) as Record<string, unknown>).event as Record<string, unknown>).seq ?? -1)
-      : -1
+    // 0.1 has no incremental follow. Return an empty snapshot so the caller
+    // does not treat a one-shot history dump as a live stream, then wait
+    // until the caller aborts. Lists keep refreshing in the poll loop.
     yield {
       type: 'snapshot',
       header: { version: 2, id: sessionId, createdAt: Date.now(), isSeeded: false },
-      cursor: lastSeq,
-      records,
+      cursor: -1,
+      records: [],
       hasMore: false,
-      projections: { asOfSeq: lastSeq, values: {} },
+      degraded: 'list-only',
+      projections: { asOfSeq: -1, values: {} },
       assistantStream: { revision: 0 },
     }
     await new Promise<void>((resolve) => {
@@ -1096,6 +1114,65 @@ export class RemoteDeviceClient {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Major generation of a DSH version string. `0.1.x` is list-only. */
+export function protocolGeneration(version: string | undefined): '0.2' | '0.1' | 'unknown' {
+  if (version === undefined) return 'unknown'
+  const match = /^v?(\d+)\.(\d+)/.exec(version.trim())
+  if (match === null) return 'unknown'
+  const major = Number(match[1])
+  const minor = Number(match[2])
+  if (major > 0 || minor >= 2) return '0.2'
+  if (major === 0 && minor === 1) return '0.1'
+  return 'unknown'
+}
+
+/**
+ * A body is 0.2 only when it says so. An `items` array alone is shared with
+ * 0.1 list responses and must not promote the device to the live protocol.
+ */
+export function classifyRemoteProtocol(value: unknown): '0.2' | '0.1' | 'unknown' {
+  if (!isRecord(value)) return 'unknown'
+  const fromVersion = protocolGeneration(typeof value.version === 'string' ? value.version : undefined)
+  if (fromVersion !== 'unknown') return fromVersion
+  const fromProtocol = protocolGeneration(typeof value.protocolVersion === 'string' ? value.protocolVersion : undefined)
+  if (fromProtocol !== 'unknown') return fromProtocol
+  if (value.protocol === '0.2' || value.wire === '0.2') return '0.2'
+  return 'unknown'
+}
+
+/**
+ * Decide the protocol from the two probes.
+ * `session/list` without a version stays 0.2 unless `host.describe` says 0.1.
+ * An `items` array on its own is not enough when the legacy probe disagrees.
+ */
+export function resolveProbedProtocol(
+  sessionListValue: unknown,
+  hostDescribeValue: unknown,
+): { protocol: '0.2' | '0.1'; version?: string } | undefined {
+  const listGen = classifyRemoteProtocol(sessionListValue)
+  const describeGen = classifyRemoteProtocol(hostDescribeValue)
+  const listVersion = isRecord(sessionListValue) && typeof sessionListValue.version === 'string'
+    ? sessionListValue.version
+    : undefined
+  const describeVersion = isRecord(hostDescribeValue) && typeof hostDescribeValue.version === 'string'
+    ? hostDescribeValue.version
+    : undefined
+
+  if (listGen === '0.1' || describeGen === '0.1') {
+    return { protocol: '0.1', ...(describeVersion ?? listVersion ? { version: describeVersion ?? listVersion } : {}) }
+  }
+  if (listGen === '0.2' || describeGen === '0.2') {
+    return { protocol: '0.2', ...(listVersion ?? describeVersion ? { version: listVersion ?? describeVersion } : {}) }
+  }
+  if (isRecord(sessionListValue) && Array.isArray(sessionListValue.items)) {
+    return { protocol: '0.2', ...(listVersion !== undefined ? { version: listVersion } : {}) }
+  }
+  if (describeVersion !== undefined || (isRecord(hostDescribeValue) && typeof hostDescribeValue.cwd === 'string')) {
+    return { protocol: '0.1', ...(describeVersion !== undefined ? { version: describeVersion } : {}) }
+  }
+  return undefined
 }
 
 function sleepWithSignal(ms: number, signal: AbortSignal): Promise<void> {

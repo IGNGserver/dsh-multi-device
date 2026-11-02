@@ -56,14 +56,19 @@ import { requestRemote } from '../src/host/http-request.ts'
 import { NativeDeviceProxy } from '../src/host/native-proxy.ts'
 import { DeviceRegistry } from '../src/host/registry.ts'
 import {
-  buildSystemSshArgs,
   listLocalSshKeys,
   parseSshConfigText,
   parseSshTargetSpec,
   resolveSshConfigForTransport,
 } from '../src/host/ssh-config.ts'
-import { buildSystemSshArgs as buildTunnelSshArgs } from '../src/host/tunnel.ts'
-import { MultiDeviceControlPlane } from '../src/runtime.ts'
+import {
+  assertLoopbackForward,
+  buildSystemSshArgs as buildTunnelSshArgs,
+  hostKeyMatchesKnownHostsLine,
+} from '../src/host/tunnel.ts'
+import { classifyRemoteProtocol, protocolGeneration, resolveProbedProtocol } from '../src/host/remote-client.ts'
+import { buildForwardHeaders } from '../src/host/native-proxy.ts'
+import { admitControlPlaneRequest, MultiDeviceControlPlane } from '../src/runtime.ts'
 
 const tempDirs: string[] = []
 function makeTempDir(prefix: string): string {
@@ -127,6 +132,9 @@ describe('1. Identity Mapping & Git Remote URL Normalization', () => {
     expect(normalizeGitRemote('https://github.com/DeepSeek-AI/DeepSeek-Harness.git')).toBe(expected)
     expect(normalizeGitRemote('https://token@github.com/deepseek-ai/deepseek-harness/')).toBe(expected)
     expect(normalizeGitRemote('ssh://git@github.com:22/deepseek-ai/deepseek-harness.git')).toBe(expected)
+    expect(normalizeGitRemote('ssh://git@github.com:2222/deepseek-ai/deepseek-harness.git')).toBe(
+      'github.com:2222/deepseek-ai/deepseek-harness',
+    )
     expect(normalizeGitRemote('git://github.com/deepseek-ai/deepseek-harness')).toBe(expected)
     expect(normalizeGitRemote('C:\\Users\\me\\repo')).toBeUndefined()
     expect(normalizeGitRemote('')).toBeUndefined()
@@ -184,6 +192,8 @@ Host *
     )
     expect(cliArgs).toContain('-L')
     expect(cliArgs).toContain('127.0.0.1:54321:127.0.0.1:3080')
+    expect(cliArgs).toContain('StrictHostKeyChecking=yes')
+    expect(cliArgs.join(' ')).not.toContain('accept-new')
     expect(cliArgs.at(-1)).toBe('gpu-node1')
   })
 
@@ -1090,6 +1100,86 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
       server01.closeAllConnections()
       await new Promise<void>(r => server01.close(() => r()))
     }
+  })
+})
+
+describe('6. Stability guards', () => {
+  it('keeps a non-default Git port and still drops the default ssh port', () => {
+    expect(normalizeGitRemote('ssh://git@gitlab.example.com:2222/group/repo.git')).toBe(
+      'gitlab.example.com:2222/group/repo',
+    )
+    expect(normalizeGitRemote('https://github.com/org/repo.git')).toBe('github.com/org/repo')
+  })
+
+  it('refuses to forward an SSH tunnel anywhere but the remote loopback', () => {
+    expect(assertLoopbackForward({ kind: 'ssh', host: 'gpu', remoteBindHost: 'localhost', remotePort: 3080 })).toEqual({
+      host: 'localhost',
+      port: 3080,
+    })
+    expect(() => assertLoopbackForward({ kind: 'ssh', host: 'gpu', remoteBindHost: '10.0.0.8' })).toThrow(/loopback/)
+  })
+
+  it('trusts a hashed known_hosts line only when the presented key matches', () => {
+    const key = Buffer.from('ssh-ed25519-test-key')
+    const hashed = `|1|salt|hash ssh-ed25519 ${key.toString('base64')}`
+    expect(hostKeyMatchesKnownHostsLine(`# Host gpu found: line 3`, key)).toBe(false)
+    expect(hostKeyMatchesKnownHostsLine(hashed, key)).toBe(true)
+    expect(hostKeyMatchesKnownHostsLine(hashed, Buffer.from('different-key-material'))).toBe(false)
+  })
+
+  it('does not treat an items array as DSH 0.2 when host.describe says 0.1', () => {
+    expect(classifyRemoteProtocol({ items: [] })).toBe('unknown')
+    expect(classifyRemoteProtocol({ version: '0.1.8', items: [] })).toBe('0.1')
+    expect(protocolGeneration('0.2.1')).toBe('0.2')
+    expect(protocolGeneration('0.1.0')).toBe('0.1')
+    expect(resolveProbedProtocol({ items: [{ sessionId: 's' }] }, {})).toEqual({ protocol: '0.2' })
+    expect(resolveProbedProtocol({ items: [{ sessionId: 's' }] }, { version: '0.1.8', cwd: '/root' })).toEqual({
+      protocol: '0.1',
+      version: '0.1.8',
+    })
+    expect(resolveProbedProtocol(undefined, { version: '0.1.0-rc.6', cwd: '/root' })).toEqual({
+      protocol: '0.1',
+      version: '0.1.0-rc.6',
+    })
+  })
+
+  it('keeps a stored SSH passphrase when the edit form sends an empty value', () => {
+    const dir = makeTempDir('dsh-md-pass-')
+    const auth = new DeviceAuthManager(join(dir, 'secrets.json'))
+    auth.setSshPassphrase(DeviceId('dev-a'), 'correct horse')
+    auth.setSshPassphrase(DeviceId('dev-a'), '')
+    auth.setSshPassphrase(DeviceId('dev-a'), undefined)
+    expect(auth.storedSecret(DeviceId('dev-a'))?.sshPassphrase).toBe('correct horse')
+    auth.setSshPassphrase(DeviceId('dev-a'), null)
+    expect(auth.storedSecret(DeviceId('dev-a'))?.sshPassphrase).toBeUndefined()
+  })
+
+  it('rejects a non-loopback control-plane request even when the host hook is missing', () => {
+    expect(admitControlPlaneRequest({ host: '127.0.0.1:3080' })).toBe(true)
+    expect(admitControlPlaneRequest({ host: '[::1]:3080', origin: 'http://[::1]:3080' })).toBe(true)
+    expect(admitControlPlaneRequest({ host: '10.0.0.8:3080' })).toBe(false)
+    expect(admitControlPlaneRequest(
+      { host: '127.0.0.1:3080' },
+      () => 403,
+    )).toBe(false)
+  })
+
+  it('does not forward the browser cookie or authorization to the upstream', () => {
+    const headers = buildForwardHeaders(
+      {
+        host: '127.0.0.1:1',
+        cookie: 'session=from-browser',
+        authorization: 'Bearer from-browser',
+        'x-forwarded-for': '1.2.3.4',
+        accept: 'text/html',
+      },
+      { host: '127.0.0.1:3080', cookie: 'dsh-auth=plugin', authorization: 'Bearer plugin' },
+    )
+    expect(headers['cookie']).toBe('dsh-auth=plugin')
+    expect(headers['authorization']).toBe('Bearer plugin')
+    expect(headers['accept']).toBe('text/html')
+    expect(headers['x-forwarded-for']).toBeUndefined()
+    expect(JSON.stringify(headers)).not.toContain('from-browser')
   })
 })
 

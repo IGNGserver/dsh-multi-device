@@ -52,7 +52,7 @@ export const zh = {
   directUrl: '远端 DSH 地址 (HTTP/HTTPS)',
   directUrlPlaceholder: '例如：http://127.0.0.1:3081 或 https://dev.example.com:3080',
   authMode: '鉴权与持久登录',
-  authAuto: '自动鉴权（SSH 自动提取签名密钥 / 持久 Cookie）',
+  authAuto: '自动鉴权（复用已保存的 Cookie；不默认读取远端签名密钥）',
   authToken: '启动链接或 Token（自动兑换 30 天持久 Cookie）',
   authCookie: '自定义 Cookie (dsh-auth-...)',
   authBearer: 'Bearer Token',
@@ -103,6 +103,7 @@ export const zh = {
   hoverGitRepoLabel: 'Git 仓库',
   gatewayDegradedNotice: '聚合网关当前处于降级状态，您仍可正常使用原生模式管理所有远端设备。',
   aggregatedScopeNotice: '聚合模式负责跨设备工作区与会话；模型目录会合并，但文件上传、终端、远端文件打开和全局设置请使用原生模式。',
+  actionFailed: '操作失败',
 } as const
 
 export type MultiDeviceLocaleKey = keyof typeof zh
@@ -153,7 +154,7 @@ export const en: Record<MultiDeviceLocaleKey, string> = {
   directUrl: 'Remote DSH URL (HTTP/HTTPS)',
   directUrlPlaceholder: 'e.g. http://127.0.0.1:3081 or https://dev.example.com:3080',
   authMode: 'Authentication & Persistent Login',
-  authAuto: 'Auto (SSH credential bootstrap / persistent cookie)',
+  authAuto: 'Auto (reuse a saved cookie; does not read the remote signing secret)',
   authToken: 'Launch URL or Token (exchanges for 30-day cookie)',
   authCookie: 'Custom Cookie (dsh-auth-...)',
   authBearer: 'Bearer Token',
@@ -204,4 +205,5 @@ export const en: Record<MultiDeviceLocaleKey, string> = {
   hoverGitRepoLabel: 'Git Repo',
   gatewayDegradedNotice: 'Aggregated Gateway is degraded; Native Mode remains fully available for all devices.',
   aggregatedScopeNotice: 'Aggregated Mode covers cross-device workspaces and sessions; model catalogs are merged, but file uploads, terminal, remote file opening and global settings belong in Native Mode.',
+  actionFailed: 'Action failed',
 }
