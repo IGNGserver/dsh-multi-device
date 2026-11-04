@@ -141,12 +141,18 @@ export type DeviceConnectionState =
 export type RemoteProtocolVersion = '0.2' | '0.1' | 'unknown'
 
 /** Live runtime telemetry and status of a device. */
+export type DeviceAuthState = 'unknown' | 'ok' | 'required' | 'error'
+
 export interface DeviceView {
   readonly id: DeviceId
   readonly name: string
   readonly label?: string
   readonly enabled: boolean
   readonly state: DeviceConnectionState
+  /** Native-mode authentication state of the current credential (never carries secrets). */
+  readonly authState?: DeviceAuthState
+  /** Human-readable reason when `authState` is `required` or `error`. */
+  readonly authError?: string
   readonly transportKind: 'ssh' | 'direct'
   /** Sanitized SSH transport fields for the edit form (never includes a passphrase). */
   readonly ssh?: {

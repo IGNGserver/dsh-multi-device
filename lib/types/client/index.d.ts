@@ -7,9 +7,11 @@
  *    for managing remote SSH devices, display mode, and Git repository auto-aggregation.
  * 2. `plugins.bundle.config` (`key: 'dsh-multi-device'`): Companion configuration surface
  *    inside DSH's Plugin Manager bundle detail view.
- * 3. `shell.overlay` (`id: 'multi-device-switcher'`): Compact Aggregated ⟷ Native switcher
- *    (auto-hidden until a device is added) and persistent Keep-Alive Native Mode viewport.
- * 4. `sidebar.session.row.leading`, `sidebar.session.row.hover`, and
+ * 3. `shell.overlay` (`id: 'multi-device-switcher'`): persistent Keep-Alive Native Mode
+ *    viewport (the toggle lives in the sidebar footer entry below).
+ * 4. `sidebar.footer.action`: compact Multi-Device entry + device popover, so the plugin
+ *    never floats controls over DSH's session header or caption drag region.
+ * 5. `sidebar.session.row.leading`, `sidebar.session.row.hover`, and
  *    `sidebar.workspaces.session.menu.item`: Per-session device badges, hover details, and
  *    native `MenuItemButton` action to open the owning device in Native Mode.
  *

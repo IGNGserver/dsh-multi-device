@@ -1,3 +1,21 @@
+/**
+ * Host Aggregated Mode Gateway (`AggregatedGateway`).
+ *
+ * Attaches reversibly via `ctx.effect()` to DSH 0.2's `sessionController`,
+ * `workspaceController`, and `typertGateway` (with a DSH 0.1 `apiProxy` fallback).
+ *
+ * Guarantees:
+ * - Zero core file modifications: all hooks are runtime service method wrappers that
+ *   cleanly restore original methods when the plugin unloads or reloads (HMR).
+ * - Mode Independence: if attaching to the Host controllers fails for any reason,
+ *   the error is caught and reported in `registry.setGatewayStatus(false, err)` while
+ *   Native Mode and the Multi-Device Hub continue operating normally.
+ * - Full Session, Workspace, Projection, Approval & Question Waterfall routing across
+ *   local and remote devices.
+ *
+ * @module dsh-multi-device/host/gateway
+ */
+import { type DeviceId } from '../contract.ts';
 import type { PhysicalWorkspaceInput } from './git-aggregator.ts';
 import type { DeviceRegistry } from './registry.ts';
 export interface SessionControllerLike {
@@ -159,6 +177,35 @@ export interface WorkspaceRegistryLike {
     readonly archivedSessionIds: readonly string[];
     readonly pinnedSessionIds: readonly string[];
 }
+export interface ModelCatalogLike {
+    readonly default: Record<string, unknown>;
+    readonly routableProviders: readonly string[];
+    readonly groups: {
+        readonly id: string;
+        readonly name: string;
+        readonly models: {
+            readonly id: string;
+            readonly name: string;
+            readonly description?: string;
+            readonly reasoning?: unknown;
+        }[];
+    }[];
+    readonly failures: {
+        readonly id: string;
+        readonly name: string;
+        readonly message: string;
+    }[];
+}
+export interface RemoteModelCatalog {
+    readonly deviceId: DeviceId;
+    readonly deviceName: string;
+    readonly catalog: ModelCatalogLike;
+}
+export declare function deviceCatalogGroupId(deviceId: DeviceId, groupId: string): string;
+/** Undo {@link deviceCatalogGroupId} when dispatching `selectModel`. */
+export declare function stripDeviceCatalogPrefix(provider: string, deviceId: DeviceId): string;
+/** Merge local and remote catalogs without collapsing same-named providers. */
+export declare function mergeModelCatalog(local: ModelCatalogLike, remotes: readonly RemoteModelCatalog[]): ModelCatalogLike;
 export interface TypertGatewayLike {
     wireStream: {
         open(endpoint: string, payload: unknown, uplink: AsyncIterable<unknown>, peer: unknown, signal: AbortSignal): Promise<AsyncIterable<unknown>>;
@@ -187,3 +234,9 @@ export declare function readLocalPhysicalWorkspaces(workspaceRegistry: Workspace
  * that restores all original methods.
  */
 export declare function installAggregatedGateway02(registry: DeviceRegistry, sessionController: SessionControllerLike, workspaceController: WorkspaceControllerLike, typertGateway: TypertGatewayLike, workspaceRegistry?: WorkspaceRegistryLike): () => void;
+/**
+ * A subagent address may only be routed to the device that owns the parent
+ * when the child is namespaced to that same device. A local or foreign child
+ * id must fall back instead of being sent to the parent's remote host.
+ */
+export declare function isSameDeviceChildSession(parentDeviceId: DeviceId, childSessionId: string): boolean;

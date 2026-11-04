@@ -59,8 +59,12 @@ export declare class DeviceAuthManager {
     storedSecret(deviceId: DeviceId): StoredDeviceSecret | undefined;
     /** Persist or clear the explicit auth credential entered in the device form. */
     setAuthCredential(deviceId: DeviceId, credential: string | undefined): void;
-    /** Persist or clear the passphrase for an encrypted local SSH key. */
-    setSshPassphrase(deviceId: DeviceId, passphrase: string | undefined): void;
+    /**
+     * Persist a passphrase for an encrypted local SSH key.
+     * `undefined` and `''` mean "the form did not supply a new value" and keep
+     * the stored passphrase. Callers that intend to clear it pass `null`.
+     */
+    setSshPassphrase(deviceId: DeviceId, passphrase: string | null | undefined): void;
     /**
      * Build the HTTP headers (`Host`, `Origin`, `Cookie`, `Authorization`) needed to authenticate
      * against `device` over `effectiveBaseUrl`.

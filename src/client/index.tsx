@@ -7,9 +7,11 @@
  *    for managing remote SSH devices, display mode, and Git repository auto-aggregation.
  * 2. `plugins.bundle.config` (`key: 'dsh-multi-device'`): Companion configuration surface
  *    inside DSH's Plugin Manager bundle detail view.
- * 3. `shell.overlay` (`id: 'multi-device-switcher'`): Compact Aggregated ⟷ Native switcher
- *    (auto-hidden until a device is added) and persistent Keep-Alive Native Mode viewport.
- * 4. `sidebar.session.row.leading`, `sidebar.session.row.hover`, and
+ * 3. `shell.overlay` (`id: 'multi-device-switcher'`): persistent Keep-Alive Native Mode
+ *    viewport (the toggle lives in the sidebar footer entry below).
+ * 4. `sidebar.footer.action`: compact Multi-Device entry + device popover, so the plugin
+ *    never floats controls over DSH's session header or caption drag region.
+ * 5. `sidebar.session.row.leading`, `sidebar.session.row.hover`, and
  *    `sidebar.workspaces.session.menu.item`: Per-session device badges, hover details, and
  *    native `MenuItemButton` action to open the owning device in Native Mode.
  *
@@ -24,6 +26,7 @@ import {
   SessionRowLeadingBadge,
 } from './ModeSwitcherOverlay.tsx'
 import { MultiDeviceHubPanel } from './MultiDeviceHubPanel.tsx'
+import { MultiDeviceSidebarEntry } from './SidebarEntry.tsx'
 import { clientStore } from './state.ts'
 import { adoptMultiDeviceStyles } from './styles.ts'
 
@@ -147,7 +150,28 @@ export function apply(ctx: ClientContextLike): void {
     }, 'dsh-multi-device: shortcut')
   })
 
-  // 2. Register Native Settings Section (`settings.section`, id: 'multi-device')
+  // 2. Register Sidebar Footer Entry (`sidebar.footer.action`) — a native list slot.
+  //    Keeping the entry here avoids covering DSH's session header and the Windows
+  //    caption drag region, which swallowed clicks on the old floating bar.
+  ctx.slots.inject('sidebar.footer.action', () =>
+    ctx.slots.register(
+      {
+        name: 'sidebar.footer.action',
+        id: 'multi-device-entry',
+        order: 30,
+        locale: LOCALE_NS,
+      },
+      (props: { wide?: boolean; t?: (k: MultiDeviceLocaleKey) => string }) => (
+        <MultiDeviceSidebarEntry
+          wide={props.wide === true}
+          t={props.t ?? getTranslate()}
+          onOpenSettings={handleOpenSettings}
+        />
+      ),
+    ),
+  )
+
+  // 3. Register Native Settings Section (`settings.section`, id: 'multi-device')
   ctx.slots.inject('settings.section', () =>
     ctx.slots.register(
       {
@@ -166,7 +190,7 @@ export function apply(ctx: ClientContextLike): void {
     ),
   )
 
-  // 3. Register Plugin Manager Bundle Configuration (`plugins.bundle.config`)
+  // 4. Register Plugin Manager Bundle Configuration (`plugins.bundle.config`)
   ctx.slots.inject('plugins.bundle.config', () =>
     ctx.slots.register(
       {
@@ -182,7 +206,7 @@ export function apply(ctx: ClientContextLike): void {
     ),
   )
 
-  // 4. Register Floating Mode Switcher & Persistent Native Keep-Alive Viewport in `shell.overlay`
+  // 5. Register Persistent Native Keep-Alive Viewport in `shell.overlay`
   ctx.slots.inject('shell.overlay', () =>
     ctx.slots.register(
       {
@@ -200,7 +224,7 @@ export function apply(ctx: ClientContextLike): void {
     ),
   )
 
-  // 5. Register Session Row Device Badges, Hover Metadata, and Context Menu Action
+  // 6. Register Session Row Device Badges, Hover Metadata, and Context Menu Action
   ctx.slots.inject('sidebar.session.row.leading', () =>
     ctx.slots.register(
       {

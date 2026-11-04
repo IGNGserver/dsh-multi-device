@@ -36,8 +36,6 @@ export interface MultiDeviceClientState {
     readonly reloadCounters: Readonly<Record<string, number>>;
     /** Active tab inside the Multi-Device Hub panel (retained for API compatibility). */
     readonly activeHubTab: HubTabId;
-    /** Whether the floating mode-switcher pill in `shell.overlay` is minimized. */
-    readonly overlayCollapsed: boolean;
     /** Fallback settings modal open state when the host shell does not expose `sidebar.settings`. */
     readonly settingsModalOpen: boolean;
 }
@@ -62,7 +60,6 @@ declare class MultiDeviceClientStore {
     releaseKeepAliveDevice(deviceId: DeviceId): void;
     reloadNativeDevice(deviceId: DeviceId): void;
     setActiveHubTab(tab: HubTabId): void;
-    setOverlayCollapsed(collapsed: boolean): void;
     setSettingsModalOpen(open: boolean): void;
     callControlPlane<T = unknown>(request: ControlPlaneRequest): Promise<{
         ok: true;

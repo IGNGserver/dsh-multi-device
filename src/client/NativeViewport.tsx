@@ -182,8 +182,27 @@ export function NativeViewport({
 }): React.ReactElement {
   const state = useMultiDeviceState()
   const { devices } = state.snapshot
+  const isNative = state.displayMode === 'native'
+  const exitButtonRef = useRef<HTMLButtonElement | null>(null)
   const activeDevice =
     devices.find(d => d.id === state.activeNativeDeviceId) ?? devices[0]
+
+  // Esc is the universal escape hatch: the toolbar is the only chrome in Native
+  // Mode, so a keyboard fallback must never depend on focus staying on the host.
+  useEffect(() => {
+    if (!isNative) return
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return
+      event.preventDefault()
+      clientStore.setDisplayMode('aggregated')
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    const focusTimer = window.setTimeout(() => exitButtonRef.current?.focus(), 60)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true)
+      window.clearTimeout(focusTimer)
+    }
+  }, [isNative])
 
   // Keep all keep-alive devices plus the currently selected device mounted
   const mountedDeviceIds = new Set<DeviceId>(state.keepAliveDeviceIds)
@@ -203,8 +222,11 @@ export function NativeViewport({
       <div className="dsh-md-native-toolbar" style={embedded ? { paddingLeft: 12 } : undefined}>
         {!embedded && (
           <Button
+            ref={exitButtonRef}
             variant="outline"
             size="sm"
+            className="dsh-md-native-exit"
+            title={t('nativeExitHint')}
             icon={<IconChevronLeftOutlineRegular size={14} />}
             onClick={() => clientStore.setDisplayMode('aggregated')}
           >
