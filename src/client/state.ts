@@ -448,6 +448,34 @@ class MultiDeviceClientStore {
     return { ok: false, error: res.error }
   }
 
+  /**
+   * Force a fresh credential for one device. An optional launch URL/token
+   * replaces the stored credential; without one the host re-runs the SSH
+   * bootstrap so a rotated remote signing secret recovers automatically.
+   */
+  async authenticateDevice(
+    deviceId: DeviceId,
+    credential?: string,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const res = await this.callControlPlane<{ snapshot: MultiDeviceSnapshot }>({
+      action: 'authenticateDevice',
+      payload: {
+        deviceId,
+        ...(credential !== undefined && credential.trim() !== ''
+          ? { credential: credential.trim() }
+          : {}),
+      },
+    })
+    if (res.ok) {
+      this.applyIncomingSnapshot(res.value.snapshot)
+      return { ok: true }
+    }
+    // The host records the failure in the snapshot; pick it up without waiting
+    // for the 5s poll so the panel can show the real reason immediately.
+    void this.refreshSnapshot()
+    return { ok: false, error: res.error }
+  }
+
   async removeDevice(deviceId: DeviceId): Promise<{ ok: boolean; error?: string }> {
     const res = await this.callControlPlane<{ snapshot: MultiDeviceSnapshot }>({
       action: 'removeDevice',

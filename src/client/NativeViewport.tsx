@@ -28,6 +28,7 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import React, { useEffect, useRef, useState } from 'react'
 import type { DeviceId, DeviceView } from '../contract.ts'
+import { AuthRequiredPanel } from './AuthPanel.tsx'
 import type { MultiDeviceLocaleKey } from './locales.ts'
 import { clientStore, deviceStateToDotState, useMultiDeviceState } from './state.ts'
 
@@ -52,13 +53,16 @@ function KeepAliveDeviceFrame({
   active,
   reloadCount,
   t,
+  onOpenSettings,
 }: {
   device: DeviceView
   active: boolean
   reloadCount: number
   t: (key: MultiDeviceLocaleKey) => string
+  onOpenSettings: () => void
 }): React.ReactElement {
   const targetUrl = device.nativeProxyUrl ?? device.effectiveBaseUrl
+  const authRequired = device.authState === 'required' || device.authState === 'error'
   const containerRef = useRef<HTMLDivElement | null>(null)
   const webviewLeaseRef = useRef<string | undefined>(undefined)
   const [webviewFailed, setWebviewFailed] = useState(false)
@@ -66,6 +70,7 @@ function KeepAliveDeviceFrame({
 
   useEffect(() => {
     setWebviewFailed(false)
+    if (authRequired) return
     const bridge = getDesktopBrowserBridge()
     const container = containerRef.current
     if (bridge === undefined || container === null || targetUrl === undefined) return
@@ -122,7 +127,7 @@ function KeepAliveDeviceFrame({
         void bridge.release(lease).catch(() => {})
       }
     }
-  }, [device.id, targetUrl, reloadCount])
+  }, [device.id, targetUrl, reloadCount, authRequired])
 
   const useDesktopWebview = getDesktopBrowserBridge() !== undefined && !webviewFailed
 
@@ -136,7 +141,9 @@ function KeepAliveDeviceFrame({
       data-device-id={device.id}
       data-active={active ? 'true' : 'false'}
     >
-      {targetUrl === undefined ? (
+      {authRequired ? (
+        <AuthRequiredPanel device={device} t={t} onOpenSettings={onOpenSettings} />
+      ) : targetUrl === undefined ? (
         <div className="dsh-md-native-placeholder">
           <StateDot state={deviceStateToDotState(device.state)} size={12} />
           <div className="dsh-md-row-name">{device.name}</div>
@@ -344,6 +351,7 @@ export function NativeViewport({
               active={dev.id === activeDevice?.id}
               reloadCount={state.reloadCounters[dev.id] ?? 0}
               t={t}
+              onOpenSettings={onOpenSettings ?? (() => {})}
             />
           ))
         )}

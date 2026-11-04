@@ -38,6 +38,8 @@ import {
   extractLaunchToken,
   mintDshBrowserCookie,
   parseSigningSecretFromCredentialsYaml,
+  readRemoteCredentials,
+  remoteCredentialsPathForPowerShell,
   resolveRemoteAuthority,
   resolveRemoteCookieAuthority,
   resolveRemoteScheme,
@@ -1360,6 +1362,157 @@ describe('6. Stability guards', () => {
     expect(headers['accept']).toBe('text/html')
     expect(headers['x-forwarded-for']).toBeUndefined()
     expect(JSON.stringify(headers)).not.toContain('from-browser')
+  })
+})
+
+describe('6b. Native-mode authentication recovery', () => {
+  const SECRET = 'Lmbm2Ybqc9aKKkxPULPgyA0SbQBUlKtboujV41nWgJw'
+  const credentialsYaml = `client-connection/browser-session:\n  payload:\n    secret: ${SECRET}\n`
+
+  afterEach(() => {
+    setSshSpawn(null)
+  })
+
+  it('falls back to PowerShell when a Windows remote cannot run cat', async () => {
+    const commands: string[] = []
+    setSshSpawn((_command, args) => {
+      const remoteCommand = String(args[args.length - 1] ?? '')
+      commands.push(remoteCommand)
+      const proc = new EventEmitter() as EventEmitter & {
+        stdout: EventEmitter
+        stderr: EventEmitter
+        stdin: null
+        kill: () => boolean
+      }
+      proc.stdout = new EventEmitter()
+      proc.stderr = new EventEmitter()
+      proc.stdin = null
+      proc.kill = () => true
+      queueMicrotask(() => {
+        // cmd.exe rejects `cat`; only the PowerShell probe yields the secret.
+        if (remoteCommand.includes('powershell')) {
+          proc.stdout.emit('data', Buffer.from(credentialsYaml))
+          proc.emit('close', 0)
+        } else {
+          proc.stderr.emit('data', Buffer.from("'cat' is not recognized"))
+          proc.emit('close', 1)
+        }
+      })
+      return proc as never
+    })
+
+    const transport = {
+      kind: 'ssh' as const,
+      host: 'windows-remote',
+      remotePort: 3080,
+      bootstrapFromRemoteCredentials: true,
+    }
+    const read = await readRemoteCredentials(transport, '~/.dsh')
+    expect(read.ok).toBe(true)
+    if (read.ok) expect(read.text).toContain(SECRET)
+    expect(commands.length).toBe(2)
+    expect(commands[1]).toContain('powershell')
+    expect(commands[1]).toContain('$env:USERPROFILE')
+  })
+
+  it('maps ~/.dsh and absolute Windows DSH homes to PowerShell paths', () => {
+    expect(remoteCredentialsPathForPowerShell('~/.dsh')).toBe('$env:USERPROFILE\\.dsh')
+    expect(remoteCredentialsPathForPowerShell('~/.config/dsh')).toBe(
+      '$env:USERPROFILE\\.config\\dsh',
+    )
+    expect(remoteCredentialsPathForPowerShell('C:/Users/dev/.dsh')).toBe("'C:\\Users\\dev\\.dsh'")
+  })
+
+  it('drops a rejected cookie but keeps the user credential for a forced re-auth', async () => {
+    const dir = makeTempDir('dsh-md-invalidate-')
+    const auth = new DeviceAuthManager(join(dir, 'secrets.json'))
+    const deviceId = DeviceId('dev-invalidate')
+    auth.setAuthCredential(deviceId, 'http://127.0.0.1:3080/?token=abc')
+
+    const server = createServer((_req, res) => {
+      res.writeHead(303, {
+        'set-cookie': `${dshCookieName('127.0.0.1:3080')}=v1.payload.signature; Path=/; HttpOnly`,
+        location: '/',
+      })
+      res.end()
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    const port = typeof address === 'object' && address !== null ? address.port : 0
+    try {
+      const exchanged = await auth.exchangeLaunchToken(
+        deviceId,
+        `http://127.0.0.1:${String(port)}`,
+        '127.0.0.1:3080',
+        '127.0.0.1:3080',
+        'abc',
+      )
+      expect(exchanged).toEqual({ ok: true })
+      expect(auth.storedSecret(deviceId)?.cookie).toBeDefined()
+      expect(auth.storedSecret(deviceId)?.authCredential).toBe(
+        'http://127.0.0.1:3080/?token=abc',
+      )
+
+      auth.invalidate(deviceId)
+      expect(auth.storedSecret(deviceId)?.cookie).toBeUndefined()
+      expect(auth.storedSecret(deviceId)?.authCredential).toBe(
+        'http://127.0.0.1:3080/?token=abc',
+      )
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
+  it('serves a recovery page instead of leaking the remote 401 one-liner', async () => {
+    const upstream = createServer((_req, res) => {
+      res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8' })
+      res.end('dsh web authentication required; reopen the URL printed by dsh web.')
+    })
+    await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve))
+    const address = upstream.address()
+    const upstreamPort = typeof address === 'object' && address !== null ? address.port : 0
+
+    const states: string[] = []
+    const proxy = new NativeDeviceProxy(
+      {
+        id: DeviceId('dev-401'),
+        name: 'ubuntu-dev',
+        enabled: true,
+        transport: { kind: 'direct', baseUrl: `http://127.0.0.1:${String(upstreamPort)}` },
+        auth: { mode: 'none' },
+      },
+      () => `http://127.0.0.1:${String(upstreamPort)}`,
+      new DeviceAuthManager(),
+      undefined,
+      {
+        onAuthState: (_id, state) => {
+          states.push(state)
+        },
+      },
+    )
+    try {
+      await proxy.start()
+      const url = proxy.proxyUrl()
+      expect(url).toBeDefined()
+      const first = await fetch(url!, { redirect: 'manual' })
+      expect(first.status).toBe(302)
+      const cookie = first.headers.get('set-cookie')?.split(';')[0]
+      expect(cookie).toBeTruthy()
+
+      const second = await fetch(new URL(url!).origin + '/', {
+        headers: { cookie: cookie! },
+      })
+      expect(second.status).toBe(200)
+      expect(second.headers.get('x-dsh-md-auth-required')).toBe('1')
+      const body = await second.text()
+      expect(body).toContain('需要登录')
+      expect(body).toContain('多设备')
+      expect(body).not.toContain('reopen the URL printed by dsh web')
+      expect(states).toContain('required')
+    } finally {
+      proxy.stop()
+      await new Promise<void>((resolve) => upstream.close(() => resolve()))
+    }
   })
 })
 

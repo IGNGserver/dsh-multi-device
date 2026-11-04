@@ -1,4 +1,4 @@
-import type { DeviceConfig, DeviceId } from '../contract.ts';
+import type { DeviceConfig, DeviceId, SshTransportConfig } from '../contract.ts';
 export interface StoredDeviceSecret {
     readonly deviceId: DeviceId;
     /** Cookie name=value pair, e.g. `dsh-auth-xxx=v1.yyy.zzz` */
@@ -46,6 +46,27 @@ export declare function resolveRemoteCookieAuthority(device: DeviceConfig): stri
 /** HTTP scheme used when constructing the remote `Origin` header. */
 export declare function resolveRemoteScheme(device: DeviceConfig): 'http' | 'https';
 /**
+ * Convert a remote DSH home (`~/.dsh`, `/home/x/.dsh`, `C:\Users\x\.dsh`) into a
+ * PowerShell path expression. `~` becomes `$env:USERPROFILE`; absolute Windows
+ * paths are embedded as a literal.
+ */
+export declare function remoteCredentialsPathForPowerShell(dshHome: string): string;
+/**
+ * Read `$DSH_HOME/.credentials.yaml` over SSH from POSIX and Windows remotes.
+ *
+ * The POSIX command runs first. On Windows the default `cmd.exe` rejects
+ * `cat`/`2>/dev/null`, so a PowerShell fallback reads the same file under
+ * `%USERPROFILE%` before giving up. Failures include both attempts so the UI
+ * can explain what actually went wrong.
+ */
+export declare function readRemoteCredentials(transport: SshTransportConfig, dshHome: string): Promise<{
+    ok: true;
+    text: string;
+} | {
+    ok: false;
+    error: string;
+}>;
+/**
  * Manages persisted authentication state and headers for all configured devices.
  */
 export declare class DeviceAuthManager {
@@ -55,6 +76,11 @@ export declare class DeviceAuthManager {
     load(): void;
     private save;
     removeDevice(deviceId: DeviceId): void;
+    /**
+     * Drop cached cookies/bearer tokens after the remote rejected them, while
+     * keeping the user-supplied credential and SSH passphrase for re-authentication.
+     */
+    invalidate(deviceId: DeviceId): void;
     /** Read the persisted secret record for a device (never exposed to the Client). */
     storedSecret(deviceId: DeviceId): StoredDeviceSecret | undefined;
     /** Persist or clear the explicit auth credential entered in the device form. */

@@ -13,6 +13,10 @@
  *    and forwards both HTTP requests and WebSocket upgrades (`/api/remote.mux`, `/api/events.mux`).
  * 4. Completely independent of Aggregated Mode: even if Aggregated Mode fails or is disabled, Native Mode
  *    continues to work as long as the device's HTTP/tunnel endpoint is reachable.
+ * 5. Intercepts upstream 401/403, forces one re-authentication (stale cookies are common after a
+ *    remote restart), and serves a branded authorization page instead of the remote's plain-text
+ *    login line. The client renders its own authorization panel and never asks users to sign in
+ *    inside the frame (browser cookies are stripped by design).
  *
  * @module dsh-multi-device/host/native-proxy
  */
@@ -84,12 +88,22 @@ export function buildForwardHeaders(
   return out
 }
 
+export interface NativeProxyAuthHooks {
+  /** Report the credential state observed while proxying a device. */
+  readonly onAuthState?: (
+    deviceId: DeviceId,
+    state: 'ok' | 'required' | 'error',
+    error?: string,
+  ) => void
+}
+
 export class NativeDeviceProxy {
   private server: Server | undefined
   private localPort: number | undefined
   private readonly sockets = new Set<Duplex>()
   private stopped = false
   private lastAuthAttemptAt = 0
+  private lastAuthRecoveryAt = 0
   private readonly token = randomUUID().replaceAll('-', '')
 
   constructor(
@@ -97,6 +111,7 @@ export class NativeDeviceProxy {
     private readonly getUpstreamBaseUrl: () => string | undefined,
     private readonly authManager: DeviceAuthManager,
     private readonly localOrigin?: () => string | undefined,
+    private readonly hooks: NativeProxyAuthHooks = {},
   ) {}
 
   updateDevice(device: DeviceConfig): void {
@@ -199,86 +214,168 @@ export class NativeDeviceProxy {
       return
     }
 
-    const now = Date.now()
-    if (now - this.lastAuthAttemptAt > 30_000) {
-      this.lastAuthAttemptAt = now
-      await this.authManager.ensureAuthenticated(this.device, upstreamBase)
-    }
+    void this.ensureAuthenticated(upstreamBase)
+
     const upstreamUrl = buildUpstreamUrl(upstreamBase, parsed.pathname, stripProxyToken(parsed.search))
     const isHttps = upstreamUrl.protocol === 'https:'
     const authority = resolveRemoteAuthority(this.device)
-    const authHeaders = this.authManager.getAuthHeaders(this.device)
-
-    const outHeaders = buildForwardHeaders(req.headers, {
-      host: authority,
-      origin: req.headers['origin'] !== undefined
-        ? authHeaders['Origin'] ?? `${isHttps ? 'https' : 'http'}://${authority}`
-        : undefined,
-      cookie: authHeaders['Cookie'],
-      authorization: authHeaders['Authorization'],
-    })
-
     const reqFn = isHttps ? httpsRequest : httpRequest
     const rejectUnauthorized = this.device.transport.kind === 'direct'
       ? this.device.transport.rejectUnauthorized !== false
       : true
+    const method = req.method ?? 'GET'
 
-    const proxyReq = reqFn(
-      upstreamUrl,
-      {
-        method: req.method ?? 'GET',
-        headers: outHeaders,
-        ...(isHttps ? { rejectUnauthorized } : {}),
-      },
-      (proxyRes) => {
-        const resHeaders: Record<string, string | string[]> = {}
-        for (const [key, val] of Object.entries(proxyRes.headers)) {
-          if (val === undefined) continue
-          const lower = key.toLowerCase()
-          // The proxy is the only allowed framing parent. Strip the generic
-          // DENY header and replace the CSP directive with a local allowlist.
-          if (lower === 'x-frame-options') continue
-          if (lower === 'content-security-policy') {
-            const cleaned = (Array.isArray(val) ? val.join('; ') : val)
-              .replace(/frame-ancestors[^;]*;?/gi, '')
-              .trim()
-            const local = this.localOrigin?.()
-            const framing = local !== undefined ? `frame-ancestors 'self' ${local}` : ''
-            const next = [cleaned, framing].filter(part => part !== '').join('; ')
-            if (next !== '') resHeaders[key] = next
-            continue
-          }
-          if (lower === 'set-cookie') {
-            const cookies = Array.isArray(val) ? val : [val]
-            resHeaders[key] = cookies.map(c =>
-              c
-                .replace(/;\s*SameSite=Strict/gi, '; SameSite=Lax')
-                .replace(/;\s*Secure/gi, '')
-                .replace(/;\s*Domain=[^;]*/gi, ''),
+    const forward = (retried: boolean): void => {
+      const authHeaders = this.authManager.getAuthHeaders(this.device)
+      const outHeaders = buildForwardHeaders(req.headers, {
+        host: authority,
+        origin: req.headers['origin'] !== undefined
+          ? authHeaders['Origin'] ?? `${isHttps ? 'https' : 'http'}://${authority}`
+          : undefined,
+        cookie: authHeaders['Cookie'],
+        authorization: authHeaders['Authorization'],
+      })
+
+      const proxyReq = reqFn(
+        upstreamUrl,
+        {
+          method,
+          headers: outHeaders,
+          ...(isHttps ? { rejectUnauthorized } : {}),
+        },
+        (proxyRes) => {
+          const status = proxyRes.statusCode ?? 502
+
+          // A remote DSH that rejects the injected credential must never leak its
+          // plain-text 401 body into the framed UI. Try one forced re-auth (the
+          // stored cookie may be stale after a remote restart), then show the
+          // plugin-owned authorization page instead of a blank one-liner.
+          if (status === 401 || status === 403) {
+            proxyRes.resume()
+            if (!retried && (method === 'GET' || method === 'HEAD')) {
+              void this.recoverAuthentication(upstreamBase, status)
+                .then((recovered) => {
+                  if (recovered) {
+                    forward(true)
+                    return
+                  }
+                  this.respondAuthRequired(res, status)
+                })
+                .catch((error: unknown) => {
+                  this.hooks.onAuthState?.(
+                    this.device.id,
+                    'error',
+                    error instanceof Error ? error.message : String(error),
+                  )
+                  this.respondAuthRequired(res, status)
+                })
+              return
+            }
+            this.hooks.onAuthState?.(
+              this.device.id,
+              'required',
+              `Remote DSH returned HTTP ${status}`,
             )
-            continue
+            this.respondAuthRequired(res, status)
+            return
           }
-          if (lower === 'location' && typeof val === 'string') {
-            resHeaders[key] = rewriteLocation(val, upstreamBase, proxyOrigin)
-            continue
+
+          if (status >= 200 && status < 400) {
+            this.hooks.onAuthState?.(this.device.id, 'ok')
           }
-          resHeaders[key] = val
+
+          const resHeaders: Record<string, string | string[]> = {}
+          for (const [key, val] of Object.entries(proxyRes.headers)) {
+            if (val === undefined) continue
+            const lower = key.toLowerCase()
+            // The proxy is the only allowed framing parent. Strip the generic
+            // DENY header and replace the CSP directive with a local allowlist.
+            if (lower === 'x-frame-options') continue
+            if (lower === 'content-security-policy') {
+              const cleaned = (Array.isArray(val) ? val.join('; ') : val)
+                .replace(/frame-ancestors[^;]*;?/gi, '')
+                .trim()
+              const local = this.localOrigin?.()
+              const framing = local !== undefined ? `frame-ancestors 'self' ${local}` : ''
+              const next = [cleaned, framing].filter(part => part !== '').join('; ')
+              if (next !== '') resHeaders[key] = next
+              continue
+            }
+            if (lower === 'set-cookie') {
+              const cookies = Array.isArray(val) ? val : [val]
+              resHeaders[key] = cookies.map(c =>
+                c
+                  .replace(/;\s*SameSite=Strict/gi, '; SameSite=Lax')
+                  .replace(/;\s*Secure/gi, '')
+                  .replace(/;\s*Domain=[^;]*/gi, ''),
+              )
+              continue
+            }
+            if (lower === 'location' && typeof val === 'string') {
+              resHeaders[key] = rewriteLocation(val, upstreamBase, proxyOrigin)
+              continue
+            }
+            resHeaders[key] = val
+          }
+          res.writeHead(status, resHeaders)
+          proxyRes.pipe(res)
+        },
+      )
+
+      proxyReq.on('error', (err) => {
+        if (!res.headersSent) {
+          res.writeHead(502, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+          res.end(renderUnavailableHtml(this.device.name, err.message))
+        } else {
+          res.destroy()
         }
-        res.writeHead(proxyRes.statusCode ?? 502, resHeaders)
-        proxyRes.pipe(res)
-      },
-    )
+      })
 
-    proxyReq.on('error', (err) => {
-      if (!res.headersSent) {
-        res.writeHead(502, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
-        res.end(renderUnavailableHtml(this.device.name, err.message))
+      if (retried || method === 'GET' || method === 'HEAD') {
+        proxyReq.end()
       } else {
-        res.destroy()
+        req.pipe(proxyReq)
       }
-    })
+    }
 
-    req.pipe(proxyReq)
+    forward(false)
+  }
+
+  private async ensureAuthenticated(upstreamBase: string): Promise<void> {
+    const now = Date.now()
+    if (now - this.lastAuthAttemptAt < 30_000) return
+    this.lastAuthAttemptAt = now
+    const result = await this.authManager.ensureAuthenticated(this.device, upstreamBase)
+    if (!result.ok) {
+      this.hooks.onAuthState?.(this.device.id, 'required', result.error)
+    }
+  }
+
+  private async recoverAuthentication(upstreamBase: string, status: number): Promise<boolean> {
+    const now = Date.now()
+    if (now - this.lastAuthRecoveryAt < 5_000) return false
+    this.lastAuthRecoveryAt = now
+    const result = await this.authManager.ensureAuthenticated(this.device, upstreamBase, true)
+    if (result.ok) return true
+    this.hooks.onAuthState?.(
+      this.device.id,
+      status === 401 ? 'required' : 'error',
+      result.error,
+    )
+    return false
+  }
+
+  private respondAuthRequired(res: ServerResponse, status: number): void {
+    if (res.headersSent) {
+      res.destroy()
+      return
+    }
+    res.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'no-store',
+      'x-dsh-md-auth-required': '1',
+    })
+    res.end(renderAuthRequiredHtml(this.device.name, status))
   }
 
   private handleUpgrade(req: IncomingMessage, clientSocket: Duplex, head: Buffer): void {
@@ -354,7 +451,15 @@ export class NativeDeviceProxy {
     })
 
     proxyReq.on('response', (proxyRes) => {
-      clientSocket.end(`HTTP/1.1 ${proxyRes.statusCode ?? 403} ${proxyRes.statusMessage ?? 'Rejected'}\r\nConnection: close\r\n\r\n`)
+      const status = proxyRes.statusCode ?? 403
+      if (status === 401 || status === 403) {
+        this.hooks.onAuthState?.(
+          this.device.id,
+          'required',
+          `Remote DSH WebSocket returned HTTP ${status}`,
+        )
+      }
+      clientSocket.end(`HTTP/1.1 ${status} ${proxyRes.statusMessage ?? 'Rejected'}\r\nConnection: close\r\n\r\n`)
     })
 
     proxyReq.on('error', () => {
@@ -371,6 +476,7 @@ export class NativeProxyManager {
   constructor(
     private readonly authManager: DeviceAuthManager,
     private readonly localOrigin?: () => string | undefined,
+    private readonly hooks: NativeProxyAuthHooks = {},
   ) {}
 
   async ensureProxy(
@@ -379,7 +485,13 @@ export class NativeProxyManager {
   ): Promise<string | undefined> {
     let proxy = this.proxies.get(device.id)
     if (proxy === undefined) {
-      proxy = new NativeDeviceProxy(device, getUpstreamBaseUrl, this.authManager, this.localOrigin)
+      proxy = new NativeDeviceProxy(
+        device,
+        getUpstreamBaseUrl,
+        this.authManager,
+        this.localOrigin,
+        this.hooks,
+      )
       this.proxies.set(device.id, proxy)
       try {
         await proxy.start()
@@ -463,6 +575,61 @@ function rewriteLocation(value: string, upstreamBase: string, proxyOrigin: strin
   } catch {
     return value
   }
+}
+
+function renderAuthRequiredHtml(deviceName: string, status: number): string {
+  const safeName = escapeHtml(deviceName)
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="color-scheme" content="light dark" />
+<title>${safeName} — 需要登录 / Sign-in required</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    padding: 24px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", Roboto, sans-serif;
+    background: #f4f5f7; color: #1b1c1f;
+  }
+  .card {
+    width: min(480px, 100%); padding: 24px; border-radius: 14px; text-align: start;
+    background: #ffffff; border: 1px solid #e3e5e9; box-shadow: 0 8px 28px rgb(0 0 0 / 8%);
+  }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px; margin-bottom: 12px;
+    padding: 3px 9px; border-radius: 999px; font-size: 12px; line-height: 18px;
+    color: #8a5a00; background: #fff4d6; border: 1px solid #f0d48a;
+  }
+  h1 { margin: 0 0 8px; font-size: 17px; line-height: 1.4; font-weight: 600; }
+  p { margin: 0 0 10px; font-size: 13px; line-height: 1.6; color: #4b5563; }
+  p.hint { color: #6b7280; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+  button {
+    margin-top: 6px; padding: 7px 16px; border-radius: 8px; border: 1px solid #3b82f6;
+    background: #2563eb; color: #fff; font: inherit; font-size: 13px; cursor: pointer;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: #141518; color: #e5e7eb; }
+    .card { background: #1e2025; border-color: #2e323b; box-shadow: none; }
+    .badge { color: #f0c674; background: #3a2f12; border-color: #5a4a1f; }
+    p { color: #9ca3af; }
+    p.hint { color: #7d8590; }
+  }
+</style>
+</head>
+<body>
+  <main class="card">
+    <div class="badge">需要登录 · Sign-in required</div>
+    <h1>${safeName}</h1>
+    <p>远端 DSH 拒绝了当前凭据（HTTP ${String(status)}）。SSH 隧道已连通，但浏览器 Cookie 无效或已过期。</p>
+    <p class="hint">请在 DSH 中打开侧栏底部的「多设备」，选择该设备后输入 dsh web 启动链接/Token，或点击「通过 SSH 自动修复」重新签发 Cookie。</p>
+    <p class="hint">The remote DSH rejected this credential (HTTP ${String(status)}). Open Multi-Device in the sidebar, pick this device, then paste a launch token or repair the cookie over SSH.</p>
+    <button onclick="location.reload()">重试 / Retry</button>
+  </main>
+</body>
+</html>`
 }
 
 function renderUnavailableHtml(deviceName: string, detail: string): string {

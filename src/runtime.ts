@@ -126,6 +126,7 @@ export interface ControlPlaneRequest {
     | 'upsertDevice'
     | 'removeDevice'
     | 'reconnectDevice'
+    | 'authenticateDevice'
     | 'testDevice'
     | 'listSshKeys'
     | 'createSession'
@@ -176,6 +177,15 @@ export class MultiDeviceControlPlane {
           const triggered = this.registry.reconnectDevice(deviceId)
           if (!triggered) return { ok: false, error: 'Device is not configured' }
           return { ok: true, value: { triggered, snapshot: this.registry.snapshot() } }
+        }
+
+        case 'authenticateDevice': {
+          const deviceId = String(payload.deviceId ?? '') as DeviceId
+          if (deviceId === '') return { ok: false, error: 'Device id is required' }
+          const credential = typeof payload.credential === 'string' ? payload.credential : undefined
+          const res = await this.registry.authenticateDevice(deviceId, credential)
+          if (!res.ok) return res
+          return { ok: true, value: { ...res, snapshot: this.registry.snapshot() } }
         }
 
         case 'testDevice': {

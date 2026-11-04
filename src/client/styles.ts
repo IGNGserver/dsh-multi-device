@@ -593,6 +593,72 @@ const CSS_TEXT = `
   text-align: center;
 }
 
+.dsh-md-auth-stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  overflow: auto;
+}
+
+.dsh-md-auth-card {
+  box-sizing: border-box;
+  width: min(520px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 24px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 14px;
+  background: var(--dsw-alias-bg-layer-1);
+  box-shadow: var(--dsw-elevation-panel);
+}
+
+.dsh-md-auth-badge {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--dsw-alias-state-warn-tertiary, var(--dsw-alias-bg-layer-3));
+  color: var(--dsw-alias-state-warn-label, var(--dsw-alias-state-warn-primary));
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.dsh-md-auth-title {
+  margin: 2px 0 0;
+  color: var(--dsw-alias-label-primary);
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 500;
+}
+
+.dsh-md-auth-desc {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.dsh-md-auth-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.dsh-md-auth-hint {
+  margin: 2px 0 0;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
 .dsh-md-row-leading-tag {
   font-size: 9px;
   font-weight: 600;

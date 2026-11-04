@@ -73,6 +73,15 @@ declare class MultiDeviceClientStore {
         ok: boolean;
         error?: string;
     }>;
+    /**
+     * Force a fresh credential for one device. An optional launch URL/token
+     * replaces the stored credential; without one the host re-runs the SSH
+     * bootstrap so a rotated remote signing secret recovers automatically.
+     */
+    authenticateDevice(deviceId: DeviceId, credential?: string): Promise<{
+        ok: boolean;
+        error?: string;
+    }>;
     removeDevice(deviceId: DeviceId): Promise<{
         ok: boolean;
         error?: string;
