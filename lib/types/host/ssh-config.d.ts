@@ -65,3 +65,12 @@ export declare function resolveSshConfigForTransport(transport: SshTransportConf
  * Apply OpenSSH first-match-wins rules across parsed blocks for a target host alias.
  */
 export declare function resolveSshParametersFromBlocks(targetHost: string, blocks: readonly ParsedSshConfigBlock[], home?: string): ResolvedSshParameters;
+/**
+ * Resolve an `Include` pattern from the user's ssh config.
+ *
+ * ssh_config(5): "Files without absolute paths are assumed to be in ~/.ssh if
+ * included in a user configuration file". The base is the user config root,
+ * not the directory of the file that contains the directive, so nested
+ * includes still resolve under ~/.ssh. Absolute and `~/` patterns are kept.
+ */
+export declare function resolveUserIncludePattern(pattern: string): string;

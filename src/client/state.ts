@@ -131,8 +131,6 @@ export interface MultiDeviceClientState {
   readonly reloadCounters: Readonly<Record<string, number>>
   /** Active tab inside the Multi-Device Hub panel (retained for API compatibility). */
   readonly activeHubTab: HubTabId
-  /** Whether the floating mode-switcher pill in `shell.overlay` is minimized. */
-  readonly overlayCollapsed: boolean
   /** Fallback settings modal open state when the host shell does not expose `sidebar.settings`. */
   readonly settingsModalOpen: boolean
 }
@@ -165,10 +163,9 @@ const EMPTY_SNAPSHOT: MultiDeviceSnapshot = {
 function loadPersistedUiPrefs(): {
   displayMode: DisplayMode
   activeNativeDeviceId?: DeviceId
-  overlayCollapsed: boolean
 } {
   if (typeof localStorage === 'undefined') {
-    return { displayMode: 'aggregated', overlayCollapsed: false }
+    return { displayMode: 'aggregated' }
   }
   try {
     const raw = JSON.parse(localStorage.getItem(UI_STORAGE_KEY) ?? '{}') as {
@@ -181,10 +178,9 @@ function loadPersistedUiPrefs(): {
       ...(typeof raw.activeNativeDeviceId === 'string' && raw.activeNativeDeviceId !== ''
         ? { activeNativeDeviceId: raw.activeNativeDeviceId as DeviceId }
         : {}),
-      overlayCollapsed: raw.overlayCollapsed === true,
     }
   } catch {
-    return { displayMode: 'aggregated', overlayCollapsed: false }
+    return { displayMode: 'aggregated' }
   }
 }
 
@@ -196,7 +192,6 @@ function savePersistedUiPrefs(state: MultiDeviceClientState): void {
       JSON.stringify({
         displayMode: state.displayMode,
         activeNativeDeviceId: state.activeNativeDeviceId,
-        overlayCollapsed: state.overlayCollapsed,
       }),
     )
   } catch {
@@ -225,7 +220,6 @@ class MultiDeviceClientStore {
       keepAliveDeviceIds: prefs.activeNativeDeviceId ? [prefs.activeNativeDeviceId] : [],
       reloadCounters: {},
       activeHubTab: 'devices',
-      overlayCollapsed: prefs.overlayCollapsed,
       settingsModalOpen: false,
     }
   }
@@ -404,10 +398,6 @@ class MultiDeviceClientStore {
 
   setActiveHubTab(tab: HubTabId): void {
     this.setState({ activeHubTab: tab })
-  }
-
-  setOverlayCollapsed(collapsed: boolean): void {
-    this.setState({ overlayCollapsed: collapsed }, true)
   }
 
   setSettingsModalOpen(open: boolean): void {

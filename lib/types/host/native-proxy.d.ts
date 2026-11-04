@@ -1,5 +1,18 @@
+import { type IncomingMessage } from 'node:http';
 import type { DeviceConfig, DeviceId } from '../contract.ts';
 import { DeviceAuthManager } from './auth.ts';
+/**
+ * Copy a client request onto the upstream connection.
+ * The plugin supplies Cookie and Authorization itself; client values, proxy
+ * headers, and `x-forwarded-*` are dropped so a page cannot smuggle credentials
+ * or rewrite the remote's view of the caller.
+ */
+export declare function buildForwardHeaders(incoming: IncomingMessage['headers'], injected: {
+    readonly host: string;
+    readonly origin?: string;
+    readonly cookie?: string;
+    readonly authorization?: string;
+}): Record<string, string | string[]>;
 export declare class NativeDeviceProxy {
     private device;
     private readonly getUpstreamBaseUrl;

@@ -1,13 +1,11 @@
 /**
- * Floating Mode Switcher & Sidebar Session Row Enhancements.
+ * Persistent Native Mode viewport & sidebar session row enhancements.
  *
  * 1. `ModeSwitcherOverlay`: Mounted in `shell.overlay` (`id: 'multi-device-switcher'`).
- *    - Displays a compact top-right native bar when remote devices are configured so the user
- *      can switch between **Aggregated Mode** and **Native Mode** or open Multi-Device Settings.
- *    - Stays hidden when no remote devices are configured in Aggregated Mode, and defers to
- *      `NativeViewport`'s top toolbar while in Native Mode so controls never overlap.
- *    - Always keeps `NativeViewport` mounted in the DOM (`display: none` while in Aggregated Mode)
+ *    - Keeps `NativeViewport` mounted in the DOM (`display: none` while in Aggregated Mode)
  *      so Native Mode keep-alive pages are never unmounted across mode switches.
+ *    - The mode/device toggle lives in the native `sidebar.footer.action` entry
+ *      (`SidebarEntry.tsx`), never in a floating bar over shell chrome.
  * 2. `SessionRowLeadingBadge`, `SessionRowHoverDeviceSection`, `SessionMenuOpenInNativeItem`:
  *    - Official DSH 0.2 slot contributions for `sidebar.session.row.leading`,
  *      `sidebar.session.row.hover`, and `sidebar.workspaces.session.menu.item`.
@@ -15,18 +13,13 @@
  * @module dsh-multi-device/client/ModeSwitcherOverlay
  */
 import {
-  Button,
   IconRightUpOutlineRegular,
-  IconSettingsOutlineRegular,
   MenuItemButton,
   Modal,
-  Pill,
-  SegmentedControl,
   StateDot,
-  Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import React from 'react'
-import { type DisplayMode, decodeSessionId } from '../contract.ts'
+import { decodeSessionId } from '../contract.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
 import { MultiDeviceHubPanel } from './MultiDeviceHubPanel.tsx'
 import { NativeViewport } from './NativeViewport.tsx'
@@ -40,56 +33,10 @@ export function ModeSwitcherOverlay({
   onOpenSettings: () => void
 }): React.ReactElement {
   const state = useMultiDeviceState()
-  const { devices } = state.snapshot
   const isNative = state.displayMode === 'native'
 
   return (
     <>
-      {!isNative && devices.length > 0 && (
-        <div className="dsh-md-overlay-bar">
-          <SegmentedControl<DisplayMode>
-            label={t('modeRowTitle')}
-            value={state.displayMode}
-            options={[
-              { value: 'aggregated', label: t('modeAggregated') },
-              { value: 'native', label: t('modeNative') },
-            ]}
-            onChange={(next) => clientStore.setDisplayMode(next)}
-          />
-
-          {!state.overlayCollapsed &&
-            devices.map((dev) => (
-              <Tooltip key={dev.id} label={`${dev.name} (${dev.targetSummary})`} side="bottom">
-                <Pill
-                  active={false}
-                  onClick={() => clientStore.selectNativeDevice(dev.id)}
-                >
-                  <span className="dsh-md-pill-inner">
-                    <StateDot state={deviceStateToDotState(dev.state)} size={8} />
-                    <span>{dev.name}</span>
-                    {dev.pendingApprovalCount > 0 ? (
-                      <span className="dsh-md-muted">!{dev.pendingApprovalCount}</span>
-                    ) : dev.runningSessionCount > 0 ? (
-                      <span className="dsh-md-muted">{dev.runningSessionCount}</span>
-                    ) : null}
-                  </span>
-                </Pill>
-              </Tooltip>
-            ))}
-
-          <Tooltip label={t('settingsSectionTitle')} side="bottom">
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label={t('settingsSectionTitle')}
-              onClick={onOpenSettings}
-            >
-              <IconSettingsOutlineRegular size={14} />
-            </Button>
-          </Tooltip>
-        </div>
-      )}
-
       {/* Persistent Native Mode container: kept in DOM with display:none when in Aggregated Mode for Keep-Alive */}
       {(isNative || state.keepAliveDeviceIds.length > 0) && (
         <div

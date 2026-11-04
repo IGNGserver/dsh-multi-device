@@ -1,5 +1,7 @@
-import { type DeviceConfig, type DeviceId, type DeviceView } from '../contract.ts';
+import { type DeviceConfig, type DeviceId, type DeviceView, type PendingInteractionKind } from '../contract.ts';
 import { DeviceAuthManager } from './auth.ts';
+/** Map a remote waterfall event name to the pending kind shown in the UI. */
+export declare function pendingInteractionKind(event: string): PendingInteractionKind | undefined;
 export interface RemoteSessionSummary {
     readonly sessionId: string;
     readonly updatedAt: number;
@@ -29,7 +31,7 @@ export interface RemotePendingInteraction {
     readonly deviceId: DeviceId;
     readonly rawSessionId: string;
     readonly namespacedSessionId: string;
-    readonly kind: 'approval' | 'question';
+    readonly kind: PendingInteractionKind;
     readonly eventName: string;
     readonly request: Record<string, unknown>;
 }
@@ -65,6 +67,8 @@ export declare class RemoteDeviceClient {
     private tunnel;
     private state;
     private protocolVersion;
+    /** 0.1 has no live stream. The UI uses this to show a list-only device. */
+    private realtime;
     private remoteDshVersion;
     private remoteHome;
     private latencyMs;
@@ -85,6 +89,7 @@ export declare class RemoteDeviceClient {
     private readonly muxStreams;
     private running;
     private loopAbort;
+    private iterationAbort;
     constructor(config: DeviceConfig, authManager: DeviceAuthManager, callbacks: RemoteDeviceCallbacks);
     get id(): DeviceId;
     get deviceConfig(): DeviceConfig;
@@ -151,3 +156,19 @@ export declare class RemoteDeviceClient {
     private closeMuxSocket;
     private rawRpcPost;
 }
+/** Major generation of a DSH version string. `0.1.x` is list-only. */
+export declare function protocolGeneration(version: string | undefined): '0.2' | '0.1' | 'unknown';
+/**
+ * A body is 0.2 only when it says so. An `items` array alone is shared with
+ * 0.1 list responses and must not promote the device to the live protocol.
+ */
+export declare function classifyRemoteProtocol(value: unknown): '0.2' | '0.1' | 'unknown';
+/**
+ * Decide the protocol from the two probes.
+ * `session/list` without a version stays 0.2 unless `host.describe` says 0.1.
+ * An `items` array on its own is not enough when the legacy probe disagrees.
+ */
+export declare function resolveProbedProtocol(sessionListValue: unknown, hostDescribeValue: unknown): {
+    protocol: '0.2' | '0.1';
+    version?: string;
+} | undefined;

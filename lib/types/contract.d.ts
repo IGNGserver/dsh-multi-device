@@ -119,12 +119,17 @@ export type DeviceConnectionState = 'disabled' | 'connecting' | 'connected' | 'r
 /**Detected remote DSH wire protocol generation. */
 export type RemoteProtocolVersion = '0.2' | '0.1' | 'unknown';
 /** Live runtime telemetry and status of a device. */
+export type DeviceAuthState = 'unknown' | 'ok' | 'required' | 'error';
 export interface DeviceView {
     readonly id: DeviceId;
     readonly name: string;
     readonly label?: string;
     readonly enabled: boolean;
     readonly state: DeviceConnectionState;
+    /** Native-mode authentication state of the current credential (never carries secrets). */
+    readonly authState?: DeviceAuthState;
+    /** Human-readable reason when `authState` is `required` or `error`. */
+    readonly authError?: string;
     readonly transportKind: 'ssh' | 'direct';
     /** Sanitized SSH transport fields for the edit form (never includes a passphrase). */
     readonly ssh?: {
@@ -150,6 +155,11 @@ export interface DeviceView {
     readonly nativeProxyUrl?: string;
     readonly keepNativeAlive: boolean;
     readonly protocolVersion: RemoteProtocolVersion;
+    /**
+     * Whether this device has a live event stream. DSH 0.1 is list-only: the
+     * client polls session and workspace lists and does not follow history.
+     */
+    readonly realtime: boolean;
     readonly remoteDshVersion?: string;
     readonly remoteHome?: string;
     readonly latencyMs?: number;
@@ -262,7 +272,7 @@ export interface SessionOriginMetadata {
     readonly gitRemote?: string;
     readonly logicalWorkspaceId?: string;
     readonly running: boolean;
-    readonly pendingInteractionKind?: 'approval' | 'question' | 'plan-review';
+    readonly pendingInteractionKind?: PendingInteractionKind;
     readonly nativeUrl?: string;
 }
 /** Complete Hub snapshot returned to the Client UI. */
@@ -280,6 +290,8 @@ export interface MultiDeviceSnapshot {
     readonly allPhysicalWorkspaces: readonly WorkspaceMemberRef[];
     readonly sessionOrigins: Readonly<Record<string, SessionOriginMetadata>>;
 }
+/** Waterfall interactions the host tracks per remote device. */
+export type PendingInteractionKind = 'approval' | 'question' | 'plan-review';
 /**
  * Encode a `(deviceId, remoteSessionId)` pair into a collision-free local `SessionId`.
  * Local sessions keep their original `SessionId` untouched.
@@ -330,10 +342,18 @@ export declare function decodeLogicalWorkspaceId(workspaceId: string): {
 /**
  * Encode a remote `$events` waterfall `eventId` so `/api/$events/result` can route the user's
  * approval or question answer back to the exact remote device and active `$events` stream.
+ *
+ * The remote part is opaque and appended verbatim; an id that already looks
+ * namespaced is rejected by {@link decodeRemoteEventId} rather than routed as
+ * another device's waterfall.
  */
 export declare function encodeRemoteEventId(deviceId: DeviceId, remoteEventId: string): string;
 /**
  * Decode a remote `$events` waterfall `eventId`.
+ *
+ * The remote part is opaque, but a remote must not smuggle a second namespaced
+ * id through it: decoding that would let one device address another device's
+ * waterfall. Reject double-prefixed ids instead of routing them.
  */
 export declare function decodeRemoteEventId(eventId: string): {
     readonly deviceId: DeviceId;
