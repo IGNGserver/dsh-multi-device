@@ -86,7 +86,7 @@ export declare const zh: {
     readonly popoverDevices: "远端设备";
     readonly popoverSettings: "多设备设置";
     readonly popoverRefresh: "刷新状态";
-    readonly nativeExitHint: "按 Esc 也可返回聚合模式";
+    readonly nativeExitHint: "按 Esc 返回聚合模式；焦点在远端页面时请点左侧按钮";
     readonly authRequired: "需要登录";
     readonly authPanelTitle: "远端 DSH 需要登录";
     readonly authPanelDesc: "SSH 隧道已连通，但远端 DSH 拒绝了当前凭据。可粘贴 dsh web 启动时打印的链接/Token，或让插件通过 SSH 重新签发 Cookie。";

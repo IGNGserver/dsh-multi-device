@@ -1479,6 +1479,46 @@ describe('6b. Native-mode authentication recovery', () => {
     }
   })
 
+  it('preserves Vite ?? batch request targets through the native proxy', async () => {
+    let seenTarget = ''
+    const upstream = createServer((req, res) => {
+      seenTarget = req.url ?? ''
+      res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' })
+      res.end('export const ok = true')
+    })
+    await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve))
+    const address = upstream.address()
+    const port = typeof address === 'object' && address !== null ? address.port : 0
+    const proxy = new NativeDeviceProxy(
+      {
+        id: DeviceId('dev-batch'),
+        name: 'batch-device',
+        enabled: true,
+        transport: { kind: 'direct', baseUrl: `http://127.0.0.1:${String(port)}` },
+        auth: { mode: 'none' },
+      },
+      () => `http://127.0.0.1:${String(port)}`,
+      new DeviceAuthManager(),
+    )
+    try {
+      await proxy.start()
+      const url = proxy.proxyUrl()!
+      const bootstrap = await fetch(url, { redirect: 'manual' })
+      const cookie = bootstrap.headers.get('set-cookie')?.split(';')[0]
+      expect(cookie).toBeTruthy()
+
+      const target = '/plugins/??@deepseek-ai/dsh-client-modules/client.js&rev=abc123'
+      const response = await fetch(new URL(url).origin + target, {
+        headers: { cookie: cookie! },
+      })
+      expect(response.status).toBe(200)
+      expect(seenTarget).toBe(target)
+    } finally {
+      proxy.stop()
+      await new Promise<void>((resolve) => upstream.close(() => resolve()))
+    }
+  })
+
   it('serves a recovery page instead of leaking the remote 401 one-liner', async () => {
     const upstream = createServer((_req, res) => {
       res.writeHead(401, { 'content-type': 'text/plain; charset=utf-8' })

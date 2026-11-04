@@ -189,12 +189,13 @@ export class NativeDeviceProxy {
       return
     }
 
+    const rawTarget = stripProxyTokenFromRawTarget(req.url ?? '/')
     const requestUrl = new URL(req.url ?? '/', proxyOrigin)
     const queryToken = requestUrl.searchParams.get(PROXY_TOKEN_QUERY)
     const cookieToken = readCookie(req.headers.cookie, PROXY_COOKIE_NAME)
     if (queryToken === this.token && cookieToken !== this.token) {
       res.writeHead(302, {
-        location: formatPath(parsed.pathname, stripProxyToken(parsed.search)),
+        location: rawTarget,
         'set-cookie': `${PROXY_COOKIE_NAME}=${this.token}; Path=/; HttpOnly; SameSite=Lax`,
         'cache-control': 'no-store',
       })
@@ -216,8 +217,9 @@ export class NativeDeviceProxy {
 
     void this.ensureAuthenticated(upstreamBase)
 
-    const upstreamUrl = buildUpstreamUrl(upstreamBase, parsed.pathname, stripProxyToken(parsed.search))
-    const isHttps = upstreamUrl.protocol === 'https:'
+    const upstream = splitUpstreamBase(upstreamBase)
+    const upstreamPath = `${upstream.prefix}${rawTarget}`
+    const isHttps = upstream.url.protocol === 'https:'
     const authority = resolveRemoteAuthority(this.device)
     const reqFn = isHttps ? httpsRequest : httpRequest
     const rejectUnauthorized = this.device.transport.kind === 'direct'
@@ -237,9 +239,10 @@ export class NativeDeviceProxy {
       })
 
       const proxyReq = reqFn(
-        upstreamUrl,
+        upstream.url,
         {
           method,
+          path: upstreamPath,
           headers: outHeaders,
           ...(isHttps ? { rejectUnauthorized } : {}),
         },
@@ -407,8 +410,10 @@ export class NativeDeviceProxy {
       return
     }
 
-    const upstreamUrl = buildUpstreamUrl(upstreamBase, parsed.pathname, stripProxyToken(parsed.search))
-    const isHttps = upstreamUrl.protocol === 'https:'
+    const rawTarget = stripProxyTokenFromRawTarget(req.url ?? '/')
+    const upstream = splitUpstreamBase(upstreamBase)
+    const upstreamPath = `${upstream.prefix}${rawTarget}`
+    const isHttps = upstream.url.protocol === 'https:'
     const authority = resolveRemoteAuthority(this.device)
     const authHeaders = this.authManager.getAuthHeaders(this.device)
 
@@ -424,8 +429,9 @@ export class NativeDeviceProxy {
       ? this.device.transport.rejectUnauthorized !== false
       : true
 
-    const proxyReq = reqFn(upstreamUrl, {
+    const proxyReq = reqFn(upstream.url, {
       method: 'GET',
+      path: upstreamPath,
       headers: outHeaders,
       ...(isHttps ? { rejectUnauthorized } : {}),
     })
@@ -536,23 +542,31 @@ function parseOriginForm(raw: string | undefined): { pathname: string; search: s
   }
 }
 
-function buildUpstreamUrl(base: string, pathname: string, search: string): URL {
+/**
+ * Strip the proxy bootstrap token from a raw origin-form target WITHOUT
+ * re-encoding it. DSH/Vite batch URLs contain a literal `??` (`/plugins/??a,b`);
+ * rebuilding them through `URL` turns the second `?` into `%3F` and the
+ * upstream answers 404, which breaks every client module in Native Mode.
+ */
+function stripProxyTokenFromRawTarget(raw: string): string {
+  const queryAt = raw.indexOf('?')
+  if (queryAt === -1) return raw
+  const pathPart = raw.slice(0, queryAt)
+  const kept = raw
+    .slice(queryAt + 1)
+    .split('&')
+    .filter((part) => part !== '' && !part.startsWith(`${PROXY_TOKEN_QUERY}=`))
+  return kept.length === 0 ? pathPart : `${pathPart}?${kept.join('&')}`
+}
+
+/** Split an upstream base URL into its origin and optional path prefix. */
+function splitUpstreamBase(base: string): { url: URL; prefix: string } {
   const url = new URL(base)
-  url.pathname = pathname
-  url.search = search
-  return url
-}
-
-function stripProxyToken(search: string): string {
-  if (search === '') return ''
-  const params = new URLSearchParams(search)
-  params.delete(PROXY_TOKEN_QUERY)
-  const next = params.toString()
-  return next === '' ? '' : `?${next}`
-}
-
-function formatPath(pathname: string, search: string): string {
-  return `${pathname}${search}`
+  const prefix = url.pathname.replace(/\/+$/u, '')
+  url.pathname = '/'
+  url.search = ''
+  url.hash = ''
+  return { url, prefix }
 }
 
 function readCookie(header: string | undefined, name: string): string | undefined {
