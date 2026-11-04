@@ -18,7 +18,7 @@
 import { createHash, createHmac, randomUUID } from 'node:crypto'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
-import type { DeviceAuthConfig, DeviceConfig, DeviceId } from '../contract.ts'
+import type { DeviceAuthConfig, DeviceConfig, DeviceId, SshTransportConfig } from '../contract.ts'
 import { requestRemote } from './http-request.ts'
 import { execSshCommand } from './tunnel.ts'
 
@@ -177,6 +177,75 @@ export function resolveRemoteScheme(device: DeviceConfig): 'http' | 'https' {
   return 'http'
 }
 
+/** POSIX single-quote escaping for a remote shell command. */
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`
+}
+
+/** PowerShell single-quote escaping for a remote command. */
+function powershellQuote(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`
+}
+
+/**
+ * Convert a remote DSH home (`~/.dsh`, `/home/x/.dsh`, `C:\Users\x\.dsh`) into a
+ * PowerShell path expression. `~` becomes `$env:USERPROFILE`; absolute Windows
+ * paths are embedded as a literal.
+ */
+export function remoteCredentialsPathForPowerShell(dshHome: string): string {
+  const normalized = dshHome.trim().replaceAll('\\', '/')
+  if (/^[A-Za-z]:\//.test(normalized)) {
+    return powershellQuote(normalized.replaceAll('/', '\\'))
+  }
+  const suffix = normalized === '~' ? '' : normalized.replace(/^~\//, '')
+  const relative = suffix.replaceAll('/', '\\')
+  return relative === '' ? '$env:USERPROFILE\\.dsh' : `$env:USERPROFILE\\${relative}`
+}
+
+/**
+ * Read `$DSH_HOME/.credentials.yaml` over SSH from POSIX and Windows remotes.
+ *
+ * The POSIX command runs first. On Windows the default `cmd.exe` rejects
+ * `cat`/`2>/dev/null`, so a PowerShell fallback reads the same file under
+ * `%USERPROFILE%` before giving up. Failures include both attempts so the UI
+ * can explain what actually went wrong.
+ */
+export async function readRemoteCredentials(
+  transport: SshTransportConfig,
+  dshHome: string,
+): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+  const escapedHome = shellQuote(dshHome)
+  const posix = await execSshCommand(
+    transport,
+    `cat ${escapedHome}/.credentials.yaml 2>/dev/null || true`,
+    6_000,
+  )
+  const posixText = posix.ok ? posix.stdout : ''
+  if (parseSigningSecretFromCredentialsYaml(posixText) !== undefined) {
+    return { ok: true, text: posixText }
+  }
+
+  const pathExpr = remoteCredentialsPathForPowerShell(dshHome)
+  const windowsCommand =
+    'powershell -NoProfile -NonInteractive -Command "' +
+    '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; ' +
+    `$p=${pathExpr}; ` +
+    'if (Test-Path -LiteralPath $p) { Get-Content -LiteralPath $p -Raw }"'
+  const windows = await execSshCommand(transport, windowsCommand, 8_000)
+  const windowsText = windows.ok ? windows.stdout : ''
+  if (parseSigningSecretFromCredentialsYaml(windowsText) !== undefined) {
+    return { ok: true, text: windowsText }
+  }
+
+  const details: string[] = []
+  if (!posix.ok) details.push(`POSIX: ${posix.error}`)
+  if (!windows.ok) details.push(`PowerShell: ${windows.error}`)
+  if (details.length === 0) {
+    details.push('the file is empty or has no client-connection/browser-session secret')
+  }
+  return { ok: false, error: details.join('; ') }
+}
+
 /**
  * Manages persisted authentication state and headers for all configured devices.
  */
@@ -232,6 +301,22 @@ export class DeviceAuthManager {
     if (this.secrets.delete(deviceId)) {
       this.save()
     }
+  }
+
+  /**
+   * Drop cached cookies/bearer tokens after the remote rejected them, while
+   * keeping the user-supplied credential and SSH passphrase for re-authentication.
+   */
+  invalidate(deviceId: DeviceId): void {
+    const current = this.secrets.get(deviceId)
+    if (current === undefined) return
+    const next: Record<string, unknown> = { ...current, updatedAt: Date.now() }
+    delete next.cookie
+    delete next.cookieAuthority
+    delete next.bearerToken
+    delete next.signingSecret
+    this.secrets.set(deviceId, next as unknown as StoredDeviceSecret)
+    this.save()
   }
 
   /** Read the persisted secret record for a device (never exposed to the Client). */
@@ -388,18 +473,14 @@ export class DeviceAuthManager {
       device.transport.bootstrapFromRemoteCredentials === true
     ) {
       const dshHome = device.transport.remoteDshHome?.trim() || '~/.dsh'
-      const escapedHome = `'${dshHome.replaceAll("'", "'\\''")}'`
-      const cmd = `cat ${escapedHome}/.credentials.yaml 2>/dev/null || true`
-      const sshRes = await execSshCommand(device.transport, cmd, 6_000)
-      if (!sshRes.ok) {
+      const read = await readRemoteCredentials(device.transport, dshHome)
+      if (!read.ok) {
         return {
           ok: false,
-          error: `SSH login succeeded, but reading ${dshHome}/.credentials.yaml failed: ${sshRes.error}`,
+          error: `SSH login succeeded, but reading ${dshHome}/.credentials.yaml failed: ${read.error}`,
         }
       }
-      const secret = sshRes.stdout.trim() === ''
-        ? undefined
-        : parseSigningSecretFromCredentialsYaml(sshRes.stdout)
+      const secret = parseSigningSecretFromCredentialsYaml(read.text)
       const minted = secret === undefined ? undefined : mintDshBrowserCookie(cookieAuthority, secret)
       if (minted === undefined) {
         return {
@@ -453,7 +534,11 @@ export class DeviceAuthManager {
       for (const setCookie of setCookies) {
         const cookiePair = setCookie.split(';')[0]?.trim()
         if (cookiePair !== undefined && cookiePair.startsWith(COOKIE_PREFIX)) {
+          // Keep the user-supplied launch URL / passphrase across token
+          // exchanges; only the cookie part is replaced.
+          const current = this.secrets.get(deviceId)
           this.secrets.set(deviceId, {
+            ...(current ?? { deviceId, updatedAt: Date.now() }),
             deviceId,
             cookie: cookiePair,
             cookieAuthority,

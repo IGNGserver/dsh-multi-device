@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import {
+  type DeviceAuthState,
   type DeviceConfig,
   DeviceId,
   type DeviceView,
@@ -132,6 +133,7 @@ export class DeviceRegistry {
   private aggregatedGatewayActive = false
   private aggregatedGatewayError: string | undefined
   private nativeProxyActive = true
+  private readonly authStates = new Map<DeviceId, { state: DeviceAuthState; error?: string }>()
 
   constructor(
     private readonly dataFilePath: string,
@@ -145,7 +147,15 @@ export class DeviceRegistry {
     } = {},
   ) {
     this.authManager = new DeviceAuthManager(secretsFilePath)
-    this.nativeProxyManager = new NativeProxyManager(this.authManager, options.localOrigin)
+    this.nativeProxyManager = new NativeProxyManager(
+      this.authManager,
+      options.localOrigin,
+      {
+        onAuthState: (deviceId, state, error) => {
+          this.setAuthState(deviceId, state, error)
+        },
+      },
+    )
     this.aggregator = new WorkspaceAggregator()
     this.nativeProxyActive = options.enableNativeProxy !== false
     this.loadFromDisk()
@@ -258,12 +268,13 @@ export class DeviceRegistry {
     }
     const sanitized = sanitizeDeviceConfig(config)
     this.configs.set(id, sanitized)
+    this.authStates.delete(id)
     this.saveToDisk()
 
     const client = await this.mountClient(sanitized)
     this.bumpRevision()
     this.notifyWorkspacesChanged()
-    return { ok: true, device: client.toView() }
+    return { ok: true, device: this.withAuthState(client.toView()) }
   }
 
   removeDevice(deviceId: DeviceId): boolean {
@@ -277,6 +288,7 @@ export class DeviceRegistry {
     }
     this.nativeProxyManager.removeProxy(deviceId)
     this.authManager.removeDevice(deviceId)
+    this.authStates.delete(deviceId)
     this.saveToDisk()
     this.bumpRevision()
     this.notifyWorkspacesChanged()
@@ -286,8 +298,82 @@ export class DeviceRegistry {
   reconnectDevice(deviceId: DeviceId): boolean {
     const client = this.clients.get(deviceId)
     if (client === undefined) return false
+    this.authStates.delete(deviceId)
     client.reconnectNow()
+    this.bumpRevision()
     return true
+  }
+
+  /** Current native-mode credential state for one device. */
+  authStateOf(deviceId: DeviceId): DeviceAuthState {
+    return this.authStates.get(deviceId)?.state ?? 'unknown'
+  }
+
+  private setAuthState(deviceId: DeviceId, state: DeviceAuthState, error?: string): void {
+    const previous = this.authStates.get(deviceId)
+    const nextError = error?.trim() === '' ? undefined : error
+    if (previous?.state === state && previous.error === nextError) return
+    this.authStates.set(deviceId, {
+      state,
+      ...(nextError !== undefined ? { error: nextError } : {}),
+    })
+    this.bumpRevision()
+  }
+
+  private withAuthState(view: DeviceView): DeviceView {
+    const auth = this.authStates.get(view.id)
+    if (auth === undefined) return view
+    return {
+      ...view,
+      authState: auth.state,
+      ...(auth.error !== undefined ? { authError: auth.error } : {}),
+    }
+  }
+
+  /**
+   * Re-authenticate one device on user request. An explicit credential (launch
+   * URL/token) replaces the stored one; otherwise the SSH bootstrap path runs
+   * again. Always forces a fresh cookie so a rotated remote secret recovers.
+   */
+  async authenticateDevice(
+    deviceId: DeviceId,
+    credential?: string,
+  ): Promise<{ ok: true; authState: DeviceAuthState } | { ok: false; error: string }> {
+    const config = this.configs.get(deviceId)
+    const client = this.clients.get(deviceId)
+    if (config === undefined || client === undefined) {
+      return { ok: false, error: 'Device is not configured' }
+    }
+    if (credential !== undefined && credential.trim() !== '') {
+      this.authManager.setAuthCredential(deviceId, credential.trim())
+    }
+    const baseUrl = client.effectiveBaseUrl()
+    if (baseUrl === undefined) {
+      return { ok: false, error: 'The SSH tunnel is not ready yet. Try again in a moment.' }
+    }
+    this.authManager.invalidate(deviceId)
+    // An explicit "repair via SSH" action may read the remote signing secret
+    // even when the device opted out of automatic bootstrap. The opt-out only
+    // governs background connects, not this deliberate user request.
+    const repairConfig: DeviceConfig = {
+      ...config,
+      auth: { ...(config.auth ?? { mode: 'auto' }), mode: 'auto' },
+      ...(config.transport.kind === 'ssh'
+        ? {
+            transport: {
+              ...config.transport,
+              bootstrapFromRemoteCredentials: true,
+            },
+          }
+        : {}),
+    }
+    const result = await this.authManager.ensureAuthenticated(repairConfig, baseUrl, true)
+    if (!result.ok) {
+      this.setAuthState(deviceId, 'required', result.error)
+      return result
+    }
+    this.setAuthState(deviceId, 'ok')
+    return { ok: true, authState: 'ok' }
   }
 
   /** List local private-key candidates for the add/edit device form. */
@@ -525,7 +611,7 @@ export class DeviceRegistry {
         ...(this.aggregatedGatewayError !== undefined ? { aggregatedGatewayError: this.aggregatedGatewayError } : {}),
         nativeProxyActive: this.nativeProxyActive,
       },
-      devices: [...this.clients.values()].map(c => c.toView()),
+      devices: [...this.clients.values()].map(c => this.withAuthState(c.toView())),
       sshConfigHosts: listSshConfigHosts(),
       aggregationConfig: this.aggregator.getConfig(),
       logicalWorkspaces,

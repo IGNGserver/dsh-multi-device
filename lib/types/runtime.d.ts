@@ -55,7 +55,7 @@ export declare function connectionRequestRejection(ctx: Context, headers: Incomi
  */
 export declare function admitMultiDeviceRequest(ctx: Context, req: IncomingMessage): boolean;
 export interface ControlPlaneRequest {
-    readonly action: 'snapshot' | 'upsertDevice' | 'removeDevice' | 'reconnectDevice' | 'testDevice' | 'listSshKeys' | 'createSession' | 'createRemoteWorkspace' | 'updateAggregationConfig' | 'upsertManualRule' | 'removeManualRule' | 'setMemberExcluded' | 'setPreferredDevice' | 'setCustomTitle';
+    readonly action: 'snapshot' | 'upsertDevice' | 'removeDevice' | 'reconnectDevice' | 'authenticateDevice' | 'testDevice' | 'listSshKeys' | 'createSession' | 'createRemoteWorkspace' | 'updateAggregationConfig' | 'upsertManualRule' | 'removeManualRule' | 'setMemberExcluded' | 'setPreferredDevice' | 'setCustomTitle';
     readonly payload?: Record<string, unknown>;
 }
 export declare class MultiDeviceControlPlane {

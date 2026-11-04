@@ -1,4 +1,4 @@
-import { type DeviceConfig, DeviceId, type DeviceView, type MultiDeviceSnapshot, type RemoteSessionCreateInput, type RemoteWorkspaceCreateInput, type SshKeyEntry, type UpsertDeviceInput, type WorkspaceAggregationConfig } from '../contract.ts';
+import { type DeviceAuthState, type DeviceConfig, DeviceId, type DeviceView, type MultiDeviceSnapshot, type RemoteSessionCreateInput, type RemoteWorkspaceCreateInput, type SshKeyEntry, type UpsertDeviceInput, type WorkspaceAggregationConfig } from '../contract.ts';
 import { DeviceAuthManager } from './auth.ts';
 import { type PhysicalWorkspaceInput, WorkspaceAggregator } from './git-aggregator.ts';
 import { NativeProxyManager } from './native-proxy.ts';
@@ -33,6 +33,7 @@ export declare class DeviceRegistry {
     private aggregatedGatewayActive;
     private aggregatedGatewayError;
     private nativeProxyActive;
+    private readonly authStates;
     constructor(dataFilePath: string, secretsFilePath: string, localHost: LocalHostProvider, options?: {
         enableTunnels?: boolean;
         enableNativeProxy?: boolean;
@@ -77,6 +78,22 @@ export declare class DeviceRegistry {
     }>;
     removeDevice(deviceId: DeviceId): boolean;
     reconnectDevice(deviceId: DeviceId): boolean;
+    /** Current native-mode credential state for one device. */
+    authStateOf(deviceId: DeviceId): DeviceAuthState;
+    private setAuthState;
+    private withAuthState;
+    /**
+     * Re-authenticate one device on user request. An explicit credential (launch
+     * URL/token) replaces the stored one; otherwise the SSH bootstrap path runs
+     * again. Always forces a fresh cookie so a rotated remote secret recovers.
+     */
+    authenticateDevice(deviceId: DeviceId, credential?: string): Promise<{
+        ok: true;
+        authState: DeviceAuthState;
+    } | {
+        ok: false;
+        error: string;
+    }>;
     /** List local private-key candidates for the add/edit device form. */
     listSshKeys(): SshKeyEntry[];
     /**

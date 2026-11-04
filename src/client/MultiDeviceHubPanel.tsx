@@ -750,6 +750,7 @@ export function MultiDeviceHubPanel({
                       {dev.pendingApprovalCount > 0 && (
                         <Tag>{t('pendingCount').replace('{count}', String(dev.pendingApprovalCount))}</Tag>
                       )}
+                      {dev.authState === 'required' && <Tag>{t('authRequired')}</Tag>}
                     </div>
 
                     <div className="dsh-md-row-actions">
