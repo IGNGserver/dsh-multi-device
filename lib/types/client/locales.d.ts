@@ -52,6 +52,7 @@ export declare const zh: {
     readonly testPassed: "连接成功";
     readonly saveDevice: "保存";
     readonly savingDevice: "保存中…";
+    readonly saveAnyway: "仍然保存";
     readonly cancel: "取消";
     readonly reconnect: "重新连接";
     readonly reconnectedNotice: "已触发重新连接";

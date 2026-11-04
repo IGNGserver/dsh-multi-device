@@ -202,15 +202,15 @@ export class NativeDeviceProxy {
       return
     }
     if (cookieToken !== this.token) {
-      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
-      res.end('Native proxy authentication required')
+      res.writeHead(403, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+      res.end(renderProxyRejectedHtml('代理访问令牌缺失或与当前页面不匹配。'))
       return
     }
     // SameSite=Lax already prevents this cookie on cross-site subresources;
     // reject an explicit cross-site fetch as a second line of defence.
     if (req.headers['sec-fetch-site'] === 'cross-site') {
-      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
-      res.end('Cross-site native proxy request rejected')
+      res.writeHead(403, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+      res.end(renderProxyRejectedHtml('该请求来自跨站上下文，已被代理拒绝。'))
       return
     }
 
@@ -577,14 +577,38 @@ function rewriteLocation(value: string, upstreamBase: string, proxyOrigin: strin
   }
 }
 
-function renderAuthRequiredHtml(deviceName: string, status: number): string {
-  const safeName = escapeHtml(deviceName)
+interface StatusPageOptions {
+  readonly deviceName: string
+  readonly badge: string
+  readonly tone: 'warn' | 'error'
+  readonly title: string
+  readonly paragraphs: readonly string[]
+  readonly retry?: boolean
+}
+
+/**
+ * Shared, theme-aware status page for the framed proxy. DSH CSS variables do
+ * not cross the frame boundary, so this page uses `prefers-color-scheme` and a
+ * neutral palette that follows the host OS theme instead of a hardcoded dark
+ * card in a light UI.
+ */
+function renderStatusPage(options: StatusPageOptions): string {
+  const name = escapeHtml(options.deviceName)
+  const title = escapeHtml(options.title)
+  const badge = escapeHtml(options.badge)
+  const paragraphs = options.paragraphs
+    .map((text) => `    <p>${escapeHtml(text)}</p>`)
+    .join('\n')
+  const retry = options.retry === false
+    ? ''
+    : '    <button type="button" onclick="location.reload()">重试 / Retry</button>'
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
 <meta name="color-scheme" content="light dark" />
-<title>${safeName} — 需要登录 / Sign-in required</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>${name} — ${title}</title>
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
@@ -600,12 +624,11 @@ function renderAuthRequiredHtml(deviceName: string, status: number): string {
   .badge {
     display: inline-flex; align-items: center; gap: 6px; margin-bottom: 12px;
     padding: 3px 9px; border-radius: 999px; font-size: 12px; line-height: 18px;
-    color: #8a5a00; background: #fff4d6; border: 1px solid #f0d48a;
   }
+  .badge.warn { color: #8a5a00; background: #fff4d6; border: 1px solid #f0d48a; }
+  .badge.error { color: #9f2d2d; background: #fdecec; border: 1px solid #f2bdbd; }
   h1 { margin: 0 0 8px; font-size: 17px; line-height: 1.4; font-weight: 600; }
-  p { margin: 0 0 10px; font-size: 13px; line-height: 1.6; color: #4b5563; }
-  p.hint { color: #6b7280; }
-  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+  p { margin: 0 0 10px; font-size: 13px; line-height: 1.6; color: #4b5563; overflow-wrap: anywhere; }
   button {
     margin-top: 6px; padding: 7px 16px; border-radius: 8px; border: 1px solid #3b82f6;
     background: #2563eb; color: #fff; font: inherit; font-size: 13px; cursor: pointer;
@@ -613,59 +636,64 @@ function renderAuthRequiredHtml(deviceName: string, status: number): string {
   @media (prefers-color-scheme: dark) {
     body { background: #141518; color: #e5e7eb; }
     .card { background: #1e2025; border-color: #2e323b; box-shadow: none; }
-    .badge { color: #f0c674; background: #3a2f12; border-color: #5a4a1f; }
+    .badge.warn { color: #f0c674; background: #3a2f12; border-color: #5a4a1f; }
+    .badge.error { color: #f2a3a3; background: #3a1c1c; border-color: #5a2a2a; }
     p { color: #9ca3af; }
-    p.hint { color: #7d8590; }
   }
 </style>
 </head>
 <body>
   <main class="card">
-    <div class="badge">需要登录 · Sign-in required</div>
-    <h1>${safeName}</h1>
-    <p>远端 DSH 拒绝了当前凭据（HTTP ${String(status)}）。SSH 隧道已连通，但浏览器 Cookie 无效或已过期。</p>
-    <p class="hint">请在 DSH 中打开侧栏底部的「多设备」，选择该设备后输入 dsh web 启动链接/Token，或点击「通过 SSH 自动修复」重新签发 Cookie。</p>
-    <p class="hint">The remote DSH rejected this credential (HTTP ${String(status)}). Open Multi-Device in the sidebar, pick this device, then paste a launch token or repair the cookie over SSH.</p>
-    <button onclick="location.reload()">重试 / Retry</button>
+    <div class="badge ${options.tone}">${badge}</div>
+    <h1>${title}</h1>
+${paragraphs}
+${retry}
   </main>
 </body>
 </html>`
 }
 
+function renderAuthRequiredHtml(deviceName: string, status: number): string {
+  return renderStatusPage({
+    deviceName,
+    badge: '需要登录 · Sign-in required',
+    tone: 'warn',
+    title: deviceName,
+    paragraphs: [
+      `远端 DSH 拒绝了当前凭据（HTTP ${String(status)}）。SSH 隧道已连通，但浏览器 Cookie 无效或已过期。`,
+      '请在 DSH 中打开侧栏底部的「多设备」，选择该设备后输入 dsh web 启动链接/Token，或点击「通过 SSH 自动修复」重新签发 Cookie。',
+      `The remote DSH rejected this credential (HTTP ${String(status)}). Open Multi-Device in the sidebar, pick this device, then paste a launch token or repair the cookie over SSH.`,
+    ],
+  })
+}
+
 function renderUnavailableHtml(deviceName: string, detail: string): string {
-  const safeName = escapeHtml(deviceName)
-  const safeDetail = escapeHtml(detail)
-  return `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8" />
-<title>${safeName} — DSH Native Mode</title>
-<style>
-  body {
-    margin: 0; height: 100vh; display: flex; align-items: center; justify-content: center;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: #141518; color: #e5e7eb;
-  }
-  .card {
-    max-width: 440px; padding: 24px; border-radius: 12px;
-    background: #1e2025; border: 1px solid #2e323b; text-align: center;
-  }
-  h2 { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
-  p { margin: 0 0 16px; font-size: 13px; color: #9ca3af; word-break: break-word; }
-  button {
-    padding: 7px 16px; border-radius: 8px; border: 1px solid #3b82f6;
-    background: #2563eb; color: #fff; font-size: 13px; cursor: pointer;
-  }
-</style>
-</head>
-<body>
-  <div class="card">
-    <h2>${safeName} 暂不可达 / Unavailable</h2>
-    <p>${safeDetail}</p>
-    <button onclick="location.reload()">重试连接 / Retry</button>
-  </div>
-</body>
-</html>`
+  return renderStatusPage({
+    deviceName,
+    badge: '暂不可达 · Unavailable',
+    tone: 'error',
+    title: deviceName,
+    paragraphs: [
+      detail,
+      'SSH 隧道或远端 DSH 暂不可用。请确认远端 dsh web 正在运行，然后重试。',
+      'The SSH tunnel or the remote DSH is not reachable right now. Confirm dsh web is running, then retry.',
+    ],
+  })
+}
+
+function renderProxyRejectedHtml(reason: string): string {
+  return renderStatusPage({
+    deviceName: '多设备代理',
+    badge: '代理会话已失效 · Proxy session expired',
+    tone: 'warn',
+    title: '请重新打开该设备 / Reopen the device',
+    paragraphs: [
+      reason,
+      '请从 DSH 的「多设备」面板重新打开该设备。',
+      'Reopen the device from the Multi-Device panel in DSH.',
+    ],
+    retry: false,
+  })
 }
 
 function escapeHtml(text: string): string {

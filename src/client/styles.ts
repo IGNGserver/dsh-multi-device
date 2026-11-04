@@ -16,6 +16,7 @@ const STYLE_TAG_ID = 'dsh-multi-device/styles.css'
 const CSS_TEXT = `
 /* Settings Section Layout (aligned with @deepseek-ai/dsh-client-ui-settings-models & general) */
 .dsh-md-section {
+  width: 100%;
   max-width: 720px;
   color: var(--dsw-alias-label-primary);
   display: flex;
@@ -47,7 +48,8 @@ const CSS_TEXT = `
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 24px;
+  flex-wrap: wrap;
+  gap: 12px 24px;
   padding: 16px 0;
   border-bottom: 0.5px solid var(--dsw-alias-border-l2);
 }
@@ -147,7 +149,7 @@ const CSS_TEXT = `
 .dsh-md-row-head {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 6px 10px;
   flex-wrap: wrap;
 }
 
@@ -169,6 +171,7 @@ const CSS_TEXT = `
 .dsh-md-row-actions {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 4px;
   margin-left: auto;
 }
@@ -229,7 +232,7 @@ const CSS_TEXT = `
 
 .dsh-md-form-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
   gap: 10px 12px;
 }
 
@@ -266,7 +269,7 @@ const CSS_TEXT = `
 
 .dsh-md-native-select-compact {
   width: auto;
-  max-width: 240px;
+  max-width: min(240px, 100%);
   height: 28px;
   font-size: 12px;
 }
@@ -315,6 +318,8 @@ const CSS_TEXT = `
 .dsh-md-editor-footer-right {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
   margin-left: auto;
 }
@@ -674,6 +679,39 @@ const CSS_TEXT = `
 
 .dsh-md-fallback-modal {
   width: min(740px, 100%);
+}
+
+@media (max-width: 560px) {
+  .dsh-md-pref-row {
+    align-items: flex-start;
+  }
+
+  .dsh-md-editor-top {
+    align-items: stretch;
+  }
+
+  .dsh-md-editor-footer {
+    align-items: stretch;
+  }
+
+  .dsh-md-editor-footer-left,
+  .dsh-md-editor-footer-right {
+    width: 100%;
+  }
+
+  .dsh-md-editor-footer-right {
+    justify-content: flex-end;
+  }
+
+  .dsh-md-auth-card {
+    padding: 18px;
+  }
+
+  .dsh-md-native-toolbar {
+    height: auto;
+    min-height: 42px;
+    padding-block: 4px;
+  }
 }
 `
 
