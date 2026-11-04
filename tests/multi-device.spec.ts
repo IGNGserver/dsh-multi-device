@@ -36,6 +36,7 @@ import {
   DeviceAuthManager,
   dshCookieName,
   extractLaunchToken,
+  buildRemoteCredentialsCatCommand,
   mintDshBrowserCookie,
   parseSigningSecretFromCredentialsYaml,
   readRemoteCredentials,
@@ -1413,6 +1414,21 @@ describe('6b. Native-mode authentication recovery', () => {
     expect(commands.length).toBe(2)
     expect(commands[1]).toContain('powershell')
     expect(commands[1]).toContain('$env:USERPROFILE')
+  })
+
+  it('expands ~ via $HOME instead of quoting it into a literal directory', () => {
+    expect(buildRemoteCredentialsCatCommand('~/.dsh')).toBe(
+      'cat "$HOME/.dsh/.credentials.yaml" 2>/dev/null || true',
+    )
+    expect(buildRemoteCredentialsCatCommand('~')).toBe(
+      'cat "$HOME/.credentials.yaml" 2>/dev/null || true',
+    )
+    expect(buildRemoteCredentialsCatCommand('~/.config/dsh')).toBe(
+      'cat "$HOME/.config/dsh/.credentials.yaml" 2>/dev/null || true',
+    )
+    expect(buildRemoteCredentialsCatCommand('/home/dev/.dsh')).toBe(
+      "cat '/home/dev/.dsh/.credentials.yaml' 2>/dev/null || true",
+    )
   })
 
   it('maps ~/.dsh and absolute Windows DSH homes to PowerShell paths', () => {

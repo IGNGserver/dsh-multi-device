@@ -203,6 +203,30 @@ export function remoteCredentialsPathForPowerShell(dshHome: string): string {
 }
 
 /**
+ * Build the POSIX command that reads the remote credentials file.
+ *
+ * `~` must never be single-quoted: `cat '~/.dsh'/...` looks for a literal
+ * directory named `~` and always fails. Default homes are therefore built from
+ * `$HOME` inside double quotes; absolute paths keep strict single-quote
+ * escaping.
+ */
+export function buildRemoteCredentialsCatCommand(dshHome: string): string {
+  const home = dshHome.trim() || '~/.dsh'
+  const tildeSuffix =
+    home === '~' ? '' : home.startsWith('~/') ? home.slice(2) : undefined
+  if (tildeSuffix !== undefined) {
+    const safe = tildeSuffix
+      .replaceAll('\\', '\\\\')
+      .replaceAll('"', '\\"')
+      .replaceAll('$', '\\$')
+      .replaceAll('`', '\\`')
+    const suffix = safe === '' ? '' : `/${safe}`
+    return `cat "$HOME${suffix}/.credentials.yaml" 2>/dev/null || true`
+  }
+  return `cat ${shellQuote(`${home}/.credentials.yaml`)} 2>/dev/null || true`
+}
+
+/**
  * Read `$DSH_HOME/.credentials.yaml` over SSH from POSIX and Windows remotes.
  *
  * The POSIX command runs first. On Windows the default `cmd.exe` rejects
@@ -214,10 +238,9 @@ export async function readRemoteCredentials(
   transport: SshTransportConfig,
   dshHome: string,
 ): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
-  const escapedHome = shellQuote(dshHome)
   const posix = await execSshCommand(
     transport,
-    `cat ${escapedHome}/.credentials.yaml 2>/dev/null || true`,
+    buildRemoteCredentialsCatCommand(dshHome),
     6_000,
   )
   const posixText = posix.ok ? posix.stdout : ''

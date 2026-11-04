@@ -52,6 +52,15 @@ export declare function resolveRemoteScheme(device: DeviceConfig): 'http' | 'htt
  */
 export declare function remoteCredentialsPathForPowerShell(dshHome: string): string;
 /**
+ * Build the POSIX command that reads the remote credentials file.
+ *
+ * `~` must never be single-quoted: `cat '~/.dsh'/...` looks for a literal
+ * directory named `~` and always fails. Default homes are therefore built from
+ * `$HOME` inside double quotes; absolute paths keep strict single-quote
+ * escaping.
+ */
+export declare function buildRemoteCredentialsCatCommand(dshHome: string): string;
+/**
  * Read `$DSH_HOME/.credentials.yaml` over SSH from POSIX and Windows remotes.
  *
  * The POSIX command runs first. On Windows the default `cmd.exe` rejects

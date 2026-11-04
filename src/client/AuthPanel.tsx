@@ -66,7 +66,7 @@ export function AuthRequiredPanel({
         </div>
         <h3 className="dsh-md-auth-title">{t('authPanelTitle')}</h3>
         <p className="dsh-md-auth-desc">{t('authPanelDesc')}</p>
-        {device.authError !== undefined && device.authError !== '' && (
+        {error === null && device.authError !== undefined && device.authError !== '' && (
           <p className="dsh-md-error-text" role="status">
             {device.authError}
           </p>
