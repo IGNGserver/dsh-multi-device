@@ -8,7 +8,9 @@
  * - Every device in `keepAliveDeviceIds` stays mounted in the DOM simultaneously.
  * - Inactive devices or backgrounded Native Mode use `display: none` + `visibility: hidden`
  *   instead of unmounting, so switching between devices or toggling between Aggregated Mode
- *   and Native Mode takes 0ms and never drops active conversations or composer drafts.
+ *   and Native Mode preserves the live WebSocket, conversations, and composer drafts.
+ *   Chromium may throttle timers/rendering in hidden frames; state is kept, but background
+ *   pages are not guaranteed to paint or poll at full speed.
  * - Supports Electron Desktop's `<webview>` guest bridge (`globalThis.dshDesktop?.browser`)
  *   as well as standard `<iframe>` pointed at the pre-authenticated local `nativeProxyUrl`.
  *

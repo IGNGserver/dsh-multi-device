@@ -28,7 +28,7 @@
   - **DOM 级后台保活**：已打开的设备页面在切换模式或切换设备时常驻 DOM（`display: none`），实现 **0ms 瞬时切换**，不丢失滚动位置、未发送草稿与实时流连接。
 - **双向故障隔离**：
   - 聚合模式网关（`AggregatedGateway`）与原生模式代理/控制面（`NativeProxyManager` + `/multi-device/api`）完全解耦。即使远端 DSH 版本升级导致 `/api` 聚合接口不兼容，原生模式与设备管理中枢依然可用；反之亦然。
-  - 支持右上角悬浮胶囊栏一键切换或快捷键 `Cmd/Ctrl + Shift + M` 快速切换。
+  - 支持侧栏底部「多设备」入口一键切换，或快捷键 `Cmd/Ctrl + Shift + M` 快速切换；入口不再悬浮遮挡会话头。
 
 ### 3. Git Remote 自动工作区聚合
 - **自动识别同一仓库**：默认读取本地与远端工作区的 Git remote（支持标准 `.git/config` 与 `git worktree` 的 `.git` 指针文件），将不同格式 URL（如 `git@github.com:org/repo.git`、`https://github.com/org/repo.git`、`ssh://git@.../org/repo`）归一化为统一仓库标识（`github.com/org/repo`），自动将多台设备上的对应目录合并为一个**逻辑工作区（Logical Workspace）**。
@@ -48,7 +48,7 @@
 - **原生模式**才是完整的远端环境：远端版本、主题、插件、设置、模型目录、文件上传、终端与文件浏览都来自远端。
 - **聚合模式**是“会话与工作区聚合”：它会合并远端模型目录（同名 provider 按设备分开展示），并路由会话列表、创建、提示词、取消、重命名、Fork、队列、审批、问答与计划评审；但 `fileUploads`、`/api/session/uploadFileBinary`、终端、远端文件打开和全局设置仍属于本地 DSH 或原生模式。
 - 需要附件、终端、远端设置或完整远端文件操作时，请切到原生模式；聚合模式不会伪装成完整远端客户端。
-- SSH 自动鉴权默认读取远端 `.credentials.yaml` 并只在本机保存签发出的 Cookie，不保存签名密钥。共享远端环境仍建议改用 Token 模式或原生模式手工登录，并取消「通过 SSH 读取远端凭据」。
+- SSH 自动鉴权默认读取远端 `.credentials.yaml`（兼容 Linux/macOS 与 Windows 远端）并只在本机保存签发出的 Cookie，不保存签名密钥。远端重启导致 Cookie 失效时，原生模式会提示“需要登录”，可粘贴启动 Token 或点“通过 SSH 自动修复”重新签发。共享远端环境仍建议改用 Token 模式或原生模式手工登录，并取消「通过 SSH 读取远端凭据」。
 
 ---
 
@@ -75,11 +75,11 @@ dsh plugin --profile desktop add file:$(pwd)
    - 打开左下角 **「设置 (Settings)」**（快捷键 `Cmd/Ctrl + ,`），在左侧导航选择 **「多设备 (Multi-Device)」**；也可在 **「插件 → 已安装 → dsh-multi-device」** 中打开配置页。
 2. **添加远端设备**：
    - 点击 **「+ 添加设备」**。
-   - 默认仅需填写 **SSH 主机**（支持 `~/.ssh/config` 主机别名、IP 或 `user@host:port`），可选填写显示名称与远端启动链接/Token；若本机已有 `~/.ssh/config`，可直接通过右上角下拉框一键导入。非默认端口、指定私钥与 ProxyJump 跳板机收纳在 **「高级连接选项」** 折叠区中。
+   - 默认仅需填写 **SSH 主机**（支持 `~/.ssh/config` 主机别名、IP 或 `user@host:port`），可选填写显示名称与远端启动链接/Token；若本机已有 `~/.ssh/config`，可直接通过表单顶部的下拉框一键导入。非默认端口、指定私钥与 ProxyJump 跳板机收纳在 **「高级连接选项」** 折叠区中。
    - 点击 **「测试连接」** 验证连通性、远端 DSH 版本与延迟，然后点击 **「保存」**。
 3. **使用双模式与 Git 聚合**：
    - **聚合模式**：直接在官方左侧边栏查看自动按 Git 仓库聚合的逻辑工作区与跨机会话，点击任意会话即可在官方对话区流式对话、审批工具调用。
-   - **原生模式**：在设置页切换为 **「原生模式」**、点击设备卡片上的 **「原生界面」**、点击右上角悬浮切换栏或按 `Cmd/Ctrl + Shift + M`，即刻切入该设备完整的远端 DSH 界面。
+   - **原生模式**：在设置页切换为 **「原生模式」**、点击设备卡片上的 **「原生界面」**、点击侧栏底部「多设备」中的设备行，或按 `Cmd/Ctrl + Shift + M`，即刻切入该设备完整的远端 DSH 界面；按 `Esc` 或工具栏「返回聚合模式」退出。
 
 ---
 
@@ -130,7 +130,9 @@ dsh plugin --profile desktop add file:$(pwd)
 │       ├── state.ts                 # 前端响应式状态存储、SSE 同步与保活 LRU 管理
 │       ├── NativeViewport.tsx       # 原生模式 Keep-Alive 容器（支持 Electron <webview> 与 <iframe>）
 │       ├── MultiDeviceHubPanel.tsx  # 多设备中枢主面板（设备管理 / Git 聚合 / 原生视图）
-│       ├── ModeSwitcherOverlay.tsx  # 顶部悬浮模式切换器与侧边栏会话行增强组件
+│       ├── ModeSwitcherOverlay.tsx  # 原生模式保活容器与侧边栏会话行增强组件
+│       ├── SidebarEntry.tsx         # 侧栏底部「多设备」入口与设备 popover
+│       ├── AuthPanel.tsx            # 远端 401 时的应用内授权/SSH 修复面板
 │       ├── locales.ts               # 中英双语词典
 │       └── styles.ts                # 样式注入（卸载时自动清理）
 └── tests/

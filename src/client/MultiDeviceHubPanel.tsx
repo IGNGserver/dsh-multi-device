@@ -182,6 +182,7 @@ function DeviceEditorForm({
 
   const [testing, setTesting] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [saveAnyway, setSaveAnyway] = useState(false)
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
 
@@ -231,6 +232,7 @@ function DeviceEditorForm({
     if (entry === undefined) return
     setTestResult(null)
     setSaveError(null)
+    setSaveAnyway(false)
     setSshHost(entry.alias)
     if (name.trim() === '') setName(entry.alias)
     setSshUser(entry.user ?? '')
@@ -261,6 +263,24 @@ function DeviceEditorForm({
     if (sshHost.trim() === '' || busy) return
     setSaving(true)
     setSaveError(null)
+
+    // Saving without a preflight used to look successful while the remote
+    // rejected every request with a bare 401. Probe auth/tunnel first; on
+    // failure keep the form open and require an explicit "save anyway".
+    if (!saveAnyway) {
+      const preflight = await clientStore.testDevice(buildInput())
+      if (!preflight.ok) {
+        setSaving(false)
+        setTestResult({ ok: false, text: preflight.error })
+        setSaveAnyway(true)
+        return
+      }
+      setTestResult({
+        ok: true,
+        text: `${t('testPassed')} · DSH ${preflight.remoteDshVersion ?? preflight.protocolVersion} · ${String(preflight.latencyMs)}ms`,
+      })
+    }
+
     const res = await clientStore.upsertDevice(buildInput())
     setSaving(false)
     if (!res.ok) {
@@ -313,6 +333,7 @@ function DeviceEditorForm({
             onChange={(e) => {
               setSshHost(e.currentTarget.value)
               setTestResult(null)
+              setSaveAnyway(false)
             }}
           />
         </div>
@@ -516,7 +537,7 @@ function DeviceEditorForm({
             type="submit"
             disabled={busy || sshHost.trim() === ''}
           >
-            {saving ? t('savingDevice') : t('saveDevice')}
+            {saving ? t('savingDevice') : saveAnyway ? t('saveAnyway') : t('saveDevice')}
           </Button>
         </div>
       </div>
