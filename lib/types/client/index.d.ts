@@ -1,21 +1,19 @@
 /**
  * `dsh-multi-device` Browser Client Entry.
  *
- * Contributes strictly to official DSH 0.2 UI extension slots without occupying
- * the primary left sidebar navigation:
+ * Contributes strictly to official DSH 0.2 UI extension slots:
  * 1. `settings.section` (`id: 'multi-device'`): Native top-level Settings section
  *    for managing remote SSH devices, display mode, and Git repository auto-aggregation.
+ *    This is the only place the mode is switched; Aggregated Mode has no device
+ *    navigation, and Native Mode has no "back to aggregated" control.
  * 2. `plugins.bundle.config` (`key: 'dsh-multi-device'`): Companion configuration surface
  *    inside DSH's Plugin Manager bundle detail view.
- * 3. `shell.overlay` (`id: 'multi-device-switcher'`): persistent Keep-Alive Native Mode
- *    viewport (the toggle lives in the sidebar footer entry below).
- * 4. `sidebar.footer.action`: compact Multi-Device entry + device popover, so the plugin
- *    never floats controls over DSH's session header or caption drag region.
- * 5. `conversation.session.header.utilities`, `conversation.input.right`,
- *    `sidebar.session.row.hover`, and `sidebar.workspaces.session.menu.item`:
- *    The owning device appears on the right side of an opened Session header;
- *    Session rows themselves stay free of device prefixes. Hover details and a
- *    native `MenuItemButton` still expose the owning device.
+ * 3. `shell.overlay` (`id: 'multi-device-switcher'`): persistent Native Mode tab bar
+ *    (本机 + remote devices) and Keep-Alive remote viewports.
+ * 4. `conversation.input.right`, `conversation.session.header.utilities`, and
+ *    `sidebar.session.row.hover`: report the active Session to the Host, show
+ *    its owning device on the opened conversation header, and keep hover
+ *    metadata. These are labels/scope hints, never device navigation entries.
  *
  * @module dsh-multi-device/client
  */
@@ -37,10 +35,30 @@ export interface SlotEntryLike {
         };
     };
 }
+interface SessionSummaryLike {
+    readonly retainedBy?: {
+        readonly mainView?: number;
+    };
+}
+interface SessionsListSnapshotLike {
+    readonly ids: readonly string[];
+    readonly byId: Readonly<Record<string, SessionSummaryLike>>;
+}
+interface SessionsServiceLike {
+    readonly list: {
+        getSnapshot(): SessionsListSnapshotLike;
+        subscribe?(listener: () => void): () => void;
+    };
+    refresh(): Promise<void>;
+}
+interface UiWorkspaceServiceLike {
+    openSession(sessionId: string): void;
+    openWorkspace(workspaceId: string): Promise<void>;
+}
 export interface ClientContextLike {
     effect(fn: () => (() => void) | void, label?: string): void;
     inject(deps: readonly string[], fn: (ctx: ClientContextLike) => void): void;
-    /** Resolve a Client service (used only as a guarded model-picker refresh fallback). */
+    /** Resolve a Client service (active-Session scope and model-picker refresh). */
     get?(key: string): unknown;
     locale: {
         register(ns: string, dicts: {
@@ -52,9 +70,8 @@ export interface ClientContextLike {
     layout?: {
         selectPanel(panelId: string | null): void;
     };
-    shortcuts?: {
-        register(spec: Record<string, unknown>): () => void;
-    };
+    sessions?: SessionsServiceLike;
+    uiWorkspace?: UiWorkspaceServiceLike;
     slots: {
         inject(slotName: string, fn: () => (() => void) | void): () => void;
         register(options: Record<string, unknown>, component: (props: any) => React.ReactNode): () => void;
@@ -68,3 +85,4 @@ export interface ClientContextLike {
  */
 export declare function openSettingsSection(ctx: ClientContextLike, sectionId?: string): boolean;
 export declare function apply(ctx: ClientContextLike): void;
+export {};

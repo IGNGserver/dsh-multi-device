@@ -1,9 +1,11 @@
 /**
  * Client-side reactive store, SSE live synchronization, and control-plane RPC client.
  *
- * Persists UI mode (`aggregated` vs `native`) and active device selection in `localStorage`,
- * and maintains the LRU Keep-Alive set of Native Mode device pages so switching between
- * Aggregated Mode and Native Mode never destroys loaded remote DSH pages.
+ * The Host owns the aggregated/native mode (it must, because it decides whether
+ * remote workspaces and sessions are merged into the local DSH surface). This
+ * store mirrors the host snapshot and maintains the LRU Keep-Alive set of
+ * Native Mode device pages. `activeNativeDeviceId === undefined` means the
+ * leftmost Native tab, 本机, which is the unmodified local DSH page.
  *
  * @module dsh-multi-device/client/state
  */
@@ -121,9 +123,9 @@ export interface MultiDeviceClientState {
   readonly snapshot: MultiDeviceSnapshot
   readonly loading: boolean
   readonly error?: string
-  /** Current global mode: `'aggregated'` (unified sidebar) or `'native'` (full-window remote DSH Web UI). */
+  /** Host-authoritative mode: `'aggregated'` (merged sidebar) or `'native'` (local page + device tabs). */
   readonly displayMode: DisplayMode
-  /** Currently selected device in Native Mode. */
+  /** Selected remote device tab in Native Mode; `undefined` is the 本机 tab. */
   readonly activeNativeDeviceId?: DeviceId
   /**
    * The Session currently shown in the conversation pane. The Host uses this to
@@ -141,7 +143,6 @@ export interface MultiDeviceClientState {
   readonly settingsModalOpen: boolean
 }
 
-const UI_STORAGE_KEY = 'dsh.multi-device.ui.v1'
 const MAX_KEEP_ALIVE_PAGES = 6
 
 /** Identify this browser instance so two tabs cannot starve each other's sequences. */
@@ -152,6 +153,7 @@ const CLIENT_INSTANCE_ID =
 
 const EMPTY_SNAPSHOT: MultiDeviceSnapshot = {
   revision: 0,
+  displayMode: 'aggregated',
   hostStatus: {
     aggregatedGatewayActive: true,
     nativeProxyActive: true,
@@ -183,45 +185,6 @@ const EMPTY_SNAPSHOT: MultiDeviceSnapshot = {
   },
 }
 
-function loadPersistedUiPrefs(): {
-  displayMode: DisplayMode
-  activeNativeDeviceId?: DeviceId
-} {
-  if (typeof localStorage === 'undefined') {
-    return { displayMode: 'aggregated' }
-  }
-  try {
-    const raw = JSON.parse(localStorage.getItem(UI_STORAGE_KEY) ?? '{}') as {
-      displayMode?: string
-      activeNativeDeviceId?: string
-      overlayCollapsed?: boolean
-    }
-    return {
-      displayMode: raw.displayMode === 'native' ? 'native' : 'aggregated',
-      ...(typeof raw.activeNativeDeviceId === 'string' && raw.activeNativeDeviceId !== ''
-        ? { activeNativeDeviceId: raw.activeNativeDeviceId as DeviceId }
-        : {}),
-    }
-  } catch {
-    return { displayMode: 'aggregated' }
-  }
-}
-
-function savePersistedUiPrefs(state: MultiDeviceClientState): void {
-  if (typeof localStorage === 'undefined') return
-  try {
-    localStorage.setItem(
-      UI_STORAGE_KEY,
-      JSON.stringify({
-        displayMode: state.displayMode,
-        activeNativeDeviceId: state.activeNativeDeviceId,
-      }),
-    )
-  } catch {
-    // Ignore storage quota errors
-  }
-}
-
 class MultiDeviceClientStore {
   private state: MultiDeviceClientState
   private readonly listeners = new Set<() => void>()
@@ -236,15 +199,14 @@ class MultiDeviceClientStore {
   private activeSessionSeq = 0
 
   constructor() {
-    const prefs = loadPersistedUiPrefs()
     this.state = {
       snapshot: EMPTY_SNAPSHOT,
       loading: true,
-      displayMode: prefs.displayMode,
-      ...(prefs.activeNativeDeviceId !== undefined
-        ? { activeNativeDeviceId: prefs.activeNativeDeviceId }
-        : {}),
-      keepAliveDeviceIds: prefs.activeNativeDeviceId ? [prefs.activeNativeDeviceId] : [],
+      // The Host snapshot is authoritative. Starting in Aggregated Mode only
+      // avoids showing a Native tab bar before the first snapshot arrives; the
+      // local surface is already filtered by the Host if it persisted native.
+      displayMode: 'aggregated',
+      keepAliveDeviceIds: [],
       reloadCounters: {},
       activeHubTab: 'devices',
       settingsModalOpen: false,
@@ -258,9 +220,8 @@ class MultiDeviceClientStore {
     return () => this.listeners.delete(listener)
   }
 
-  private setState(patch: Partial<MultiDeviceClientState>, persistPrefs = false): void {
+  private setState(patch: Partial<MultiDeviceClientState>): void {
     this.state = { ...this.state, ...patch }
-    if (persistPrefs) savePersistedUiPrefs(this.state)
     for (const listener of this.listeners) {
       try { listener() } catch { /* ignore */ }
     }
@@ -321,20 +282,33 @@ class MultiDeviceClientStore {
     }
   }
 
-  private applyIncomingSnapshot(snap: MultiDeviceSnapshot): void {
+  private applyIncomingSnapshot(
+    snap: MultiDeviceSnapshot,
+    activeOverride?: DeviceId | null,
+  ): void {
     if (snap.revision < this.state.snapshot.revision) return
     const alive = new Set(
       snap.devices.filter(device => device.keepNativeAlive !== false).map(device => device.id),
     )
-    let activeNative = this.state.activeNativeDeviceId
-    if (activeNative === undefined || !alive.has(activeNative)) {
-      activeNative = snap.devices.find(device => alive.has(device.id))?.id
+    const nextDisplayMode: DisplayMode = snap.displayMode ?? this.state.displayMode
+
+    let activeNative: DeviceId | undefined
+    if (nextDisplayMode === 'native') {
+      if (activeOverride === null) {
+        activeNative = undefined
+      } else if (activeOverride !== undefined && alive.has(activeOverride)) {
+        activeNative = activeOverride
+      } else if (
+        this.state.activeNativeDeviceId !== undefined &&
+        alive.has(this.state.activeNativeDeviceId)
+      ) {
+        activeNative = this.state.activeNativeDeviceId
+      }
+      // No "first device" fallback: 本机 is the stable default and the only
+      // tab guaranteed to exist.
     }
+
     const keepAlive = this.state.keepAliveDeviceIds.filter(id => alive.has(id)).slice(-MAX_KEEP_ALIVE_PAGES)
-    const nextDisplayMode: DisplayMode =
-      this.state.displayMode === 'native' && snap.devices.length === 0
-        ? 'aggregated'
-        : this.state.displayMode
     if (
       nextDisplayMode === 'native' &&
       activeNative !== undefined &&
@@ -348,69 +322,78 @@ class MultiDeviceClientStore {
       loading: false,
       error: undefined,
       displayMode: nextDisplayMode,
-      ...(activeNative !== undefined ? { activeNativeDeviceId: activeNative } : {}),
+      activeNativeDeviceId: activeNative,
       keepAliveDeviceIds: keepAlive,
     })
+  }
+
+  private activateNativeDevice(deviceId: DeviceId): void {
+    const alive = new Set(
+      this.state.snapshot.devices
+        .filter(device => device.keepNativeAlive !== false)
+        .map(device => device.id),
+    )
+    if (!alive.has(deviceId)) return
+    const keepAlive = this.state.keepAliveDeviceIds.filter(id => alive.has(id) && id !== deviceId)
+    keepAlive.push(deviceId)
+    while (keepAlive.length > MAX_KEEP_ALIVE_PAGES) keepAlive.shift()
+    this.setState({ activeNativeDeviceId: deviceId, keepAliveDeviceIds: keepAlive })
   }
 
   // ==========================================================================
   // UI Navigation & Keep-Alive Actions
   // ==========================================================================
 
-  setDisplayMode(mode: DisplayMode, targetDeviceId?: DeviceId): void {
-    if (mode === 'native' && this.state.snapshot.devices.length === 0 && targetDeviceId === undefined) {
-      return
+  /**
+   * Switch modes through the Host. The Host persists the mode and immediately
+   * stops/starts merging remote rows into the local surface; the resulting
+   * snapshot is applied here. `targetDeviceId` selects a remote tab; omitting
+   * it lands on 本机.
+   */
+  async setDisplayMode(
+    mode: DisplayMode,
+    targetDeviceId?: DeviceId,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const res = await this.callControlPlane<{ snapshot: MultiDeviceSnapshot }>({
+      action: 'setDisplayMode',
+      payload: { displayMode: mode },
+    })
+    if (!res.ok) {
+      this.setState({ error: res.error })
+      return { ok: false, error: res.error }
     }
-    const nextDeviceId =
-      targetDeviceId ??
-      this.state.activeNativeDeviceId ??
-      this.state.snapshot.devices[0]?.id
-
-    const alive = new Set(
-      this.state.snapshot.devices.filter(device => device.keepNativeAlive !== false).map(device => device.id),
+    this.applyIncomingSnapshot(
+      res.value.snapshot,
+      mode === 'native' ? targetDeviceId ?? null : null,
     )
-    const keepAlive = this.state.keepAliveDeviceIds.filter(id => alive.has(id))
-    if (mode === 'native' && nextDeviceId !== undefined && alive.has(nextDeviceId)) {
-      const existingIdx = keepAlive.indexOf(nextDeviceId)
-      if (existingIdx !== -1) keepAlive.splice(existingIdx, 1)
-      keepAlive.push(nextDeviceId)
-      while (keepAlive.length > MAX_KEEP_ALIVE_PAGES) {
-        keepAlive.shift()
-      }
-    }
-
-    this.setState(
-      {
-        displayMode: mode,
-        ...(nextDeviceId !== undefined ? { activeNativeDeviceId: nextDeviceId } : {}),
-        keepAliveDeviceIds: keepAlive,
-      },
-      true,
-    )
+    return { ok: true }
   }
 
-  toggleDisplayMode(): void {
-    this.setDisplayMode(this.state.displayMode === 'native' ? 'aggregated' : 'native')
+  /** Switch to a remote device tab, entering Native Mode if necessary. */
+  async selectNativeDevice(deviceId: DeviceId): Promise<{ ok: boolean; error?: string }> {
+    if (this.state.displayMode === 'native') {
+      this.activateNativeDevice(deviceId)
+      return { ok: true }
+    }
+    return this.setDisplayMode('native', deviceId)
   }
 
-  selectNativeDevice(deviceId: DeviceId): void {
-    this.setDisplayMode('native', deviceId)
+  /** Return to the 本机 tab while staying in Native Mode. */
+  selectLocalNativeTab(): void {
+    if (this.state.displayMode !== 'native') return
+    this.setState({ activeNativeDeviceId: undefined })
   }
 
   releaseKeepAliveDevice(deviceId: DeviceId): void {
     const nextKeepAlive = this.state.keepAliveDeviceIds.filter(id => id !== deviceId)
     const nextActive =
       this.state.activeNativeDeviceId === deviceId
-        ? nextKeepAlive[nextKeepAlive.length - 1] ?? this.state.snapshot.devices.find(d => d.id !== deviceId)?.id
+        ? nextKeepAlive[nextKeepAlive.length - 1]
         : this.state.activeNativeDeviceId
-    this.setState(
-      {
-        keepAliveDeviceIds: nextKeepAlive,
-        activeNativeDeviceId: nextActive,
-        ...(nextKeepAlive.length === 0 ? { displayMode: 'aggregated' } : {}),
-      },
-      true,
-    )
+    this.setState({
+      keepAliveDeviceIds: nextKeepAlive,
+      activeNativeDeviceId: nextActive,
+    })
   }
 
   reloadNativeDevice(deviceId: DeviceId): void {

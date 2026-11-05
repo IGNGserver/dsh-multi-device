@@ -1,36 +1,33 @@
 /**
  * `dsh-multi-device` Browser Client Entry.
  *
- * Contributes strictly to official DSH 0.2 UI extension slots without occupying
- * the primary left sidebar navigation:
+ * Contributes strictly to official DSH 0.2 UI extension slots:
  * 1. `settings.section` (`id: 'multi-device'`): Native top-level Settings section
  *    for managing remote SSH devices, display mode, and Git repository auto-aggregation.
+ *    This is the only place the mode is switched; Aggregated Mode has no device
+ *    navigation, and Native Mode has no "back to aggregated" control.
  * 2. `plugins.bundle.config` (`key: 'dsh-multi-device'`): Companion configuration surface
  *    inside DSH's Plugin Manager bundle detail view.
- * 3. `shell.overlay` (`id: 'multi-device-switcher'`): persistent Keep-Alive Native Mode
- *    viewport (the toggle lives in the sidebar footer entry below).
- * 4. `sidebar.footer.action`: compact Multi-Device entry + device popover, so the plugin
- *    never floats controls over DSH's session header or caption drag region.
- * 5. `conversation.session.header.utilities`, `conversation.input.right`,
- *    `sidebar.session.row.hover`, and `sidebar.workspaces.session.menu.item`:
- *    The owning device appears on the right side of an opened Session header;
- *    Session rows themselves stay free of device prefixes. Hover details and a
- *    native `MenuItemButton` still expose the owning device.
+ * 3. `shell.overlay` (`id: 'multi-device-switcher'`): persistent Native Mode tab bar
+ *    (本机 + remote devices) and Keep-Alive remote viewports.
+ * 4. `conversation.input.right`, `conversation.session.header.utilities`, and
+ *    `sidebar.session.row.hover`: report the active Session to the Host, show
+ *    its owning device on the opened conversation header, and keep hover
+ *    metadata. These are labels/scope hints, never device navigation entries.
  *
  * @module dsh-multi-device/client
  */
 import React from 'react'
+import { decodeSessionId, LOCAL_DEVICE_ID } from '../contract.ts'
 import { LOCALE_NS, en, zh, type MultiDeviceLocaleKey } from './locales.ts'
 import {
   ActiveSessionReporter,
   ModeSwitcherOverlay,
   SessionHeaderDeviceBadge,
-  SessionMenuOpenInNativeItem,
   SessionRowHoverDeviceSection,
 } from './ModeSwitcherOverlay.tsx'
 import { MultiDeviceHubPanel } from './MultiDeviceHubPanel.tsx'
 import { installProjectDeviceBadges } from './projectBadges.ts'
-import { MultiDeviceSidebarEntry } from './SidebarEntry.tsx'
 import { clientStore } from './state.ts'
 import { adoptMultiDeviceStyles } from './styles.ts'
 
@@ -78,10 +75,28 @@ export interface SlotEntryLike {
   }
 }
 
+interface SessionSummaryLike {
+  readonly retainedBy?: { readonly mainView?: number }
+}
+interface SessionsListSnapshotLike {
+  readonly ids: readonly string[]
+  readonly byId: Readonly<Record<string, SessionSummaryLike>>
+}
+interface SessionsServiceLike {
+  readonly list: {
+    getSnapshot(): SessionsListSnapshotLike
+    subscribe?(listener: () => void): () => void
+  }
+  refresh(): Promise<void>
+}
+interface UiWorkspaceServiceLike {
+  openSession(sessionId: string): void
+  openWorkspace(workspaceId: string): Promise<void>
+}
 export interface ClientContextLike {
   effect(fn: () => (() => void) | void, label?: string): void
   inject(deps: readonly string[], fn: (ctx: ClientContextLike) => void): void
-  /** Resolve a Client service (used only as a guarded model-picker refresh fallback). */
+  /** Resolve a Client service (active-Session scope and model-picker refresh). */
   get?(key: string): unknown
   locale: {
     register(ns: string, dicts: { zh: Record<string, string>; en: Record<string, string> }): () => void
@@ -90,9 +105,8 @@ export interface ClientContextLike {
   layout?: {
     selectPanel(panelId: string | null): void
   }
-  shortcuts?: {
-    register(spec: Record<string, unknown>): () => void
-  }
+  sessions?: SessionsServiceLike
+  uiWorkspace?: UiWorkspaceServiceLike
   slots: {
     inject(slotName: string, fn: () => (() => void) | void): () => void
     register(options: Record<string, unknown>, component: (props: any) => React.ReactNode): () => void
@@ -123,6 +137,104 @@ export function openSettingsSection(
   return false
 }
 
+function currentMainSessionId(list: SessionsListSnapshotLike): string | undefined {
+  for (const sessionId of list.ids) {
+    const summary = list.byId[sessionId]
+    if ((summary?.retainedBy?.mainView ?? 0) > 0) return sessionId
+  }
+  return undefined
+}
+
+/**
+ * Native Mode's local tab must never keep a remote conversation visible.
+ * Prefer another local Session; otherwise open the first local Workspace,
+ * which lets the normal DSH navigation create/reuse a local blank.
+ */
+async function ensureNativeLocalSelection(ctx: ClientContextLike): Promise<void> {
+  const sessions = ctx.sessions
+  if (sessions === undefined) return
+  const list = sessions.list.getSnapshot()
+  const current = currentMainSessionId(list)
+  if (current === undefined || !decodeSessionId(current).isRemote) return
+
+  const localSession = list.ids.find(id => !decodeSessionId(id).isRemote)
+  if (localSession !== undefined) {
+    ctx.uiWorkspace?.openSession(localSession)
+    return
+  }
+
+  const localWorkspace = clientStore
+    .getSnapshot()
+    .snapshot.allPhysicalWorkspaces.find(workspace => workspace.deviceId === LOCAL_DEVICE_ID)
+  if (localWorkspace !== undefined && ctx.uiWorkspace !== undefined) {
+    await ctx.uiWorkspace.openWorkspace(localWorkspace.remoteWorkspaceId)
+  }
+}
+
+/**
+ * Apply the Host-owned mode to the local DSH stores. The Host already filters
+ * the data; this refreshes the local Session catalog and, on entering Native
+ * Mode, moves the main conversation off a remote Session.
+ */
+function installModeSideEffects(ctx: ClientContextLike): () => void {
+  let lastMode = clientStore.getSnapshot().displayMode
+  let reconciling = false
+  let reconcileAgain = false
+  let guarding = false
+
+  const reconcile = async (mode: string): Promise<void> => {
+    if (reconciling) {
+      reconcileAgain = true
+      return
+    }
+    reconciling = true
+    try {
+      await ctx.sessions?.refresh()
+    } catch {
+      // A failed refresh must not block the mode switch; the next poll retries.
+    }
+    refreshModelCatalog(ctx)
+    if (mode === 'native') {
+      try {
+        await ensureNativeLocalSelection(ctx)
+      } catch {
+        // Navigation is best-effort; the Host-side filter already prevents
+        // new remote rows from appearing in the local tab.
+      }
+    }
+    reconciling = false
+    if (reconcileAgain) {
+      reconcileAgain = false
+      await reconcile(clientStore.getSnapshot().displayMode)
+    }
+  }
+
+  const unsubscribeStore = clientStore.subscribe(() => {
+    const mode = clientStore.getSnapshot().displayMode
+    if (mode === lastMode) return
+    lastMode = mode
+    void reconcile(mode)
+  })
+
+  const unsubscribeSessions = ctx.sessions?.list.subscribe?.(() => {
+    if (clientStore.getSnapshot().displayMode !== 'native' || guarding) return
+    const list = ctx.sessions?.list.getSnapshot()
+    const current = list === undefined ? undefined : currentMainSessionId(list)
+    if (current === undefined || !decodeSessionId(current).isRemote) return
+    guarding = true
+    void ensureNativeLocalSelection(ctx).finally(() => {
+      guarding = false
+    })
+  })
+
+  if (clientStore.getSnapshot().displayMode === 'native') void reconcile('native')
+
+  return () => {
+    unsubscribeStore()
+    unsubscribeSessions?.()
+  }
+}
+
 export function apply(ctx: ClientContextLike): void {
   adoptMultiDeviceStyles()
 
@@ -151,57 +263,17 @@ export function apply(ctx: ClientContextLike): void {
     'dsh-multi-device: project device badges',
   )
 
-  // 1. Register keyboard shortcut (Cmd/Ctrl+Shift+M) to toggle Aggregated ⟷ Native mode
-  ctx.inject(['shortcuts'], (shortcutCtx) => {
-    shortcutCtx.effect(() => {
-      if (shortcutCtx.shortcuts === undefined) return () => {}
-      return shortcutCtx.shortcuts.register({
-        id: 'multiDevice.toggleMode',
-        label: () => getTranslate()('toggleMode'),
-        aliases: ['toggle native mode', 'multi device mode'],
-        defaults: {
-          'desktop:macos': { code: 'KeyM', modifiers: ['primary', 'shift'] },
-          'desktop:windows': { code: 'KeyM', modifiers: ['primary', 'shift'] },
-          'desktop:linux': { code: 'KeyM', modifiers: ['primary', 'shift'] },
-          'web:macos': { code: 'KeyM', modifiers: ['primary', 'shift'] },
-          'web:windows': { code: 'KeyM', modifiers: ['primary', 'shift'] },
-        },
-        // Only outside inputs: toggling the whole UI while typing in a
-        // textarea loses the composer draft focus.
-        regions: ['page'],
-        modals: [],
-        resolve: () => ({
-          status: 'handled',
-          run: () => {
-            clientStore.toggleDisplayMode()
-          },
-        }),
-      })
-    }, 'dsh-multi-device: shortcut')
+  // 1. Native Mode owns the local DSH store transitions. The Host filters the
+  //    data; this refreshes the local Session catalog and leaves a remote
+  //    conversation when the 本机 tab becomes active.
+  ctx.inject(['sessions', 'uiWorkspace'], (modeCtx) => {
+    modeCtx.effect(
+      () => installModeSideEffects(modeCtx),
+      'dsh-multi-device: native local surface',
+    )
   })
 
-  // 2. Register Sidebar Footer Entry (`sidebar.footer.action`) — a native list slot.
-  //    Keeping the entry here avoids covering DSH's session header and the Windows
-  //    caption drag region, which swallowed clicks on the old floating bar.
-  ctx.slots.inject('sidebar.footer.action', () =>
-    ctx.slots.register(
-      {
-        name: 'sidebar.footer.action',
-        id: 'multi-device-entry',
-        order: 30,
-        locale: LOCALE_NS,
-      },
-      (props: { wide?: boolean; t?: (k: MultiDeviceLocaleKey) => string }) => (
-        <MultiDeviceSidebarEntry
-          wide={props.wide === true}
-          t={props.t ?? getTranslate()}
-          onOpenSettings={handleOpenSettings}
-        />
-      ),
-    ),
-  )
-
-  // 3. Register Native Settings Section (`settings.section`, id: 'multi-device')
+  // 2. Register Native Settings Section (`settings.section`, id: 'multi-device')
   ctx.slots.inject('settings.section', () =>
     ctx.slots.register(
       {
@@ -220,7 +292,7 @@ export function apply(ctx: ClientContextLike): void {
     ),
   )
 
-  // 4. Register Plugin Manager Bundle Configuration (`plugins.bundle.config`)
+  // 3. Register Plugin Manager Bundle Configuration (`plugins.bundle.config`)
   ctx.slots.inject('plugins.bundle.config', () =>
     ctx.slots.register(
       {
@@ -236,7 +308,7 @@ export function apply(ctx: ClientContextLike): void {
     ),
   )
 
-  // 5. Register Persistent Native Keep-Alive Viewport in `shell.overlay`
+  // 4. Register the persistent Native Mode tab bar + keep-alive viewports in `shell.overlay`
   ctx.slots.inject('shell.overlay', () =>
     ctx.slots.register(
       {
@@ -254,9 +326,9 @@ export function apply(ctx: ClientContextLike): void {
     ),
   )
 
-  // 6a. Report the active Session to the Host so `session/modelCatalog` can
-  //     answer with exactly that Session owner's models. This slot is rendered
-  //     for blank/new Sessions too, unlike the header utilities below.
+  // 5. Report the active Session to the Host so `session/modelCatalog` can
+  //    answer with exactly that Session owner's models. This slot is rendered
+  //    for blank/new Sessions too, unlike the header utilities below.
   ctx.slots.inject('conversation.input.right', () =>
     ctx.slots.register(
       {
@@ -299,25 +371,4 @@ export function apply(ctx: ClientContextLike): void {
     ),
   )
 
-  ctx.slots.inject('sidebar.workspaces.session.menu.item', () =>
-    ctx.slots.register(
-      {
-        name: 'sidebar.workspaces.session.menu.item',
-        id: 'multi-device-open-native',
-        order: 450,
-        locale: LOCALE_NS,
-      },
-      (props: {
-        sessionId: string
-        useMenuOpenState: () => readonly [boolean, (open: boolean) => void]
-        t?: (k: MultiDeviceLocaleKey) => string
-      }) => (
-        <SessionMenuOpenInNativeItem
-          sessionId={props.sessionId}
-          useMenuOpenState={props.useMenuOpenState}
-          t={props.t ?? getTranslate()}
-        />
-      ),
-    ),
-  )
 }

@@ -123,6 +123,7 @@ export function admitMultiDeviceRequest(ctx: Context, req: IncomingMessage): boo
 export interface ControlPlaneRequest {
   readonly action:
     | 'snapshot'
+    | 'setDisplayMode'
     | 'upsertDevice'
     | 'removeDevice'
     | 'reconnectDevice'
@@ -168,6 +169,15 @@ export class MultiDeviceControlPlane {
           const clientId = typeof payload.clientId === 'string' ? payload.clientId : ''
           this.registry.setActiveSession(sessionId, requestSeq, clientId)
           return { ok: true, value: { accepted: true as const } }
+        }
+
+        case 'setDisplayMode': {
+          const mode = payload.displayMode
+          if (mode !== 'aggregated' && mode !== 'native') {
+            return { ok: false, error: 'displayMode must be "aggregated" or "native"' }
+          }
+          this.registry.setDisplayMode(mode)
+          return { ok: true, value: { snapshot: this.registry.snapshot() } }
         }
 
         case 'upsertDevice': {

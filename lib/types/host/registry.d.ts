@@ -1,4 +1,4 @@
-import { type DeviceAuthState, type DeviceConfig, DeviceId, type DeviceView, type GitMatchRun, type MultiDeviceSnapshot, type RemoteSessionCreateInput, type RemoteWorkspaceCreateInput, type SshKeyEntry, type UpsertDeviceInput, type WorkspaceAggregationConfig } from '../contract.ts';
+import { type DeviceAuthState, type DeviceConfig, DeviceId, type DeviceView, type DisplayMode, type GitMatchRun, type MultiDeviceSnapshot, type RemoteSessionCreateInput, type RemoteWorkspaceCreateInput, type SshKeyEntry, type UpsertDeviceInput, type WorkspaceAggregationConfig } from '../contract.ts';
 import { DeviceAuthManager } from './auth.ts';
 import { type PhysicalWorkspaceInput, WorkspaceAggregator } from './git-aggregator.ts';
 import { NativeProxyManager } from './native-proxy.ts';
@@ -43,11 +43,13 @@ export declare class DeviceRegistry {
     private readonly projectionListeners;
     private readonly workspaceListeners;
     private readonly modelCatalogListeners;
+    private readonly modeListeners;
     private activeSessionSeq;
     private activeSessionClientId;
     private activeSessionIsRemote;
     private activeSessionDeviceId;
     private revision;
+    private displayMode;
     private gitMatchRunner;
     private gitMatchRun;
     private localWorkspaceCreator;
@@ -99,6 +101,17 @@ export declare class DeviceRegistry {
     /** Scope `session/modelCatalog` to the Session currently shown on the right. */
     activeSessionScope(): ActiveSessionScope;
     private notifyModelCatalogChanged;
+    onDisplayModeChanged(listener: (mode: DisplayMode) => void): () => void;
+    /** Host-authoritative UI mode. Defaults to aggregated for existing installs. */
+    getDisplayMode(): DisplayMode;
+    /** Aggregated mode is the only mode that may merge or route remote data. */
+    isAggregatedMode(): boolean;
+    /**
+     * Persist and publish a mode change. The workspace stream recomputes its
+     * snapshot immediately, so already-connected clients receive remove/upsert
+     * frames for the rows that just became invisible (or visible again).
+     */
+    setDisplayMode(mode: DisplayMode): void;
     startAll(): void;
     dispose(): void;
     client(deviceId: DeviceId): RemoteDeviceClient | undefined;

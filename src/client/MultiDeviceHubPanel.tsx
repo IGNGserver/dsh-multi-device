@@ -627,6 +627,7 @@ export function MultiDeviceHubPanel({
   const [editingDeviceId, setEditingDeviceId] = useState<DeviceId | null>(null)
   const [sshKeys, setSshKeys] = useState<readonly SshKeyEntry[]>([])
   const [aggBusy, setAggBusy] = useState(false)
+  const [modeBusy, setModeBusy] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<DeviceView | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
@@ -716,20 +717,22 @@ export function MultiDeviceHubPanel({
             id={modeSegId}
             label={t('modeRowTitle')}
             value={state.displayMode}
+            disabled={modeBusy}
             options={[
               { value: 'aggregated', label: t('modeAggregated') },
-              {
-                value: 'native',
-                label: t('modeNative'),
-                disabled: !hasDevices,
-                ...(!hasDevices ? { title: t('modeNativeNoDeviceHint') } : {}),
-              },
+              { value: 'native', label: t('modeNative') },
             ]}
             onChange={(next) => {
-              clientStore.setDisplayMode(next)
-              if (next === 'native') {
-                onCloseSettings?.()
-              }
+              if (modeBusy || next === state.displayMode) return
+              setModeBusy(true)
+              void clientStore.setDisplayMode(next).then((res) => {
+                setModeBusy(false)
+                if (!res.ok) {
+                  pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
+                  return
+                }
+                if (next === 'native') onCloseSettings?.()
+              })
             }}
           />
         </div>
@@ -973,10 +976,19 @@ export function MultiDeviceHubPanel({
                       <Button
                         variant="outline"
                         size="sm"
+                        disabled={modeBusy}
                         icon={<IconRightUpOutlineRegular size={13} />}
                         onClick={() => {
-                          clientStore.selectNativeDevice(dev.id)
-                          onCloseSettings?.()
+                          if (modeBusy) return
+                          setModeBusy(true)
+                          void clientStore.selectNativeDevice(dev.id).then((res) => {
+                            setModeBusy(false)
+                            if (!res.ok) {
+                              pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
+                              return
+                            }
+                            onCloseSettings?.()
+                          })
                         }}
                       >
                         {t('openNative')}

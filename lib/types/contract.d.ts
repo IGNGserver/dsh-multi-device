@@ -333,6 +333,12 @@ export interface GitMatchRun {
 /** Complete Hub snapshot returned to the Client UI. */
 export interface MultiDeviceSnapshot {
     readonly revision: number;
+    /**
+     * Host-authoritative UI mode. `aggregated` merges remote workspaces and
+     * sessions into the local DSH surface; `native` keeps that surface local-only
+     * and exposes remote devices through their own keep-alive tabs.
+     */
+    readonly displayMode?: DisplayMode;
     readonly hostStatus: {
         readonly aggregatedGatewayActive: boolean;
         readonly aggregatedGatewayError?: string;
