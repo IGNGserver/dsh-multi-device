@@ -250,6 +250,10 @@ export function apply(ctx: Context, config?: Config): void {
             const workspaceController = (gatewayCtx as unknown as { workspaceController: WorkspaceControllerLike }).workspaceController
             const typertGateway = (gatewayCtx as unknown as { typertGateway: TypertGatewayLike }).typertGateway
 
+            registry.setLocalWorkspaceCreator(async (path) => {
+              await workspaceController.create({ path })
+            })
+
             const disposeGateway = installAggregatedGateway02(
               registry,
               sessionController,
@@ -260,6 +264,9 @@ export function apply(ctx: Context, config?: Config): void {
             registry.setGatewayStatus(true)
             return () => {
               disposeGateway()
+              registry.setLocalWorkspaceCreator(async () => {
+                throw new Error('Local workspace creation is unavailable')
+              })
               registry.setGatewayStatus(false)
             }
           } catch (error) {

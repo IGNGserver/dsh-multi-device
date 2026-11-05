@@ -30,10 +30,18 @@
   - 聚合模式网关（`AggregatedGateway`）与原生模式代理/控制面（`NativeProxyManager` + `/multi-device/api`）完全解耦。即使远端 DSH 版本升级导致 `/api` 聚合接口不兼容，原生模式与设备管理中枢依然可用；反之亦然。
   - 支持侧栏底部「多设备」入口一键切换，或快捷键 `Cmd/Ctrl + Shift + M` 快速切换；入口不再悬浮遮挡会话头。
 
-### 3. Git Remote 自动工作区聚合
-- **自动识别同一仓库**：默认读取本地与远端工作区的 Git remote（支持标准 `.git/config` 与 `git worktree` 的 `.git` 指针文件），将不同格式 URL（如 `git@github.com:org/repo.git`、`https://github.com/org/repo.git`、`ssh://git@.../org/repo`）归一化为统一仓库标识（`github.com/org/repo`），自动将多台设备上的对应目录合并为一个**逻辑工作区（Logical Workspace）**。
+### 3. Git Remote 工作区聚合与手动跨设备匹配
+- **已登记仓库自动分组（只读）**：对每台设备上**已经登记**的工作区读取 `remote.origin.url`（支持标准 `.git/config` 与 `git worktree` 的 `.git` 指针文件），把不同格式 URL（`git@github.com:org/repo.git`、`https://github.com/org/repo.git`、`ssh://git@.../org/repo`）归一化为 `github.com/org/repo`，同一仓库在多台设备上的目录合并为一个**逻辑工作区（Logical Workspace）**。这一步只读已登记路径，不扫描磁盘，也不会新建任何工作区。
+- **手动跨设备匹配（唯一会扫盘的动作）**：在「设置 → 多设备」点击「开始匹配」后，插件才执行一次任务：
+  1. 读取各设备已登记工作区的 `origin`，找出「至少一台设备有、另一台设备没有」的仓库；
+  2. 在每台设备上按「用户主目录 + 已登记工作区的父目录」向下扫描（跳过隐藏目录、`node_modules`、构建产物；`.git` 是文件的 worktree 视为主项目的成员，不单独登记）；
+  3. 找到同一 `origin` 且尚未登记时，调用该设备自己的 `workspace.create` 登记这个已有目录。
+  - 扫描与匹配**永远不会自动触发**，也不会克隆、同步或修改任何项目文件；只登记磁盘上已有的目录。
+  - 任务执行期间持续显示当前设备、当前项目与已处理数量，可随时停止；完成后的结果（新建 / 未找到 / 已有 / 失败原因）持久化，重启后仍会显示上次执行状态。
+- **设备标识**：项目标题不再带 `[设备名]` 前缀。项目行右侧显示连接状态圆点（绿色已连接、黄色连接中、灰色离线）与设备标签：只有一台设备时显示设备名，多台时显示「N个设备」，悬停可看完整设备列表。
 - **灵活的手动控制**：
-  - 可随时关闭自动聚合，或将特定设备的目录从自动聚合中拆分/恢复。
+  - 可关闭「相同 Git 仓库自动分组」（关闭后各设备工作区分别展示，不影响手动匹配出的登记结果）。
+  - 可将特定设备的目录从分组中拆分/恢复。
   - 支持创建自定义手动聚合规则（将任意跨设备目录绑定为一个逻辑工作区）。
   - 支持为每个逻辑工作区指定点击 `+ 新建会话` 时的默认目标设备。
 - **严格边界**：仅聚合工作区视图与会话列表，**绝不触碰、修改或同步任何项目文件**。
@@ -99,7 +107,7 @@ dsh plugin --profile desktop add file:$(pwd)
       aggregatedMode: true    # 启用聚合模式网关
       nativeMode: true        # 启用原生模式本地反向代理与保活视图
       sshTunnel: true         # 启用 SSH 隧道托管
-      autoGitAggregate: true  # 默认开启 Git Remote 自动工作区聚合
+      autoGitAggregate: true  # 默认开启「已登记仓库」的只读分组（不扫盘）
       directTransport: false  # 高级兼容：HTTP(S) 直连；默认关闭，UI 不提供
 ```
 

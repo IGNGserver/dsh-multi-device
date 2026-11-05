@@ -119,6 +119,11 @@ declare class MultiDeviceClientStore {
         ok: boolean;
         error?: string;
     }>;
+    startGitMatch(): Promise<{
+        ok: boolean;
+        error?: string;
+    }>;
+    cancelGitMatch(): Promise<boolean>;
     setPreferredDevice(logicalWorkspaceId: string, deviceId: DeviceId): Promise<void>;
 }
 export declare const clientStore: MultiDeviceClientStore;

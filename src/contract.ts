@@ -256,7 +256,10 @@ export interface ManualWorkspaceRule {
 export interface WorkspaceAggregationConfig {
   /** Whether to automatically merge workspaces across devices that share the same Git remote. Default: true. */
   readonly autoGitAggregate: boolean
-  /** Whether unmatched remote workspaces should be prefixed with `[DeviceName]`. Default: true. */
+  /**
+   * Legacy. Device identity is rendered as a status dot plus a device label,
+   * never as a `[DeviceName]` title prefix. Kept so older config files still parse.
+   */
   readonly prefixUnmatchedWithDevice: boolean
   /** Member keys (`<deviceId>:<path>`) explicitly excluded from automatic Git aggregation. */
   readonly excludedMemberKeys: readonly string[]
@@ -306,6 +309,63 @@ export interface SessionOriginMetadata {
   readonly nativeUrl?: string
 }
 
+/** Phase of a manual Git match run; the UI localizes the label. */
+export type GitMatchPhase = 'discovering' | 'scanning' | 'creating' | 'finished'
+
+/** Status of a manual Git match run. */
+export type GitMatchStatus = 'idle' | 'running' | 'completed' | 'cancelled' | 'failed'
+
+/** One workspace registered by a manual Git match run. */
+export interface GitMatchCreatedWorkspace {
+  readonly path: string
+  readonly gitRemote: string
+  /** Display title the remote workspace was created with. */
+  readonly title: string
+  /** Device that already had this repository and seeded the match. */
+  readonly sourceDeviceName: string
+}
+
+/** Per-device outcome of a manual Git match run. */
+export interface GitMatchDeviceReport {
+  readonly deviceId: DeviceId
+  readonly deviceName: string
+  readonly state: DeviceConnectionState
+  /** Repositories found on disk during the scan. */
+  readonly scanned: number
+  readonly created: readonly GitMatchCreatedWorkspace[]
+  /** Seeds this device already had registered. */
+  readonly alreadyTracked: number
+  /** Seeds not found on this device. */
+  readonly notFound: number
+  readonly error?: string
+}
+
+/**
+ * Manual Git match run. Never starts on its own: only `startGitMatch` runs it.
+ * `startedAt` / `finishedAt` plus `reports` are persisted so the last outcome
+ * survives a reload.
+ */
+export interface GitMatchRun {
+  readonly status: GitMatchStatus
+  readonly startedAt?: number
+  readonly finishedAt?: number
+  readonly phase?: GitMatchPhase
+  readonly currentDeviceId?: DeviceId
+  readonly currentDeviceName?: string
+  /** Repository being processed (`github.com/org/repo`). */
+  readonly currentProject?: string
+  readonly totalDevices: number
+  readonly processedDevices: number
+  /** Distinct repositories that at least one device was missing. */
+  readonly totalProjects: number
+  readonly processedProjects: number
+  readonly createdCount: number
+  readonly alreadyTrackedCount: number
+  readonly notFoundCount: number
+  readonly reports: readonly GitMatchDeviceReport[]
+  readonly error?: string
+}
+
 /** Complete Hub snapshot returned to the Client UI. */
 export interface MultiDeviceSnapshot {
   readonly revision: number
@@ -320,6 +380,8 @@ export interface MultiDeviceSnapshot {
   readonly logicalWorkspaces: readonly LogicalWorkspaceView[]
   readonly allPhysicalWorkspaces: readonly WorkspaceMemberRef[]
   readonly sessionOrigins: Readonly<Record<string, SessionOriginMetadata>>
+  /** Manual Git match progress and last outcome (never triggered automatically). */
+  readonly gitMatch: GitMatchRun
 }
 
 // ============================================================================

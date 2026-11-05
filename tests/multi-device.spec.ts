@@ -28,6 +28,7 @@ import {
   encodeRemoteEventId,
   encodeRemoteSessionId,
   encodeRemoteWorkspaceId,
+  type GitMatchRun,
   LOCAL_DEVICE_ID,
   normalizeGitRemote,
   normalizeWorkspacePath,
@@ -50,6 +51,20 @@ import {
   parseGitConfigRemoteUrl,
   WorkspaceAggregator,
 } from '../src/host/git-aggregator.ts'
+import {
+  buildGitScanScript,
+  deriveScanRoots,
+  parseGitScanOutput,
+  primaryRepoByOrigin,
+  type ScannedRepository,
+  scanLocalGitRepos,
+} from '../src/host/git-scan.ts'
+import {
+  createIdleGitMatch,
+  GitMatchRunner,
+  type GitMatchContext,
+  titleFromPath,
+} from '../src/host/git-match.ts'
 import {
   deviceCatalogGroupId,
   installAggregatedGateway02,
@@ -74,6 +89,7 @@ import {
 import {
   assertLoopbackForward,
   buildSystemSshArgs as buildTunnelSshArgs,
+  execSshCommand,
   hostKeyMatchesKnownHostsLine,
   setSshSpawn,
 } from '../src/host/tunnel.ts'
@@ -452,7 +468,8 @@ describe('4. Git Remote Discovery & WorkspaceAggregator', () => {
     ])
 
     const singleMac = logicalWorkspaces.find(w => w.kind === 'single')!
-    expect(singleMac.title).toBe('[mac-mini] other-tool')
+    // Device identity is a badge now, never a title prefix.
+    expect(singleMac.title).toBe('other-tool')
 
     // Excluding a member splits the auto-merged workspace back into single workspaces
     agg.setMemberExcluded(`${devUbuntu}:/home/ubuntu/platform`, true)
@@ -1927,3 +1944,272 @@ describe('8. Native Settings UI & Streamlined Client State Helpers', () => {
   })
 })
 
+describe('9. Manual Git match: scan, register, and never run on its own', () => {
+  const sshTransport = { kind: 'ssh' as const, host: 'example.invalid', remotePort: 3080 }
+
+  it('builds a scan script that prunes caches and hidden dirs and reads origin only', () => {
+    const script = buildGitScanScript(['/home/dev', "/home/o'brien"], 4)
+    expect(script).toContain("'/home/dev'")
+    expect(script).toContain("'/home/o'\\''brien'")
+    expect(script).toContain('-maxdepth 5')
+    expect(script).toContain("-name 'node_modules'")
+    expect(script).toContain("-name '.*' ! -name '.git' -prune")
+    expect(script).toContain("-type d -name '.git' -print")
+    expect(script).toContain('remote.origin.url')
+    // No first-remote fallback: a `nas` backup remote must never define identity.
+    expect(script).not.toContain('get-regexp')
+  })
+
+  it('derives scan roots from the home plus registered workspace parents', () => {
+    const roots = deriveScanRoots('/home/u', ['/home/u/dev/组A/repo', '/home/u/dev/repo-two'])
+    expect(roots).toEqual([
+      '/home/u',
+      '/home/u/dev',
+      '/home/u/dev/组A',
+    ])
+  })
+
+  it('parses remote scan output into normalized repositories', () => {
+    const stdout = [
+      '__DSH_REPO__\t/home/u/dev/组A/repo-one\tgit@github.com:ORG/Repo-One.git',
+      '__DSH_REPO__\t/home/u/dev/repo-two\thttps://github.com/org/repo-two',
+      'unstamped noise',
+      '__DSH_REPO__\t\t',
+      '__DSH_REPO__\t/home/u/dev/local-only\tfile:///tmp/not-a-remote',
+    ].join('\n')
+    const repos = parseGitScanOutput(stdout)
+    const byRemote = new Map(repos.map(repo => [repo.gitRemote, repo]))
+    expect(byRemote.get('github.com/org/repo-one')?.path).toBe('/home/u/dev/组A/repo-one')
+    expect(byRemote.get('github.com/org/repo-two')?.path).toBe('/home/u/dev/repo-two')
+    expect(byRemote.size).toBe(2)
+  })
+
+  it('scans grouped repositories, skips worktrees, hidden dirs and node_modules', () => {
+    const root = makeTempDir('dsh-md-scan-')
+    const writeRepo = (relative: string, origin: string): void => {
+      const repo = join(root, relative)
+      mkdirSync(join(repo, '.git'), { recursive: true })
+      writeFileSync(join(repo, '.git', 'config'), `[remote "origin"]\n\turl = ${origin}\n`)
+    }
+
+    writeRepo('组A/repo-one', 'git@github.com:org/repo-one.git')
+    writeRepo('组B/repo-two', 'https://github.com/org/repo-two')
+    // A nested dependency repository must never be a project.
+    writeRepo('组A/repo-one/node_modules/dep', 'git@github.com:dep/dep.git')
+    // A worktree pointer is a member of its main project, not a project.
+    mkdirSync(join(root, 'repo-one-wt'), { recursive: true })
+    writeFileSync(join(root, 'repo-one-wt', '.git'), 'gitdir: /tmp/main/.git/worktrees/wt\n')
+    // Hidden directories are tool state (`.wt`, caches), never projects.
+    writeRepo('.hidden/repo-four', 'git@github.com:org/repo-four.git')
+
+    const repos = scanLocalGitRepos([root], { maxDepth: 4 })
+    expect(repos.map(repo => repo.gitRemote).sort()).toEqual([
+      'github.com/org/repo-one',
+      'github.com/org/repo-two',
+    ])
+  })
+
+  it('keeps the shortest path per origin', () => {
+    const repos: ScannedRepository[] = [
+      { path: '/a/dev/deep/repo', rawOrigin: 'git@github.com:org/repo.git', gitRemote: 'github.com/org/repo' },
+      { path: '/a/dev/repo', rawOrigin: 'https://github.com/org/repo.git', gitRemote: 'github.com/org/repo' },
+    ]
+    expect(primaryRepoByOrigin(repos).get('github.com/org/repo')?.path).toBe('/a/dev/repo')
+  })
+
+  it('registers seeds on devices that were missing them and reports the rest', async () => {
+    const created: { deviceId: string; path: string }[] = []
+    const noted: { deviceId: string; path: string; raw: string }[] = []
+    const progress: GitMatchRun[] = []
+    const localRepo = makeTempDir('dsh-md-match-')
+
+    const runner = new GitMatchRunner({
+      devices: () => [
+        {
+          deviceId: LOCAL_DEVICE_ID,
+          deviceName: 'Local',
+          state: 'connected',
+          local: true,
+          home: localRepo,
+          workspacePaths: [],
+        },
+        {
+          deviceId: DeviceId('dev-a'),
+          deviceName: 'ubuntu-dev',
+          state: 'connected',
+          local: false,
+          home: '/home/a',
+          workspacePaths: ['/home/a/dev/proj-one'],
+        },
+        {
+          deviceId: DeviceId('dev-b'),
+          deviceName: 'macos-dev',
+          state: 'connected',
+          local: false,
+          home: '/Users/b',
+          workspacePaths: ['/Users/b/dev/proj-two'],
+        },
+      ],
+      discoverRemoteOrigins: async (deviceId) => new Map(
+        deviceId === 'dev-a'
+          ? [['/home/a/dev/proj-one', 'git@github.com:org/proj-one.git']]
+          : [['/Users/b/dev/proj-two', 'https://github.com/org/proj-two.git']],
+      ),
+      scanRemoteRepos: async (deviceId) => ({
+        ok: true,
+        repos: deviceId === 'dev-a'
+          ? [{ path: '/home/a/dev/proj-two', rawOrigin: 'git@github.com:org/proj-two.git', gitRemote: 'github.com/org/proj-two' }]
+          : [{ path: '/Users/b/dev/proj-one', rawOrigin: 'https://github.com/org/proj-one.git', gitRemote: 'github.com/org/proj-one' }],
+      }),
+      scanLocalRepos: () => [],
+      createLocalWorkspace: async () => ({ ok: true }),
+      createRemoteWorkspace: async (deviceId, path) => {
+        created.push({ deviceId, path })
+        return { ok: true }
+      },
+      noteOrigin: (deviceId, path, raw) => {
+        noted.push({ deviceId, path, raw })
+      },
+      localHome: () => localRepo,
+      onProgress: run => {
+        progress.push(run)
+      },
+    })
+
+    const final = await runner.execute()
+    expect(final.status).toBe('completed')
+    expect(final.createdCount).toBe(2)
+    expect(final.alreadyTrackedCount).toBe(2)
+    expect(final.notFoundCount).toBe(2)
+    expect(final.reports).toHaveLength(3)
+    expect(created).toEqual(expect.arrayContaining([
+      { deviceId: 'dev-a', path: '/home/a/dev/proj-two' },
+      { deviceId: 'dev-b', path: '/Users/b/dev/proj-one' },
+    ]))
+    expect(noted).toEqual(expect.arrayContaining([
+      { deviceId: 'dev-b', path: '/Users/b/dev/proj-one', raw: 'https://github.com/org/proj-one.git' },
+    ]))
+    expect(progress[0]?.status).toBe('running')
+    expect(progress.some(run => run.phase === 'scanning')).toBe(true)
+    expect(progress.at(-1)?.phase).toBe('finished')
+    expect(final.finishedAt).toBeTypeOf('number')
+    expect(runner.running).toBe(false)
+  })
+
+  it('reports an unreachable device instead of pretending the scan succeeded', async () => {
+    const progress: GitMatchRun[] = []
+    const runner = new GitMatchRunner({
+      devices: () => [
+        {
+          deviceId: LOCAL_DEVICE_ID,
+          deviceName: 'Local',
+          state: 'connected',
+          local: true,
+          home: '/home/u',
+          workspacePaths: ['/home/u/dev/repo'],
+        },
+        {
+          deviceId: DeviceId('dev-offline'),
+          deviceName: 'arch-dev',
+          state: 'error',
+          local: false,
+          workspacePaths: [],
+        },
+      ],
+      discoverRemoteOrigins: async () => new Map(),
+      scanRemoteRepos: async () => ({ ok: false, error: 'ssh: connect to host arch-dev: No route to host' }),
+      scanLocalRepos: () => [],
+      createLocalWorkspace: async () => ({ ok: true }),
+      createRemoteWorkspace: async () => ({ ok: true }),
+      noteOrigin: () => {},
+      localHome: () => '/home/u',
+      onProgress: run => {
+        progress.push(run)
+      },
+      now: () => 1_700_000_000_000,
+    })
+
+    const final = await runner.execute()
+    expect(final.status).toBe('completed')
+    expect(final.createdCount).toBe(0)
+    const offline = final.reports.find(report => report.deviceId === 'dev-offline')
+    expect(offline?.error).toContain('Device is not connected')
+    expect(progress.length).toBeGreaterThan(0)
+  })
+
+  it('stops between steps when cancelled', async () => {
+    let runner: GitMatchRunner
+    const progress: GitMatchRun[] = []
+    runner = new GitMatchRunner({
+      devices: () => [
+        { deviceId: LOCAL_DEVICE_ID, deviceName: 'Local', state: 'connected', local: true, home: '/home/u', workspacePaths: [] },
+        { deviceId: DeviceId('dev-a'), deviceName: 'ubuntu-dev', state: 'connected', local: false, workspacePaths: [] },
+      ],
+      discoverRemoteOrigins: async () => new Map(),
+      scanRemoteRepos: async () => ({ ok: true, repos: [] }),
+      scanLocalRepos: () => [],
+      createLocalWorkspace: async () => ({ ok: true }),
+      createRemoteWorkspace: async () => ({ ok: true }),
+      noteOrigin: () => {},
+      localHome: () => '/home/u',
+      onProgress: run => {
+        progress.push(run)
+        if (run.phase === 'scanning') runner.cancel()
+      },
+    })
+
+    const final = await runner.execute()
+    expect(final.status).toBe('cancelled')
+    expect(final.phase).toBe('finished')
+    expect(progress.at(-1)?.status).toBe('cancelled')
+  })
+
+  it('starts idle so nothing scans or registers before the user clicks', () => {
+    expect(createIdleGitMatch()).toMatchObject({
+      status: 'idle',
+      createdCount: 0,
+      totalDevices: 0,
+      totalProjects: 0,
+      reports: [],
+    })
+    expect(titleFromPath('/home/u/dev/组A/repo-one')).toBe('repo-one')
+  })
+
+  it('passes the resolved identity to one-shot SSH commands', async () => {
+    const calls: { command: string; args: string[] }[] = []
+    setSshSpawn((command, args) => {
+      calls.push({ command, args: [...args] })
+      const stdout = new EventEmitter()
+      const stderr = new EventEmitter()
+      const proc = new EventEmitter() as EventEmitter & {
+        stdout: EventEmitter
+        stderr: EventEmitter
+        stdin: null
+        kill: () => boolean
+      }
+      proc.stdout = stdout
+      proc.stderr = stderr
+      proc.stdin = null
+      proc.kill = () => true
+      queueMicrotask(() => {
+        stdout.emit('data', Buffer.from('__DSH_GIT_0__\tgit@github.com:org/repo.git\n'))
+        proc.emit('close', 0)
+      })
+      return proc as never
+    })
+    try {
+      const res = await execSshCommand(
+        { ...sshTransport, host: 'macos-dev', privateKeyPath: '~/.ssh/macos-dev' },
+        'git -C /Users/b/dev/repo config --get remote.origin.url',
+        1000,
+      )
+      expect(res.ok).toBe(true)
+      const args = calls[0]?.args ?? []
+      expect(args).toContain('-i')
+      expect(args).toContain('IdentitiesOnly=yes')
+      expect(args.at(-1)).toContain('remote.origin.url')
+    } finally {
+      setSshSpawn(null)
+    }
+  })
+})

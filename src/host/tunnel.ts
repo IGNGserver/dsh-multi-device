@@ -185,11 +185,15 @@ export async function execSshCommand(
   if (explicitPort !== undefined) args.push('-p', String(explicitPort))
   const explicitUser = transport.username?.trim() || parsedSpec.username
   if (explicitUser !== undefined && explicitUser !== '') args.push('-l', explicitUser)
-  if (transport.privateKeyPath !== undefined && transport.privateKeyPath.trim() !== '') {
-    args.push('-i', expandHomePath(transport.privateKeyPath.trim()))
+  const identity = transport.privateKeyPath?.trim() || resolved.identityFiles[0]
+  if (identity !== undefined && identity !== '') {
+    args.push('-i', expandHomePath(identity))
+    args.push('-o', 'IdentitiesOnly=yes')
   }
   if (transport.proxyJump !== undefined && transport.proxyJump.trim() !== '') {
     args.push('-J', transport.proxyJump.trim())
+  } else if (resolved.proxyJump !== undefined && resolved.proxyJump !== '') {
+    args.push('-J', resolved.proxyJump)
   }
   args.push(parsedSpec.host, command)
 

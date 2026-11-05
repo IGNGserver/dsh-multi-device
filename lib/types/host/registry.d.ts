@@ -1,4 +1,4 @@
-import { type DeviceAuthState, type DeviceConfig, DeviceId, type DeviceView, type MultiDeviceSnapshot, type RemoteSessionCreateInput, type RemoteWorkspaceCreateInput, type SshKeyEntry, type UpsertDeviceInput, type WorkspaceAggregationConfig } from '../contract.ts';
+import { type DeviceAuthState, type DeviceConfig, DeviceId, type DeviceView, type GitMatchRun, type MultiDeviceSnapshot, type RemoteSessionCreateInput, type RemoteWorkspaceCreateInput, type SshKeyEntry, type UpsertDeviceInput, type WorkspaceAggregationConfig } from '../contract.ts';
 import { DeviceAuthManager } from './auth.ts';
 import { type PhysicalWorkspaceInput, WorkspaceAggregator } from './git-aggregator.ts';
 import { NativeProxyManager } from './native-proxy.ts';
@@ -30,6 +30,9 @@ export declare class DeviceRegistry {
     private readonly projectionListeners;
     private readonly workspaceListeners;
     private revision;
+    private gitMatchRunner;
+    private gitMatchRun;
+    private localWorkspaceCreator;
     private aggregatedGatewayActive;
     private aggregatedGatewayError;
     private nativeProxyActive;
@@ -128,6 +131,25 @@ export declare class DeviceRegistry {
         error: string;
     }>;
     updateAggregationConfig(patch: Partial<WorkspaceAggregationConfig>): WorkspaceAggregationConfig;
+    /** Wire the local Workspace controller so a match can register local folders. */
+    setLocalWorkspaceCreator(creator: (path: string) => Promise<void>): void;
+    /** Latest manual Git match state (running progress or the last outcome). */
+    gitMatch(): GitMatchRun;
+    /**
+     * Start the manual Git match run. This is the only trigger: nothing in the
+     * device/session streams starts a scan or registers a workspace.
+     */
+    startGitMatch(): {
+        ok: true;
+    } | {
+        ok: false;
+        error: string;
+    };
+    /** Ask the running manual Git match to stop. */
+    cancelGitMatch(): boolean;
+    private gitMatchTargets;
+    private discoverRemoteOrigins;
+    private scanRemoteRepos;
     /** Build the complete snapshot for the Client UI and Aggregated Gateway. */
     snapshot(): MultiDeviceSnapshot;
     /** Resolve which remote client owns a given namespaced session ID. */

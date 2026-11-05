@@ -137,6 +137,8 @@ export interface ControlPlaneRequest {
     | 'setMemberExcluded'
     | 'setPreferredDevice'
     | 'setCustomTitle'
+    | 'startGitMatch'
+    | 'cancelGitMatch'
   readonly payload?: Record<string, unknown>
 }
 
@@ -255,6 +257,17 @@ export class MultiDeviceControlPlane {
           this.registry.aggregator.setPreferredDevice(logicalWorkspaceId, deviceId)
           this.registry.saveToDisk()
           return { ok: true, value: this.registry.snapshot() }
+        }
+
+        case 'startGitMatch': {
+          const res = this.registry.startGitMatch()
+          if (!res.ok) return res
+          return { ok: true, value: { gitMatch: this.registry.gitMatch(), snapshot: this.registry.snapshot() } }
+        }
+
+        case 'cancelGitMatch': {
+          const cancelled = this.registry.cancelGitMatch()
+          return { ok: true, value: { cancelled, gitMatch: this.registry.gitMatch() } }
         }
 
         case 'setCustomTitle': {

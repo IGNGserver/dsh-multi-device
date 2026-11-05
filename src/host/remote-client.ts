@@ -818,7 +818,7 @@ export class RemoteDeviceClient {
           : []
         this.callbacks.onStateChanged(this.id)
         this.callbacks.onWorkspacesChanged(this.id)
-        void this.probeNewWorkspaceGitRemotes()
+        void this.refreshRegisteredWorkspaceOrigins()
         continue
       }
       if (frame.type === 'upsert' && isRecord(frame.workspace)) {
@@ -827,7 +827,7 @@ export class RemoteDeviceClient {
         if (idx === -1) this.workspaces = [ws, ...this.workspaces]
         else this.workspaces = this.workspaces.map((w, i) => (i === idx ? ws : w))
         this.callbacks.onWorkspacesChanged(this.id)
-        void this.probeNewWorkspaceGitRemotes()
+        void this.refreshRegisteredWorkspaceOrigins()
       } else if (frame.type === 'remove' && typeof frame.workspaceId === 'string') {
         this.workspaces = this.workspaces.filter(w => w.workspaceId !== frame.workspaceId)
         this.callbacks.onWorkspacesChanged(this.id)
@@ -890,7 +890,15 @@ export class RemoteDeviceClient {
     }
   }
 
-  private async probeNewWorkspaceGitRemotes(): Promise<void> {
+  /**
+   * Read `remote.origin.url` for workspaces that are already registered on this
+   * device, so devices that both registered the same repository keep grouping.
+   *
+   * This is deliberately not a filesystem scan and it never registers anything:
+   * only the paths DSH already lists are read. Discovering projects that exist
+   * on disk but are not registered happens solely in the manual Git match.
+   */
+  private async refreshRegisteredWorkspaceOrigins(): Promise<void> {
     if (this.config.transport.kind !== 'ssh') return
     const now = Date.now()
     const pendingPaths = this.workspaces
@@ -943,7 +951,7 @@ export class RemoteDeviceClient {
         this.archivedSessionIds = wRes.value.archivedSessionIds as string[]
       }
       this.callbacks.onWorkspacesChanged(this.id)
-      void this.probeNewWorkspaceGitRemotes()
+      void this.refreshRegisteredWorkspaceOrigins()
     }
   }
 

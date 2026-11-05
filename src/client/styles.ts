@@ -14,6 +14,128 @@
 const STYLE_TAG_ID = 'dsh-multi-device/styles.css'
 
 const CSS_TEXT = `
+/* Manual Git match block */
+.dsh-md-gitmatch {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px 0;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
+}
+
+.dsh-md-gitmatch-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+}
+
+.dsh-md-gitmatch-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dsh-md-gitmatch-progress,
+.dsh-md-gitmatch-result {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.dsh-md-gitmatch-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.dsh-md-gitmatch-phase,
+.dsh-md-gitmatch-status-ok {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.dsh-md-gitmatch-status-error {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.dsh-md-gitmatch-detail {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.dsh-md-gitmatch-created {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dsh-md-gitmatch-created li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.dsh-md-gitmatch-path {
+  color: var(--dsw-alias-label-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsh-md-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Sidebar project row device badge (dot + device name / device count) */
+.dsh-md-project-device {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  margin-left: 4px;
+  max-width: 110px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsh-md-project-device-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsh-md-project-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--dsw-alias-state-success-primary);
+}
+
+.dsh-md-project-dot[data-state='pending'] {
+  background: var(--dsw-alias-state-warn-primary);
+}
+
+.dsh-md-project-dot[data-state='offline'] {
+  background: var(--dsw-alias-state-idle-primary);
+}
+
 /* Settings Section Layout (aligned with @deepseek-ai/dsh-client-ui-settings-models & general) */
 .dsh-md-section {
   width: 100%;
