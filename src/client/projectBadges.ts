@@ -14,7 +14,12 @@
  *
  * @module dsh-multi-device/client/projectBadges
  */
-import { LOCAL_DEVICE_ID, type LogicalWorkspaceView, type MultiDeviceSnapshot } from '../contract.ts'
+import {
+  LOCAL_DEVICE_ID,
+  type DisplayMode,
+  type LogicalWorkspaceView,
+  type MultiDeviceSnapshot,
+} from '../contract.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
 import { clientStore, deviceStateToDotState } from './state.ts'
 
@@ -26,6 +31,15 @@ type DotTone = 'ok' | 'pending' | 'offline'
 
 /** Translate function shape the host passes into the client plugin. */
 type Translate = (key: MultiDeviceLocaleKey) => string
+
+/**
+ * Device labels belong to the aggregated sidebar only. Native Mode's 本机 tab is
+ * the unmodified local DSH surface, so a row decorated there would be an
+ * aggregation artifact leaking into a supposedly local page.
+ */
+export function shouldDecorateProjectRows(mode: DisplayMode | undefined): boolean {
+  return mode === 'aggregated'
+}
 
 function dotTone(snapshot: MultiDeviceSnapshot, workspace: LogicalWorkspaceView): DotTone {
   let tone: DotTone = 'ok'
@@ -86,7 +100,15 @@ function mountBadge(row: Element): HTMLSpanElement {
 
 /** Reconcile every project row against the current snapshot. */
 function syncRows(t: Translate): void {
-  const snapshot = clientStore.getSnapshot().snapshot
+  const state = clientStore.getSnapshot()
+  if (!shouldDecorateProjectRows(state.displayMode)) {
+    // The Host filters Native Mode data, but an aggressive DOM reconciler must
+    // also erase badges when the snapshot flips to `native` while rows stay
+    // mounted (mode switching keeps the local page alive).
+    for (const badge of document.querySelectorAll(`[${BADGE_ATTR}]`)) badge.remove()
+    return
+  }
+  const snapshot = state.snapshot
   const byId = new Map(snapshot.logicalWorkspaces.map(workspace => [workspace.logicalWorkspaceId, workspace]))
 
   for (const row of document.querySelectorAll('[data-row-key^="workspace:"]')) {

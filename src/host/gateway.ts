@@ -156,6 +156,59 @@ export function readLocalPhysicalWorkspaces(
   }
 }
 
+/** Options for the aggregated workspace stream. */
+export interface AggregatedGatewayOptions {
+  /**
+   * Emit the DSH 0.2.1+ `replace` frame for workspace-set changes instead of
+   * `remove`. The Client WorkspaceModel tombstones every removed id for the
+   * lifetime of the page, so a later `upsert` of a workspace that merely
+   * became invisible (Native Mode) or temporarily disappeared can never
+   * resurrect it. `replace` swaps the whole projection without tombstones.
+   */
+  readonly workspaceReplaceFrames?: boolean | (() => boolean)
+}
+
+/** One workspace row carried by the aggregated follow stream. */
+interface WorkspaceFollowView {
+  readonly workspaceId: string
+  readonly path: string
+  readonly title: string
+  readonly sessionIds: readonly string[]
+  readonly createdAt: string
+  readonly updatedAt: string
+  readonly [key: string]: unknown
+}
+
+/** Complete aggregated workspace projection carried by a baseline/replace. */
+interface WorkspaceFollowState {
+  readonly items: readonly WorkspaceFollowView[]
+  readonly archivedSessionIds: readonly string[]
+  readonly pinnedSessionIds: readonly string[]
+}
+
+/**
+ * Whether the bundled Client WorkspaceModel understands an incremental
+ * `replace` frame. DSH 0.2.0 only accepts it as the opening snapshot; the
+ * client gained the incremental case in 0.2.1-rc.1.
+ *
+ * @param version - Host/client release version, e.g. `0.2.2-rc.1`.
+ * @returns true when emitting `replace` after `baseline` is safe.
+ */
+export function supportsWorkspaceReplaceFrames(version: string | undefined): boolean {
+  if (version === undefined) return false
+  const match = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(version.trim())
+  if (match === null) return false
+  const major = Number(match[1])
+  const minor = Number(match[2])
+  const patch = Number(match[3])
+  if (major !== 0 || minor !== 2) return major > 0 || minor > 2
+  if (patch !== 1) return patch > 1
+  const pre = match[4]
+  if (pre === undefined) return true
+  const rc = /^rc\.(\d+)$/.exec(pre)
+  return rc !== null && Number(rc[1]) >= 1
+}
+
 /**
  * Install the DSH 0.2 Aggregated Mode service wrappers and return a disposer
  * that restores all original methods.
@@ -166,8 +219,13 @@ export function installAggregatedGateway02(
   workspaceController: WorkspaceControllerLike,
   typertGateway: TypertGatewayLike,
   workspaceRegistry?: WorkspaceRegistryLike,
+  options: AggregatedGatewayOptions = {},
 ): () => void {
   const disposers: Array<() => void> = []
+  const supportsReplaceFrames = (): boolean =>
+    typeof options.workspaceReplaceFrames === 'function'
+      ? options.workspaceReplaceFrames()
+      : options.workspaceReplaceFrames === true
 
   const patchMethod = <T extends object, K extends keyof T>(target: T, key: K, replacement: T[K]): void => {
     const original = target[key]
@@ -590,6 +648,11 @@ export function installAggregatedGateway02(
           registry.saveToDisk()
         }
       }
+      // The unary reply only tells the Client to drop the old row. Publish the
+      // split single-workspace rows immediately; otherwise every Session that
+      // belonged to the removed logical Workspace falls into Ungrouped until
+      // an unrelated workspace change happens to wake the follow stream.
+      registry.refreshWorkspaceView()
       return { deleted: true as const }
     }
     const decodedRemote = decodeRemoteWorkspaceId(request.workspaceId)
@@ -753,7 +816,13 @@ export function installAggregatedGateway02(
   })
 
   patchMethod(workspaceController, 'follow', (signal) => {
-    return multiplexWorkspaceFollow(registry, workspaceRegistry, origWorkspaceFollow(signal), signal)
+    return multiplexWorkspaceFollow(
+      registry,
+      workspaceRegistry,
+      origWorkspaceFollow(signal),
+      signal,
+      supportsReplaceFrames,
+    )
   })
 
   // 8. TypertGateway `$events` stream & `$events/result` waterfall response routing
@@ -888,7 +957,7 @@ function logicalToWorkspaceView(lws: {
   readonly sessionIds: readonly string[]
   readonly createdAt: string
   readonly updatedAt: string
-}): Record<string, unknown> {
+}): WorkspaceFollowView {
   return {
     workspaceId: lws.logicalWorkspaceId,
     path: lws.targetPath,
@@ -995,6 +1064,7 @@ async function* multiplexWorkspaceFollow(
   workspaceRegistry: WorkspaceRegistryLike | undefined,
   localStream: AsyncIterable<Record<string, unknown>>,
   signal: AbortSignal,
+  workspaceReplaceFrames: () => boolean = () => false,
 ): AsyncIterable<Record<string, unknown>> {
   const queue = new BoundedStreamQueue<Record<string, unknown>>()
   let baselineSent = false
@@ -1007,12 +1077,12 @@ async function* multiplexWorkspaceFollow(
     queue.push(item)
   }
 
-  const computeCurrentState = () => {
+  const computeCurrentState = (): WorkspaceFollowState => {
     // Native Mode's local tab is the normal local DSH surface. Keep the
     // Host's own workspace registry and archive/pin sets untouched; remote
     // logical workspaces must disappear (and reappear on the way back).
     if (!registry.isAggregatedMode()) {
-      const localItems = (workspaceRegistry?.list() ?? []).map(workspace => ({
+      const localItems: WorkspaceFollowView[] = (workspaceRegistry?.list() ?? []).map(workspace => ({
         workspaceId: workspace.id,
         path: workspace.path,
         title: workspace.title,
@@ -1033,21 +1103,55 @@ async function* multiplexWorkspaceFollow(
     return { items, archivedSessionIds, pinnedSessionIds }
   }
 
+  const fingerprintOf = (item: WorkspaceFollowView): string => JSON.stringify({
+    title: item.title,
+    path: item.path,
+    sessionIds: item.sessionIds,
+  })
+
+  const installPrevState = (state: WorkspaceFollowState): void => {
+    prevById = new Map(state.items.map(item => [item.workspaceId, fingerprintOf(item)]))
+    prevOrder = state.items.map(item => item.workspaceId).join('\0')
+    prevArchived = state.archivedSessionIds.join('\0')
+    prevPinned = state.pinnedSessionIds.join('\0')
+  }
+
   const syncIncrementalDiff = (): void => {
     if (!baselineSent) return
-    const { items, archivedSessionIds, pinnedSessionIds } = computeCurrentState()
-    const nextById = new Map<string, string>()
+    const state = computeCurrentState()
+    const replaceFrames = workspaceReplaceFrames()
+    const nextIds = new Set(state.items.map(item => item.workspaceId))
+    const setChanged = nextIds.size !== prevById.size
+      || [...nextIds].some(id => !prevById.has(id))
+    const orderStr = state.items.map(item => item.workspaceId).join('\0')
+    const archivedStr = state.archivedSessionIds.join('\0')
+    const pinnedStr = state.pinnedSessionIds.join('\0')
 
-    for (const item of items) {
-      const id = String(item.workspaceId)
-      // Bump updatedAt to now when membership or title changes so ClientWorkspaceModel.upsert accepts it
-      const fingerprint = JSON.stringify({
-        title: item.title,
-        path: item.path,
-        sessionIds: item.sessionIds,
+    // A `remove` is a tombstone in ClientWorkspaceModel: that id can never be
+    // upserted again for the rest of the page generation. Mode filtering and
+    // external workspace organizers legitimately remove and later restore
+    // rows, so use the full projection swap (`replace`) when the id set
+    // changes. DSH 0.2.0 clients do not understand an incremental `replace`,
+    // hence the version-gated fallback.
+    if (replaceFrames && setChanged) {
+      push({
+        type: 'replace',
+        value: {
+          items: state.items,
+          archivedSessionIds: state.archivedSessionIds,
+          pinnedSessionIds: state.pinnedSessionIds,
+        },
       })
-      nextById.set(id, fingerprint)
-      if (prevById.get(id) !== fingerprint) {
+      installPrevState(state)
+      return
+    }
+
+    const nextById = new Map<string, string>()
+    for (const item of state.items) {
+      // Bump updatedAt to now when membership or title changes so ClientWorkspaceModel.upsert accepts it
+      const fingerprint = fingerprintOf(item)
+      nextById.set(item.workspaceId, fingerprint)
+      if (prevById.get(item.workspaceId) !== fingerprint) {
         push({
           type: 'upsert',
           workspace: {
@@ -1058,30 +1162,28 @@ async function* multiplexWorkspaceFollow(
       }
     }
 
-    for (const oldId of prevById.keys()) {
-      if (!nextById.has(oldId)) {
-        push({ type: 'remove', workspaceId: oldId })
+    if (!replaceFrames) {
+      for (const oldId of prevById.keys()) {
+        if (!nextById.has(oldId)) {
+          push({ type: 'remove', workspaceId: oldId })
+        }
       }
     }
     prevById = nextById
 
-    const orderIds = items.map(i => String(i.workspaceId))
-    const orderStr = orderIds.join('\0')
     if (orderStr !== prevOrder) {
       prevOrder = orderStr
-      push({ type: 'order', workspaceIds: orderIds })
+      push({ type: 'order', workspaceIds: state.items.map(item => item.workspaceId) })
     }
 
-    const archivedStr = archivedSessionIds.join('\0')
     if (archivedStr !== prevArchived) {
       prevArchived = archivedStr
-      push({ type: 'archived', archivedSessionIds })
+      push({ type: 'archived', archivedSessionIds: state.archivedSessionIds })
     }
 
-    const pinnedStr = pinnedSessionIds.join('\0')
     if (pinnedStr !== prevPinned) {
       prevPinned = pinnedStr
-      push({ type: 'pinned', pinnedSessionIds })
+      push({ type: 'pinned', pinnedSessionIds: state.pinnedSessionIds })
     }
   }
 
@@ -1093,20 +1195,12 @@ async function* multiplexWorkspaceFollow(
     for await (const frame of localStream) {
       if (signal.aborted) return
       if (frame.type === 'baseline') {
-        const { items, archivedSessionIds, pinnedSessionIds } = computeCurrentState()
-        prevById = new Map(
-          items.map(item => [
-            String(item.workspaceId),
-            JSON.stringify({ title: item.title, path: item.path, sessionIds: item.sessionIds }),
-          ]),
-        )
-        prevOrder = items.map(i => String(i.workspaceId)).join('\0')
-        prevArchived = archivedSessionIds.join('\0')
-        prevPinned = pinnedSessionIds.join('\0')
+        const state = computeCurrentState()
+        installPrevState(state)
         baselineSent = true
         push({
           type: 'baseline',
-          value: { items, archivedSessionIds, pinnedSessionIds },
+          value: state,
         })
       } else {
         syncIncrementalDiff()

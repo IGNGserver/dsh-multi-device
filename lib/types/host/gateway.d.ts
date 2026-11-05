@@ -225,11 +225,31 @@ export interface TypertGatewayLike {
  * Extract local workspaces from `ctx.workspaceRegistry` for `DeviceRegistry`.
  */
 export declare function readLocalPhysicalWorkspaces(workspaceRegistry: WorkspaceRegistryLike | undefined, localRunningSessionIds: ReadonlySet<string>): PhysicalWorkspaceInput[];
+/** Options for the aggregated workspace stream. */
+export interface AggregatedGatewayOptions {
+    /**
+     * Emit the DSH 0.2.1+ `replace` frame for workspace-set changes instead of
+     * `remove`. The Client WorkspaceModel tombstones every removed id for the
+     * lifetime of the page, so a later `upsert` of a workspace that merely
+     * became invisible (Native Mode) or temporarily disappeared can never
+     * resurrect it. `replace` swaps the whole projection without tombstones.
+     */
+    readonly workspaceReplaceFrames?: boolean | (() => boolean);
+}
+/**
+ * Whether the bundled Client WorkspaceModel understands an incremental
+ * `replace` frame. DSH 0.2.0 only accepts it as the opening snapshot; the
+ * client gained the incremental case in 0.2.1-rc.1.
+ *
+ * @param version - Host/client release version, e.g. `0.2.2-rc.1`.
+ * @returns true when emitting `replace` after `baseline` is safe.
+ */
+export declare function supportsWorkspaceReplaceFrames(version: string | undefined): boolean;
 /**
  * Install the DSH 0.2 Aggregated Mode service wrappers and return a disposer
  * that restores all original methods.
  */
-export declare function installAggregatedGateway02(registry: DeviceRegistry, sessionController: SessionControllerLike, workspaceController: WorkspaceControllerLike, typertGateway: TypertGatewayLike, workspaceRegistry?: WorkspaceRegistryLike): () => void;
+export declare function installAggregatedGateway02(registry: DeviceRegistry, sessionController: SessionControllerLike, workspaceController: WorkspaceControllerLike, typertGateway: TypertGatewayLike, workspaceRegistry?: WorkspaceRegistryLike, options?: AggregatedGatewayOptions): () => void;
 /**
  * A subagent address may only be routed to the device that owns the parent
  * when the child is namespaced to that same device. A local or foreign child

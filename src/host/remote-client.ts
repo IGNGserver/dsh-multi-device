@@ -820,7 +820,10 @@ export class RemoteDeviceClient {
   private async pump02WorkspaceFollow(signal: AbortSignal): Promise<void> {
     for await (const frame of this.openStream('workspace/follow', {}, signal)) {
       if (!isRecord(frame) || typeof frame.type !== 'string') continue
-      if (frame.type === 'baseline' && isRecord(frame.value)) {
+      // DSH 0.2.2 can replace the complete projection when a remote-access
+      // filter changes. Treat it exactly like a reconnect baseline: the old
+      // row set is no longer authoritative.
+      if ((frame.type === 'baseline' || frame.type === 'replace') && isRecord(frame.value)) {
         const val = frame.value
         this.workspaces = Array.isArray(val.items) ? (val.items as RemoteWorkspaceItem[]) : []
         this.archivedSessionIds = Array.isArray(val.archivedSessionIds)
