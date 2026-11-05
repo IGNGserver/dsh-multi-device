@@ -16,6 +16,19 @@ export interface LocalHostProvider {
     /** Read current local session summaries. */
     readonly localSessionUpdatedAt: () => Map<string, number>;
 }
+/**
+ * The model-catalog scope for the Session currently shown in the conversation
+ * pane. A remote Session must use only its owner's catalog; there is no local
+ * fallback because that would offer models the remote Agent cannot run.
+ */
+export type ActiveSessionScope = {
+    readonly kind: 'local';
+} | {
+    readonly kind: 'remote';
+    readonly deviceId: DeviceId;
+    readonly deviceName: string;
+    readonly client: RemoteDeviceClient | undefined;
+};
 export declare class DeviceRegistry {
     private readonly dataFilePath;
     private readonly localHost;
@@ -29,6 +42,11 @@ export declare class DeviceRegistry {
     private readonly eventListeners;
     private readonly projectionListeners;
     private readonly workspaceListeners;
+    private readonly modelCatalogListeners;
+    private activeSessionSeq;
+    private activeSessionClientId;
+    private activeSessionIsRemote;
+    private activeSessionDeviceId;
     private revision;
     private gitMatchRunner;
     private gitMatchRun;
@@ -66,6 +84,21 @@ export declare class DeviceRegistry {
         seq: number;
     }) => void): () => void;
     onWorkspacesChanged(listener: () => void): () => void;
+    /**
+     * Subscribe to model-catalog scope changes. The Host re-emits DSH's
+     * `llm/adapters-updated` event so the browser's shared model picker drops its
+     * cached catalog and asks `session/modelCatalog` again.
+     */
+    onModelCatalogChanged(listener: () => void): () => void;
+    /**
+     * Record the Session currently rendered on the right. `requestSeq` is
+     * client-monotonic so out-of-order control-plane HTTP requests cannot move
+     * the scope back to a previously selected Session.
+     */
+    setActiveSession(sessionId: string | undefined, requestSeq?: number, clientId?: string): boolean;
+    /** Scope `session/modelCatalog` to the Session currently shown on the right. */
+    activeSessionScope(): ActiveSessionScope;
+    private notifyModelCatalogChanged;
     startAll(): void;
     dispose(): void;
     client(deviceId: DeviceId): RemoteDeviceClient | undefined;

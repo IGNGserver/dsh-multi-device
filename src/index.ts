@@ -193,6 +193,19 @@ export function apply(ctx: Context, config?: Config): void {
     registry.aggregator.setConfig({ autoGitAggregate: false })
   }
 
+  // The browser model picker caches one catalog per Host generation. Re-emit
+  // DSH's own model-change event whenever the active Session changes device or
+  // a remote device's catalog changes, so that picker refetches instead of
+  // offering stale/foreign groups.
+  registry.onModelCatalogChanged(() => {
+    try {
+      const emit = (ctx as unknown as { emit?: (event: string) => void }).emit
+      emit?.call(ctx, 'llm/adapters-updated')
+    } catch {
+      // The picker still refetches on the next connection reset.
+    }
+  })
+
   // 1. Mount Control Plane HTTP + SSE routes (independent of Aggregated Mode!)
   // Re-read `connection` per request and call `requestRejection` as a method.
   // Detaching it (`const reject = connection.requestRejection; reject(...)`)

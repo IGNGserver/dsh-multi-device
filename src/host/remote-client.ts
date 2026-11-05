@@ -99,6 +99,8 @@ export interface RemoteDeviceCallbacks {
   ) => void
   readonly onWorkspacesChanged: (deviceId: DeviceId) => void
   readonly onGitRemotesDiscovered: (deviceId: DeviceId, remotesByPath: ReadonlyMap<string, string>) => void
+  /** The device's model list changed (or it just connected); refresh the picker. */
+  readonly onModelCatalogChanged: (deviceId: DeviceId) => void
 }
 
 const BACKOFF_BASE_MS = 600
@@ -566,6 +568,7 @@ export class RemoteDeviceClient {
       res02 = await this.rawRpcPost('session/list', { args: { _request: {} } }, signal)
     }
 
+    const previousSummaries = new Map(this.summaries.map(summary => [summary.sessionId, summary]))
     const body02 = res02.ok ? res02.value : undefined
     const listGen = classifyRemoteProtocol(body02)
     // A versionless `items` body is the normal 0.2 list. Ask host.describe
@@ -580,6 +583,7 @@ export class RemoteDeviceClient {
       if (isRecord(body02) && Array.isArray(body02.items)) {
         this.summaries = body02.items as RemoteSessionSummary[]
       }
+      this.reconcileSessionSummaries(previousSummaries)
       this.realtime = true
       return { protocolVersion: '0.2', remoteDshVersion: resolved.version ?? '0.2.x' }
     }
@@ -799,6 +803,15 @@ export class RemoteDeviceClient {
         }
         break
       }
+      case 'llm/adapters-updated':
+      case 'settings/document-updated':
+      case 'credentials/record-updated':
+      case 'credentials/reference-updated': {
+        // The remote Agent's model catalog is part of its own settings. The
+        // aggregate picker must invalidate instead of keeping a stale list.
+        this.callbacks.onModelCatalogChanged(this.id)
+        break
+      }
       default:
         break
     }
@@ -923,6 +936,7 @@ export class RemoteDeviceClient {
   // ==========================================================================
 
   private async refreshLegacy01Lists(signal: AbortSignal): Promise<void> {
+    const previousSummaries = new Map(this.summaries.map(summary => [summary.sessionId, summary]))
     const sRes = await this.rawRpcPost('session.list', {}, signal, 'session.list')
     if (sRes.ok && isRecord(sRes.value) && Array.isArray(sRes.value.items)) {
       this.summaries = (sRes.value.items as Record<string, unknown>[]).map(item => ({
@@ -953,6 +967,7 @@ export class RemoteDeviceClient {
       this.callbacks.onWorkspacesChanged(this.id)
       void this.refreshRegisteredWorkspaceOrigins()
     }
+    this.reconcileSessionSummaries(previousSummaries)
   }
 
   private async runProtocol01Polling(_baseUrl: string, signal: AbortSignal): Promise<void> {
@@ -1013,6 +1028,55 @@ export class RemoteDeviceClient {
   // ==========================================================================
   // Helpers
   // ==========================================================================
+
+  /**
+   * Push the initial/reconnected session list into the browser's Session store.
+   *
+   * DSH fetches `session.list` once per connection and then relies exclusively
+   * on `api-session/added` / `api-session/removed` events. A remote device that
+   * finishes its SSH handshake after that initial fetch would otherwise keep
+   * its Sessions invisible even though `workspace/follow` already lists their
+   * ids; the sidebar silently skips ids with no summary.
+   */
+  private reconcileSessionSummaries(
+    previous: ReadonlyMap<string, RemoteSessionSummary>,
+  ): void {
+    const current = new Map(this.summaries.map(summary => [summary.sessionId, summary]))
+    let changed = false
+
+    for (const summary of this.summaries) {
+      const old = previous.get(summary.sessionId)
+      if (
+        old !== undefined &&
+        old.updatedAt === summary.updatedAt &&
+        old.running === summary.running &&
+        old.blank === summary.blank &&
+        old.agentAvailable === summary.agentAvailable &&
+        old.parentSessionId === summary.parentSessionId &&
+        old.cwd === summary.cwd
+      ) {
+        continue
+      }
+      changed = true
+      this.callbacks.onRemoteEventFrame(this.id, {
+        type: 'emit',
+        event: 'api-session/added',
+        args: [this.namespaceSummary(summary)],
+      })
+    }
+
+    for (const sessionId of previous.keys()) {
+      if (current.has(sessionId)) continue
+      changed = true
+      this.callbacks.onRemoteEventFrame(this.id, {
+        type: 'emit',
+        event: 'api-session/removed',
+        args: [encodeRemoteSessionId(this.id, sessionId)],
+      })
+    }
+
+    if (changed) this.callbacks.onWorkspacesChanged(this.id)
+  }
 
   namespaceSummary(summary: RemoteSessionSummary): RemoteSessionSummary {
     return {

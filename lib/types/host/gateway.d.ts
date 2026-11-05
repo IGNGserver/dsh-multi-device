@@ -196,16 +196,12 @@ export interface ModelCatalogLike {
         readonly message: string;
     }[];
 }
-export interface RemoteModelCatalog {
-    readonly deviceId: DeviceId;
-    readonly deviceName: string;
-    readonly catalog: ModelCatalogLike;
-}
-export declare function deviceCatalogGroupId(deviceId: DeviceId, groupId: string): string;
-/** Undo {@link deviceCatalogGroupId} when dispatching `selectModel`. */
-export declare function stripDeviceCatalogPrefix(provider: string, deviceId: DeviceId): string;
-/** Merge local and remote catalogs without collapsing same-named providers. */
-export declare function mergeModelCatalog(local: ModelCatalogLike, remotes: readonly RemoteModelCatalog[]): ModelCatalogLike;
+/**
+ * A remote catalog can be temporarily unavailable (SSH reconnect, remote DSH
+ * restart). Return a valid empty catalog with a visible failure instead of
+ * falling back to local models: a remote Agent cannot run a local-only model.
+ */
+export declare function unavailableRemoteCatalog(deviceName: string, message: string): ModelCatalogLike;
 export interface TypertGatewayLike {
     wireStream: {
         open(endpoint: string, payload: unknown, uplink: AsyncIterable<unknown>, peer: unknown, signal: AbortSignal): Promise<AsyncIterable<unknown>>;

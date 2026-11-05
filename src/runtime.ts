@@ -139,6 +139,7 @@ export interface ControlPlaneRequest {
     | 'setCustomTitle'
     | 'startGitMatch'
     | 'cancelGitMatch'
+    | 'setActiveSession'
   readonly payload?: Record<string, unknown>
 }
 
@@ -157,6 +158,17 @@ export class MultiDeviceControlPlane {
       switch (request.action) {
         case 'snapshot':
           return { ok: true, value: this.registry.snapshot() }
+
+        case 'setActiveSession': {
+          const raw = payload.sessionId
+          const sessionId = typeof raw === 'string' && raw !== '' ? raw : undefined
+          const requestSeq = typeof payload.requestSeq === 'number' && Number.isFinite(payload.requestSeq)
+            ? payload.requestSeq
+            : 0
+          const clientId = typeof payload.clientId === 'string' ? payload.clientId : ''
+          this.registry.setActiveSession(sessionId, requestSeq, clientId)
+          return { ok: true, value: { accepted: true as const } }
+        }
 
         case 'upsertDevice': {
           const input = payload as unknown as UpsertDeviceInput

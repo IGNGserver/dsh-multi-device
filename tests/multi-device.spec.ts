@@ -66,12 +66,9 @@ import {
   titleFromPath,
 } from '../src/host/git-match.ts'
 import {
-  deviceCatalogGroupId,
   installAggregatedGateway02,
   isSameDeviceChildSession,
-  mergeModelCatalog,
-  type ModelCatalogLike,
-  stripDeviceCatalogPrefix,
+  unavailableRemoteCatalog,
   type SessionControllerLike,
   type TypertGatewayLike,
   type WorkspaceControllerLike,
@@ -549,7 +546,9 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
                         workspaceId: 'rws-1',
                         path: '/home/remoteuser/shared-repo',
                         title: 'shared-repo',
-                        sessionIds: ['rsess-1'],
+                        // Deliberately empty: a workspace registered by manual
+                        // matching must still adopt pre-existing Sessions by cwd.
+                        sessionIds: [],
                         createdAt: '2026-10-01T00:00:00.000Z',
                         updatedAt: '2026-10-02T00:00:00.000Z',
                       },
@@ -760,6 +759,9 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
         encodeRemoteSessionId(devId, 'rsess-1'),
         'lsess-1',
       ])
+      expect(
+        snap.allPhysicalWorkspaces.find(member => member.deviceId === devId)?.sessionCount,
+      ).toBe(1)
 
       // Verify Native Mode Reverse Proxy serves remote HTML and strips X-Frame-Options & CSP frame-ancestors
       const proxyUrl = snap.devices[0]?.nativeProxyUrl
@@ -874,16 +876,60 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
         'lsess-1',
       ])
 
-      // 1b) The model catalog exposes remote-only models alongside local ones.
-      const catalog = (await mockSessionController.modelCatalog()) as {
+      // 1b) A remote Session sees exactly the remote catalog, never local groups.
+      const remoteSessionId = encodeRemoteSessionId(devId, 'rsess-1')
+      expect(registry.setActiveSession(remoteSessionId, 1)).toBe(true)
+      const remoteCatalog = (await mockSessionController.modelCatalog()) as {
         groups: { id: string; models: { id: string }[] }[]
         routableProviders: string[]
       }
-      const remoteGroupId = deviceCatalogGroupId(devId, 'remote-provider')
-      expect(catalog.groups.map(group => group.id)).toContain(remoteGroupId)
-      expect(catalog.groups.find(group => group.id === remoteGroupId)?.models.map(m => m.id))
-        .toContain('remote-only-model')
-      expect(catalog.routableProviders).toContain(remoteGroupId)
+      expect(remoteCatalog.groups.map(group => group.id)).toEqual(['remote-provider'])
+      expect(remoteCatalog.groups[0]?.models.map(model => model.id)).toEqual(['remote-only-model'])
+      expect(remoteCatalog.routableProviders).toEqual(['remote-provider'])
+
+      // 1c) A local Session sees exactly the local catalog.
+      expect(registry.setActiveSession('lsess-1', 2)).toBe(true)
+      const localCatalog = (await mockSessionController.modelCatalog()) as {
+        groups: { id: string; models: { id: string }[] }[]
+      }
+      expect(localCatalog.groups.map(group => group.id)).toEqual(['local-provider'])
+
+      // 1d) An older control-plane request cannot move the scope backwards.
+      expect(registry.setActiveSession(remoteSessionId, 3)).toBe(true)
+      expect(registry.setActiveSession('lsess-1', 2)).toBe(false)
+      expect(registry.activeSessionScope()).toMatchObject({ kind: 'remote', deviceId: devId })
+
+      // 1e) The browser event generation receives remote Sessions that loaded
+      // after its initial `session.list`, otherwise their workspace rows vanish.
+      const eventsAbort = new AbortController()
+      const eventsTimer = setTimeout(() => eventsAbort.abort(), 1_500)
+      const replayStream = await mockGateway.wireStream.open(
+        '$events',
+        {},
+        (async function* () {})(),
+        undefined,
+        eventsAbort.signal,
+      )
+      const replayed: Record<string, unknown>[] = []
+      try {
+        for await (const rawFrame of replayStream) {
+          if (typeof rawFrame !== 'object' || rawFrame === null || Array.isArray(rawFrame)) continue
+          const frame = rawFrame as Record<string, unknown>
+          replayed.push(frame)
+          if (frame.type === 'emit' && frame.event === 'api-session/added') break
+        }
+      } catch {
+        // Abort after the expected frame.
+      } finally {
+        clearTimeout(eventsTimer)
+        eventsAbort.abort()
+      }
+      expect(replayed.some(frame =>
+        frame.type === 'emit' &&
+        frame.event === 'api-session/added' &&
+        Array.isArray(frame.args) &&
+        (frame.args[0] as { sessionId?: string } | undefined)?.sessionId === remoteSessionId,
+      )).toBe(true)
 
       // 1c) Explicit per-session device selection creates on the chosen device.
       const created = await registry.createRemoteSession({
@@ -1617,30 +1663,13 @@ describe('7. P2 boundary guards', () => {
     expect(pendingInteractionKind('other/request')).toBeUndefined()
   })
 
-  it('keeps same-named providers from different devices separate', () => {
-    const catalog = (model: string): ModelCatalogLike => ({
-      default: {},
-      routableProviders: ['openai'],
-      groups: [{ id: 'openai', name: 'OpenAI', models: [{ id: model, name: model }] }],
-      failures: [],
-    })
-    const merged = mergeModelCatalog(catalog('local-model'), [
-      { deviceId: DeviceId('dev-a'), deviceName: 'Device A', catalog: catalog('a-model') },
-      { deviceId: DeviceId('dev-b'), deviceName: 'Device B', catalog: catalog('b-model') },
+  it('returns an empty remote catalog with a failure instead of local models', () => {
+    const catalog = unavailableRemoteCatalog('macos-dev', 'remote device is not connected')
+    expect(catalog.groups).toEqual([])
+    expect(catalog.routableProviders).toEqual([])
+    expect(catalog.failures).toEqual([
+      { id: 'remote:macos-dev', name: 'macos-dev', message: 'remote device is not connected' },
     ])
-    expect(merged.groups.map(group => group.id)).toEqual([
-      'openai',
-      deviceCatalogGroupId(DeviceId('dev-a'), 'openai'),
-      deviceCatalogGroupId(DeviceId('dev-b'), 'openai'),
-    ])
-    expect(merged.groups[1]?.models.map(model => model.id)).toEqual(['a-model'])
-    expect(merged.groups[2]?.models.map(model => model.id)).toEqual(['b-model'])
-    expect(merged.routableProviders).toContain(deviceCatalogGroupId(DeviceId('dev-a'), 'openai'))
-    expect(merged.routableProviders).toContain(deviceCatalogGroupId(DeviceId('dev-b'), 'openai'))
-    expect(
-      stripDeviceCatalogPrefix(deviceCatalogGroupId(DeviceId('dev-a'), 'openai'), DeviceId('dev-a')),
-    ).toBe('openai')
-    expect(stripDeviceCatalogPrefix('openai', DeviceId('dev-a'))).toBe('openai')
   })
 
   it('caps a stalled stream queue instead of growing without bound', () => {

@@ -11,19 +11,22 @@
  *    viewport (the toggle lives in the sidebar footer entry below).
  * 4. `sidebar.footer.action`: compact Multi-Device entry + device popover, so the plugin
  *    never floats controls over DSH's session header or caption drag region.
- * 5. `sidebar.session.row.leading`, `sidebar.session.row.hover`, and
- *    `sidebar.workspaces.session.menu.item`: Per-session device badges, hover details, and
- *    native `MenuItemButton` action to open the owning device in Native Mode.
+ * 5. `conversation.session.header.utilities`, `conversation.input.right`,
+ *    `sidebar.session.row.hover`, and `sidebar.workspaces.session.menu.item`:
+ *    The owning device appears on the right side of an opened Session header;
+ *    Session rows themselves stay free of device prefixes. Hover details and a
+ *    native `MenuItemButton` still expose the owning device.
  *
  * @module dsh-multi-device/client
  */
 import React from 'react'
 import { LOCALE_NS, en, zh, type MultiDeviceLocaleKey } from './locales.ts'
 import {
+  ActiveSessionReporter,
   ModeSwitcherOverlay,
+  SessionHeaderDeviceBadge,
   SessionMenuOpenInNativeItem,
   SessionRowHoverDeviceSection,
-  SessionRowLeadingBadge,
 } from './ModeSwitcherOverlay.tsx'
 import { MultiDeviceHubPanel } from './MultiDeviceHubPanel.tsx'
 import { installProjectDeviceBadges } from './projectBadges.ts'
@@ -45,6 +48,23 @@ function translateFallback(key: MultiDeviceLocaleKey): string {
   return fallbackDict[key] ?? en[key] ?? key
 }
 
+/**
+ * Best-effort local refresh of DSH's shared model catalog after the Host has
+ * accepted a new active-Session scope. The Host also re-emits
+ * `llm/adapters-updated`; this covers shells where that event is not forwarded
+ * before the next picker open.
+ */
+function refreshModelCatalog(ctx: ClientContextLike): void {
+  try {
+    const models = ctx.get?.('modelDirectories') as
+      | { catalog?: { refresh?: () => void } }
+      | undefined
+    models?.catalog?.refresh?.()
+  } catch {
+    // Private DSH service shape; the Host event remains the primary path.
+  }
+}
+
 export interface SlotEntryLike {
   readonly options?: {
     readonly id?: string
@@ -61,6 +81,8 @@ export interface SlotEntryLike {
 export interface ClientContextLike {
   effect(fn: () => (() => void) | void, label?: string): void
   inject(deps: readonly string[], fn: (ctx: ClientContextLike) => void): void
+  /** Resolve a Client service (used only as a guarded model-picker refresh fallback). */
+  get?(key: string): unknown
   locale: {
     register(ns: string, dicts: { zh: Record<string, string>; en: Record<string, string> }): () => void
     bind?(ns: string): (key: MultiDeviceLocaleKey) => string
@@ -121,6 +143,7 @@ export function apply(ctx: ClientContextLike): void {
   const handleOpenSettings = (): void => {
     openSettingsSection(ctx, SETTINGS_SECTION_ID)
   }
+  const refreshCatalog = (): void => refreshModelCatalog(ctx)
 
   // Sidebar project rows get a device dot + device name / device count.
   ctx.effect(
@@ -231,15 +254,34 @@ export function apply(ctx: ClientContextLike): void {
     ),
   )
 
-  // 6. Register Session Row Device Badges, Hover Metadata, and Context Menu Action
-  ctx.slots.inject('sidebar.session.row.leading', () =>
+  // 6a. Report the active Session to the Host so `session/modelCatalog` can
+  //     answer with exactly that Session owner's models. This slot is rendered
+  //     for blank/new Sessions too, unlike the header utilities below.
+  ctx.slots.inject('conversation.input.right', () =>
     ctx.slots.register(
       {
-        name: 'sidebar.session.row.leading',
-        id: 'multi-device-row-badge',
-        order: 10,
+        name: 'conversation.input.right',
+        id: 'multi-device-active-session',
+        order: -100,
       },
-      (props: { sessionId: string }) => <SessionRowLeadingBadge sessionId={props.sessionId} />,
+      (props: { sessionId: string }) => (
+        <ActiveSessionReporter sessionId={props.sessionId} onScopeReported={refreshCatalog} />
+      ),
+    ),
+  )
+
+  // 6b. Show the owning device on the right side of an opened remote Session.
+  ctx.slots.inject('conversation.session.header.utilities', () =>
+    ctx.slots.register(
+      {
+        name: 'conversation.session.header.utilities',
+        id: 'multi-device-session-device',
+        order: 20,
+        locale: LOCALE_NS,
+      },
+      (props: { sessionId: string; t?: (k: MultiDeviceLocaleKey) => string }) => (
+        <SessionHeaderDeviceBadge sessionId={props.sessionId} t={props.t ?? getTranslate()} />
+      ),
     ),
   )
 
