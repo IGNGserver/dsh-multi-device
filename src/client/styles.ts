@@ -1093,17 +1093,22 @@ const CSS_TEXT = `
   line-height: 18px;
 }
 
-.dsh-md-row-leading-tag {
-  font-size: 9px;
-  font-weight: 600;
-  padding: 0 3px;
-  border-radius: var(--dsw-radius-xs, 4px);
-  border: 0.5px solid var(--dsw-alias-border-l3);
+/* Owning-device label on the right side of an opened remote Session header */
+.dsh-md-session-device {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 180px;
   color: var(--dsw-alias-label-secondary);
-  line-height: 13px;
-  max-width: 16px;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.dsh-md-session-device-name {
   overflow: hidden;
-  text-overflow: clip;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dsh-md-fallback-modal {

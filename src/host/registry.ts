@@ -23,6 +23,7 @@ import {
   type GitMatchRun,
   LOCAL_DEVICE_ID,
   type MultiDeviceSnapshot,
+  normalizeWorkspacePath,
   type RemoteSessionCreateInput,
   type RemoteWorkspaceCreateInput,
   type SessionOriginMetadata,
@@ -118,6 +119,20 @@ export interface LocalHostProvider {
   readonly localSessionUpdatedAt: () => Map<string, number>
 }
 
+/**
+ * The model-catalog scope for the Session currently shown in the conversation
+ * pane. A remote Session must use only its owner's catalog; there is no local
+ * fallback because that would offer models the remote Agent cannot run.
+ */
+export type ActiveSessionScope =
+  | { readonly kind: 'local' }
+  | {
+      readonly kind: 'remote'
+      readonly deviceId: DeviceId
+      readonly deviceName: string
+      readonly client: RemoteDeviceClient | undefined
+    }
+
 export class DeviceRegistry {
   readonly authManager: DeviceAuthManager
   readonly nativeProxyManager: NativeProxyManager
@@ -139,6 +154,12 @@ export class DeviceRegistry {
     (deviceId: DeviceId, frame: { sessionId: string; key: string; value: unknown; seq: number }) => void
   >()
   private readonly workspaceListeners = new Set<() => void>()
+  private readonly modelCatalogListeners = new Set<() => void>()
+
+  private activeSessionSeq = -1
+  private activeSessionClientId: string | undefined
+  private activeSessionIsRemote = false
+  private activeSessionDeviceId: DeviceId | undefined
 
   private revision = 1
   private gitMatchRunner: GitMatchRunner | undefined
@@ -209,6 +230,67 @@ export class DeviceRegistry {
   onWorkspacesChanged(listener: () => void): () => void {
     this.workspaceListeners.add(listener)
     return () => this.workspaceListeners.delete(listener)
+  }
+
+  /**
+   * Subscribe to model-catalog scope changes. The Host re-emits DSH's
+   * `llm/adapters-updated` event so the browser's shared model picker drops its
+   * cached catalog and asks `session/modelCatalog` again.
+   */
+  onModelCatalogChanged(listener: () => void): () => void {
+    this.modelCatalogListeners.add(listener)
+    return () => this.modelCatalogListeners.delete(listener)
+  }
+
+  /**
+   * Record the Session currently rendered on the right. `requestSeq` is
+   * client-monotonic so out-of-order control-plane HTTP requests cannot move
+   * the scope back to a previously selected Session.
+   */
+  setActiveSession(
+    sessionId: string | undefined,
+    requestSeq = 0,
+    clientId = '',
+  ): boolean {
+    // A different tab starts its own sequence at 1; do not compare it with the
+    // previous tab's counter.
+    const sameClient = clientId === '' || clientId === this.activeSessionClientId
+    if (sameClient && requestSeq > 0 && requestSeq <= this.activeSessionSeq) return false
+    if (clientId !== '') this.activeSessionClientId = clientId
+    if (requestSeq > 0) this.activeSessionSeq = requestSeq
+
+    const previousKind = this.activeSessionIsRemote ? 'remote' : 'local'
+    const previousDeviceId = this.activeSessionDeviceId
+    const next = sessionId === undefined || sessionId === '' ? undefined : sessionId
+    const decoded = next !== undefined ? decodeSessionId(next) : undefined
+    this.activeSessionIsRemote = decoded?.isRemote === true
+    this.activeSessionDeviceId = decoded?.isRemote === true ? decoded.deviceId : undefined
+
+    const changed =
+      previousKind !== (this.activeSessionIsRemote ? 'remote' : 'local') ||
+      previousDeviceId !== this.activeSessionDeviceId
+    if (changed) this.notifyModelCatalogChanged()
+    return changed
+  }
+
+  /** Scope `session/modelCatalog` to the Session currently shown on the right. */
+  activeSessionScope(): ActiveSessionScope {
+    if (!this.activeSessionIsRemote || this.activeSessionDeviceId === undefined) {
+      return { kind: 'local' }
+    }
+    const client = this.clients.get(this.activeSessionDeviceId)
+    return {
+      kind: 'remote',
+      deviceId: this.activeSessionDeviceId,
+      deviceName: client?.toView().name ?? String(this.activeSessionDeviceId),
+      client,
+    }
+  }
+
+  private notifyModelCatalogChanged(): void {
+    for (const listener of this.modelCatalogListeners) {
+      try { listener() } catch { /* ignore */ }
+    }
   }
 
   startAll(): void {
@@ -676,6 +758,27 @@ export class DeviceRegistry {
       const view = client.toView()
       const summaries = client.sessionSummaries()
       const runningBySession = new Map<string, boolean>()
+      const archived = new Set(client.archivedIds())
+      const attached = new Set(
+        client.workspaceItems().flatMap(ws => [...ws.sessionIds]),
+      )
+      /**
+       * A workspace registered by the manual Git match starts with an empty
+       * `sessionIds` list, so Sessions created there before the registration
+       * would stay invisible. DSH itself links a Session to a workspace by the
+       * exact canonical cwd; mirror that rule read-only, without taking over
+       * another workspace's members.
+       */
+      const orphanByCwd = new Map<string, string[]>()
+      for (const s of summaries) {
+        if (s.blank || s.cwd === undefined || s.parentSessionId !== undefined) continue
+        if (archived.has(s.sessionId) || attached.has(s.sessionId)) continue
+        const key = normalizeWorkspacePath(s.cwd)
+        if (key === '') continue
+        const list = orphanByCwd.get(key) ?? []
+        list.push(s.sessionId)
+        orphanByCwd.set(key, list)
+      }
 
       for (const s of summaries) {
         const namespacedId = client.namespaceSummary(s).sessionId
@@ -697,14 +800,16 @@ export class DeviceRegistry {
       }
 
       for (const ws of client.workspaceItems()) {
-        const runningCount = ws.sessionIds.filter(id => runningBySession.get(id) === true).length
+        const adopted = orphanByCwd.get(normalizeWorkspacePath(ws.path)) ?? []
+        const sessionIds = adopted.length === 0 ? [...ws.sessionIds] : [...ws.sessionIds, ...adopted]
+        const runningCount = sessionIds.filter(id => runningBySession.get(id) === true).length
         physicalInputs.push({
           deviceId: client.id,
           deviceName: view.name,
           workspaceId: ws.workspaceId,
           path: ws.path,
           title: ws.title,
-          sessionIds: ws.sessionIds,
+          sessionIds,
           runningSessionCount: runningCount,
           createdAt: ws.createdAt,
           updatedAt: ws.updatedAt,
@@ -778,8 +883,24 @@ export class DeviceRegistry {
     const config = this.hydrateConfig(storedConfig)
     let client = this.clients.get(config.id)
     const callbacks: RemoteDeviceCallbacks = {
-      onStateChanged: () => {
+      onStateChanged: (deviceId) => {
         this.bumpRevision()
+        // Connecting/disconnecting the device that owns the open Session also
+        // changes which catalog is authoritative for that conversation.
+        if (
+          this.activeSessionIsRemote &&
+          this.activeSessionDeviceId === deviceId
+        ) {
+          this.notifyModelCatalogChanged()
+        }
+      },
+      onModelCatalogChanged: (deviceId) => {
+        if (
+          this.activeSessionIsRemote &&
+          this.activeSessionDeviceId === deviceId
+        ) {
+          this.notifyModelCatalogChanged()
+        }
       },
       onRemoteEventFrame: (deviceId, frame) => {
         for (const listener of this.eventListeners) listener(deviceId, frame)

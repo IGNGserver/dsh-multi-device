@@ -30,6 +30,12 @@ export interface MultiDeviceClientState {
     readonly displayMode: DisplayMode;
     /** Currently selected device in Native Mode. */
     readonly activeNativeDeviceId?: DeviceId;
+    /**
+     * The Session currently shown in the conversation pane. The Host uses this to
+     * scope the model catalog: a remote Session must expose exactly the owning
+     * device's models, never a local/remote mix.
+     */
+    readonly activeSessionId?: string;
     /** Devices whose Native Mode `<webview>` / `<iframe>` instances are kept alive in the DOM. */
     readonly keepAliveDeviceIds: readonly DeviceId[];
     /** Reload counter per deviceId for triggering iframe/webview reload without losing other devices. */
@@ -47,6 +53,10 @@ declare class MultiDeviceClientStore {
     private sseRetryTimer;
     private sseAttempt;
     private started;
+    /** Latest Session reported to the Host, used to dedupe mount/cleanup races. */
+    private reportedSessionId;
+    /** Monotonic control-plane sequence so an older HTTP request cannot win. */
+    private activeSessionSeq;
     constructor();
     getSnapshot: () => MultiDeviceClientState;
     subscribe: (listener: () => void) => (() => void);
@@ -61,6 +71,15 @@ declare class MultiDeviceClientStore {
     reloadNativeDevice(deviceId: DeviceId): void;
     setActiveHubTab(tab: HubTabId): void;
     setSettingsModalOpen(open: boolean): void;
+    /**
+     * Track the Session currently rendered in the conversation pane and report it
+     * to the Host. The Host answers `session/modelCatalog` with exactly that
+     * Session owner's catalog, so a remote conversation never mixes in local
+     * models (and vice versa).
+     */
+    setActiveSession(sessionId: string | undefined): Promise<void>;
+    /** Clear the scope only when the unmounting Session is still the reported one. */
+    clearActiveSession(sessionId: string): void;
     callControlPlane<T = unknown>(request: ControlPlaneRequest): Promise<{
         ok: true;
         value: T;

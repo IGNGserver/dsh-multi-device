@@ -21,7 +21,7 @@
 - **聚合模式（Aggregated Mode）**：
   - 将所有设备的逻辑工作区与会话无缝整合进 DSH 官方左侧边栏工作区树与官方对话区。
   - 原生支持跨设备新建会话、发送提示词、实时流式输出（`assistant-stream`）、工具调用卡片、取消生成、重命名、Fork、归档/取消归档、置顶、全文搜索，以及跨设备**工具越权审批（`approval/request`）**、**交互式提问（`user-questions/request`）**与**计划评审（`plan-review/request`）**。
-  - 会话行显示设备徽标，悬停卡片展示所属设备、状态、目录路径与 Git 仓库，会话 `...` 菜单支持一键跳转至所属设备的原生模式。
+  - 会话行本身不再显示设备缩写；打开具体会话后，右侧会话头显示所属设备与连接状态。悬停卡片展示目录路径与 Git 仓库，会话 `...` 菜单支持一键跳转至所属设备的原生模式。
 - **原生模式（Native Mode）与页面保活（Keep-Alive）**：
   - 在 DSH Desktop / Web 内直接加载指定设备完整的远端 DSH Web 页面，保留远端自己的 DSH 版本、主题、已装插件与界面效果。
   - 每个设备拥有独立的本地环回反向代理（自动完成 `Host`/`Origin` 归一化、Cookie 注入、WebSocket `/api/remote.mux` 升级转发、一次性代理 token 与 `frame-ancestors` 本地白名单），同时适配 Electron Desktop `<webview>`（`dshDesktop.browser`）与标准 `<iframe>`。
@@ -54,7 +54,7 @@
 ### 5. 聚合模式的能力边界
 
 - **原生模式**才是完整的远端环境：远端版本、主题、插件、设置、模型目录、文件上传、终端与文件浏览都来自远端。
-- **聚合模式**是“会话与工作区聚合”：它会合并远端模型目录（同名 provider 按设备分开展示），并路由会话列表、创建、提示词、取消、重命名、Fork、队列、审批、问答与计划评审；但 `fileUploads`、`/api/session/uploadFileBinary`、终端、远端文件打开和全局设置仍属于本地 DSH 或原生模式。
+- **聚合模式**是“会话与工作区聚合”：右侧会话页严格使用会话所属设备的模型目录——远端会话只列出远端模型，本地会话只列出本地模型，不混合两边的 provider；会话列表、创建、提示词、取消、重命名、Fork、队列、审批、问答与计划评审同样按所属设备路由。但 `fileUploads`、`/api/session/uploadFileBinary`、终端、远端文件打开和全局设置仍属于本地 DSH 或原生模式。
 - 需要附件、终端、远端设置或完整远端文件操作时，请切到原生模式；聚合模式不会伪装成完整远端客户端。
 - SSH 自动鉴权默认读取远端 `.credentials.yaml`（兼容 Linux/macOS 与 Windows 远端）并只在本机保存签发出的 Cookie，不保存签名密钥。远端重启导致 Cookie 失效时，原生模式会提示“需要登录”，可粘贴启动 Token 或点“通过 SSH 自动修复”重新签发。共享远端环境仍建议改用 Token 模式或原生模式手工登录，并取消「通过 SSH 读取远端凭据」。
 
@@ -138,7 +138,7 @@ dsh plugin --profile desktop add file:$(pwd)
 │       ├── state.ts                 # 前端响应式状态存储、SSE 同步与保活 LRU 管理
 │       ├── NativeViewport.tsx       # 原生模式 Keep-Alive 容器（支持 Electron <webview> 与 <iframe>）
 │       ├── MultiDeviceHubPanel.tsx  # 多设备中枢主面板（设备管理 / Git 聚合 / 原生视图）
-│       ├── ModeSwitcherOverlay.tsx  # 原生模式保活容器与侧边栏会话行增强组件
+│       ├── ModeSwitcherOverlay.tsx  # 原生模式保活容器、会话头设备标识与主动会话上报
 │       ├── SidebarEntry.tsx         # 侧栏底部「多设备」入口与设备 popover
 │       ├── AuthPanel.tsx            # 远端 401 时的应用内授权/SSH 修复面板
 │       ├── locales.ts               # 中英双语词典

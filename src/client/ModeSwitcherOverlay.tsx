@@ -6,9 +6,13 @@
  *      so Native Mode keep-alive pages are never unmounted across mode switches.
  *    - The mode/device toggle lives in the native `sidebar.footer.action` entry
  *      (`SidebarEntry.tsx`), never in a floating bar over shell chrome.
- * 2. `SessionRowLeadingBadge`, `SessionRowHoverDeviceSection`, `SessionMenuOpenInNativeItem`:
- *    - Official DSH 0.2 slot contributions for `sidebar.session.row.leading`,
- *      `sidebar.session.row.hover`, and `sidebar.workspaces.session.menu.item`.
+ * 2. `SessionHeaderDeviceBadge`, `ActiveSessionReporter`, `SessionRowHoverDeviceSection`,
+ *    `SessionMenuOpenInNativeItem`:
+ *    - Official DSH 0.2 slot contributions for `conversation.session.header.utilities`,
+ *      `conversation.input.right`, `sidebar.session.row.hover`, and
+ *      `sidebar.workspaces.session.menu.item`.
+ *    - Device identity is shown only after a Session is opened (right side of the
+ *      conversation header); Session rows stay visually identical to local rows.
  *
  * @module dsh-multi-device/client/ModeSwitcherOverlay
  */
@@ -68,19 +72,53 @@ export function ModeSwitcherOverlay({
   )
 }
 
-/** Leading badge inside the 16px idle slot of a remote Session row (`sidebar.session.row.leading`). */
-export function SessionRowLeadingBadge({ sessionId }: { sessionId: string }): React.ReactElement | null {
+/**
+ * Report the Session currently rendered in the conversation pane. Mounted in
+ * `conversation.input.right` because that Session-scoped slot also renders for
+ * a brand-new blank Session, where the header chrome is hidden.
+ */
+export function ActiveSessionReporter({
+  sessionId,
+  onScopeReported,
+}: {
+  sessionId: string
+  onScopeReported?: () => void
+}): null {
+  React.useEffect(() => {
+    let cancelled = false
+    void clientStore.setActiveSession(sessionId).then(() => {
+      if (!cancelled) onScopeReported?.()
+    })
+    return () => {
+      cancelled = true
+      clientStore.clearActiveSession(sessionId)
+    }
+  }, [onScopeReported, sessionId])
+  return null
+}
+
+/**
+ * Device identity on the right side of an opened Session header
+ * (`conversation.session.header.utilities`). Local Sessions show nothing, so
+ * only remote conversations carry a device label.
+ */
+export function SessionHeaderDeviceBadge({
+  sessionId,
+  t,
+}: {
+  sessionId: string
+  t?: (key: MultiDeviceLocaleKey) => string
+}): React.ReactElement | null {
   const decoded = decodeSessionId(sessionId)
   const state = useMultiDeviceState()
   if (!decoded.isRemote) return null
   const origin = state.snapshot.sessionOrigins[sessionId]
-  const label = (origin?.deviceName ?? decoded.deviceId).slice(0, 2).toUpperCase()
+  const deviceName = origin?.deviceName ?? decoded.deviceId
+  const label = t?.('hoverDeviceLabel') ?? 'Device'
   return (
-    <span
-      className="dsh-md-row-leading-tag"
-      title={origin?.deviceName ?? decoded.deviceId}
-    >
-      {label}
+    <span className="dsh-md-session-device" title={`${label}: ${deviceName}`}>
+      <StateDot state={deviceStateToDotState(origin?.deviceState ?? 'connected')} size={8} />
+      <span className="dsh-md-session-device-name">{deviceName}</span>
     </span>
   )
 }

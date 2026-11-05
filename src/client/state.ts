@@ -125,6 +125,12 @@ export interface MultiDeviceClientState {
   readonly displayMode: DisplayMode
   /** Currently selected device in Native Mode. */
   readonly activeNativeDeviceId?: DeviceId
+  /**
+   * The Session currently shown in the conversation pane. The Host uses this to
+   * scope the model catalog: a remote Session must expose exactly the owning
+   * device's models, never a local/remote mix.
+   */
+  readonly activeSessionId?: string
   /** Devices whose Native Mode `<webview>` / `<iframe>` instances are kept alive in the DOM. */
   readonly keepAliveDeviceIds: readonly DeviceId[]
   /** Reload counter per deviceId for triggering iframe/webview reload without losing other devices. */
@@ -137,6 +143,12 @@ export interface MultiDeviceClientState {
 
 const UI_STORAGE_KEY = 'dsh.multi-device.ui.v1'
 const MAX_KEEP_ALIVE_PAGES = 6
+
+/** Identify this browser instance so two tabs cannot starve each other's sequences. */
+const CLIENT_INSTANCE_ID =
+  typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `client-${String(Date.now())}-${Math.random().toString(36).slice(2)}`
 
 const EMPTY_SNAPSHOT: MultiDeviceSnapshot = {
   revision: 0,
@@ -218,6 +230,10 @@ class MultiDeviceClientStore {
   private sseRetryTimer: ReturnType<typeof setTimeout> | undefined
   private sseAttempt = 0
   private started = false
+  /** Latest Session reported to the Host, used to dedupe mount/cleanup races. */
+  private reportedSessionId: string | undefined
+  /** Monotonic control-plane sequence so an older HTTP request cannot win. */
+  private activeSessionSeq = 0
 
   constructor() {
     const prefs = loadPersistedUiPrefs()
@@ -413,6 +429,32 @@ class MultiDeviceClientStore {
 
   setSettingsModalOpen(open: boolean): void {
     this.setState({ settingsModalOpen: open })
+  }
+
+  /**
+   * Track the Session currently rendered in the conversation pane and report it
+   * to the Host. The Host answers `session/modelCatalog` with exactly that
+   * Session owner's catalog, so a remote conversation never mixes in local
+   * models (and vice versa).
+   */
+  setActiveSession(sessionId: string | undefined): Promise<void> {
+    const next = sessionId === undefined || sessionId === '' ? undefined : sessionId
+    if (this.reportedSessionId === next) return Promise.resolve()
+    this.reportedSessionId = next
+    this.setState({
+      ...(next !== undefined ? { activeSessionId: next } : { activeSessionId: undefined }),
+    })
+    const requestSeq = ++this.activeSessionSeq
+    return this.callControlPlane<{ accepted: true }>({
+      action: 'setActiveSession',
+      payload: { sessionId: next ?? '', requestSeq, clientId: CLIENT_INSTANCE_ID },
+    }).then(() => undefined)
+  }
+
+  /** Clear the scope only when the unmounting Session is still the reported one. */
+  clearActiveSession(sessionId: string): void {
+    if (this.reportedSessionId !== sessionId) return
+    void this.setActiveSession(undefined)
   }
 
   // ==========================================================================

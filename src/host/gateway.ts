@@ -98,77 +98,17 @@ export interface ModelCatalogLike {
   }[]
 }
 
-export interface RemoteModelCatalog {
-  readonly deviceId: DeviceId
-  readonly deviceName: string
-  readonly catalog: ModelCatalogLike
-}
-
 /**
- * Provider ids in the merged picker carry their device. Two devices may both
- * expose `openai` with different models or endpoints; merging them by id makes
- * the second device unreachable and can send a model id to the wrong host.
+ * A remote catalog can be temporarily unavailable (SSH reconnect, remote DSH
+ * restart). Return a valid empty catalog with a visible failure instead of
+ * falling back to local models: a remote Agent cannot run a local-only model.
  */
-const CATALOG_DEVICE_PREFIX = 'md-cat~'
-
-function escapeCatalogSegment(value: string): string {
-  return value.replaceAll('%', '%25').replaceAll('~', '%7E')
-}
-
-export function deviceCatalogGroupId(deviceId: DeviceId, groupId: string): string {
-  return `${CATALOG_DEVICE_PREFIX}${escapeCatalogSegment(deviceId)}~${groupId}`
-}
-
-/** Undo {@link deviceCatalogGroupId} when dispatching `selectModel`. */
-export function stripDeviceCatalogPrefix(provider: string, deviceId: DeviceId): string {
-  const prefix = `${CATALOG_DEVICE_PREFIX}${escapeCatalogSegment(deviceId)}~`
-  return provider.startsWith(prefix) ? provider.slice(prefix.length) : provider
-}
-
-/** Merge local and remote catalogs without collapsing same-named providers. */
-export function mergeModelCatalog(
-  local: ModelCatalogLike,
-  remotes: readonly RemoteModelCatalog[],
-): ModelCatalogLike {
-  const groups = (local.groups ?? []).map(group => ({
-    ...group,
-    models: [...group.models],
-  }))
-  const byId = new Map(groups.map(group => [group.id, group]))
-  const routableProviders = new Set(local.routableProviders ?? [])
-  const failures = [...(local.failures ?? [])]
-
-  for (const remote of remotes) {
-    for (const group of remote.catalog.groups ?? []) {
-      const id = deviceCatalogGroupId(remote.deviceId, group.id)
-      const existing = byId.get(id)
-      if (existing === undefined) {
-        const copy = {
-          ...group,
-          id,
-          name: `${remote.deviceName} — ${group.name}`,
-          models: [...group.models],
-        }
-        groups.push(copy)
-        byId.set(id, copy)
-      } else {
-        const known = new Set(existing.models.map(model => model.id))
-        for (const model of group.models) {
-          if (!known.has(model.id)) existing.models.push(model)
-        }
-      }
-      routableProviders.add(id)
-    }
-    for (const failure of remote.catalog.failures ?? []) {
-      failures.push({ ...failure, id: `${remote.deviceId}:${failure.id}` })
-    }
-  }
-
+export function unavailableRemoteCatalog(deviceName: string, message: string): ModelCatalogLike {
   return {
-    ...local,
-    groups,
-    routableProviders: [...routableProviders],
-    failures,
+    default: { provider: '', model: '' },
+    routableProviders: [],
+    groups: [],
+    failures: [{ id: `remote:${deviceName}`, name: deviceName, message }],
   }
 }
 
@@ -423,36 +363,34 @@ export function installAggregatedGateway02(
       request: {
         ...request,
         sessionId: owner.rawSessionId,
-        provider: stripDeviceCatalogPrefix(request.provider, owner.client.id),
       },
     })) as { selected: Record<string, unknown> }
   })
 
-  // The DSH model picker asks the process-level catalog. Merge every connected
-  // device's catalog so a remote-only provider/model remains selectable; the
-  // click itself is routed by `selectModel` above.
+  // The DSH model picker asks the process-level catalog, so use the active
+  // Session's owner as the scope. A remote conversation must see exactly that
+  // remote DSH's models; merging local groups makes local-only models look
+  // selectable and hides the remote's real provider ids.
   patchMethod(sessionController, 'modelCatalog', async () => {
-    const local = (await origSessionModelCatalog()) as unknown as ModelCatalogLike
-    const remotes = (
-      await Promise.all(
-        registry.clientList().map(async (client): Promise<RemoteModelCatalog | undefined> => {
-          if (client.toView().state !== 'connected') return undefined
-          try {
-            const catalog = (await client.invokeUnary(
-              'session',
-              'modelCatalog',
-              {},
-            )) as unknown as ModelCatalogLike
-            return { deviceId: client.id, deviceName: client.toView().name, catalog }
-          } catch {
-            // A disconnected/incompatible device must not break the local picker.
-            return undefined
-          }
-        }),
-      )
-    ).filter((remote): remote is RemoteModelCatalog => remote !== undefined)
-
-    return mergeModelCatalog(local, remotes) as unknown as Record<string, unknown>
+    const scope = registry.activeSessionScope()
+    if (scope.kind === 'local') {
+      return origSessionModelCatalog() as Promise<Record<string, unknown>>
+    }
+    if (scope.client === undefined || scope.client.toView().state !== 'connected') {
+      return unavailableRemoteCatalog(scope.deviceName, 'remote device is not connected') as unknown as Record<string, unknown>
+    }
+    try {
+      return (await scope.client.invokeUnary(
+        'session',
+        'modelCatalog',
+        {},
+      )) as Record<string, unknown>
+    } catch (error) {
+      return unavailableRemoteCatalog(
+        scope.deviceName,
+        error instanceof Error ? error.message : String(error),
+      ) as unknown as Record<string, unknown>
+    }
   })
 
   patchMethod(sessionController, 'rename', async (request) => {
@@ -1167,6 +1105,22 @@ async function* multiplexRemoteEventsStream(
               request: pending.request,
             })
           }
+          // DSH's Session store fetched `session.list` once before SSH devices
+          // finished connecting. Replay every known remote summary into this
+          // generation; without it, workspace rows point at Session ids the
+          // sidebar has no summary for and silently hides those rows.
+          for (const summary of client.sessionSummaries()) {
+            push({
+              type: 'emit',
+              event: 'api-session/added',
+              args: [client.namespaceSummary(summary)],
+            })
+          }
+        }
+        // A fresh browser generation starts with the local model catalog
+        // cached; make it refetch the active remote Session's catalog.
+        if (registry.activeSessionScope().kind === 'remote') {
+          push({ type: 'emit', event: 'llm/adapters-updated', args: [] })
         }
       }
     }

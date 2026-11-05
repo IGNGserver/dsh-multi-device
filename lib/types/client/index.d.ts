@@ -11,9 +11,11 @@
  *    viewport (the toggle lives in the sidebar footer entry below).
  * 4. `sidebar.footer.action`: compact Multi-Device entry + device popover, so the plugin
  *    never floats controls over DSH's session header or caption drag region.
- * 5. `sidebar.session.row.leading`, `sidebar.session.row.hover`, and
- *    `sidebar.workspaces.session.menu.item`: Per-session device badges, hover details, and
- *    native `MenuItemButton` action to open the owning device in Native Mode.
+ * 5. `conversation.session.header.utilities`, `conversation.input.right`,
+ *    `sidebar.session.row.hover`, and `sidebar.workspaces.session.menu.item`:
+ *    The owning device appears on the right side of an opened Session header;
+ *    Session rows themselves stay free of device prefixes. Hover details and a
+ *    native `MenuItemButton` still expose the owning device.
  *
  * @module dsh-multi-device/client
  */
@@ -38,6 +40,8 @@ export interface SlotEntryLike {
 export interface ClientContextLike {
     effect(fn: () => (() => void) | void, label?: string): void;
     inject(deps: readonly string[], fn: (ctx: ClientContextLike) => void): void;
+    /** Resolve a Client service (used only as a guarded model-picker refresh fallback). */
+    get?(key: string): unknown;
     locale: {
         register(ns: string, dicts: {
             zh: Record<string, string>;

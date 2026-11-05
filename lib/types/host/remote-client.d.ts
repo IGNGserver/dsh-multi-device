@@ -59,6 +59,8 @@ export interface RemoteDeviceCallbacks {
     }) => void;
     readonly onWorkspacesChanged: (deviceId: DeviceId) => void;
     readonly onGitRemotesDiscovered: (deviceId: DeviceId, remotesByPath: ReadonlyMap<string, string>) => void;
+    /** The device's model list changed (or it just connected); refresh the picker. */
+    readonly onModelCatalogChanged: (deviceId: DeviceId) => void;
 }
 export declare class RemoteDeviceClient {
     private readonly authManager;
@@ -160,6 +162,16 @@ export declare class RemoteDeviceClient {
     private runProtocol01Polling;
     private invokeLegacy01;
     private openLegacy01SessionFollow;
+    /**
+     * Push the initial/reconnected session list into the browser's Session store.
+     *
+     * DSH fetches `session.list` once per connection and then relies exclusively
+     * on `api-session/added` / `api-session/removed` events. A remote device that
+     * finishes its SSH handshake after that initial fetch would otherwise keep
+     * its Sessions invisible even though `workspace/follow` already lists their
+     * ids; the sidebar silently skips ids with no summary.
+     */
+    private reconcileSessionSummaries;
     namespaceSummary(summary: RemoteSessionSummary): RemoteSessionSummary;
     private closeMuxSocket;
     private rawRpcPost;
