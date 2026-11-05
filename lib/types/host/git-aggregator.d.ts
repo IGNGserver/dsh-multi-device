@@ -12,15 +12,23 @@ export interface PhysicalWorkspaceInput {
     readonly rawGitRemote?: string;
 }
 /**
- * Parse a `.git/config` INI body and extract `remote "origin"` URL (or the first `remote` URL).
+ * Parse a `.git/config` INI body and extract the `remote "origin"` URL.
+ *
+ * `originOnly` keeps a repository identity tied to `origin`. Falling back to
+ * the first remote would resolve `nas` backup remotes and split one repository
+ * across devices, so scanning and matching always use `originOnly`.
  */
-export declare function parseGitConfigRemoteUrl(configText: string): string | undefined;
+export declare function parseGitConfigRemoteUrl(configText: string, options?: {
+    readonly originOnly?: boolean;
+}): string | undefined;
 /**
  * Discover the raw Git remote URL of a local directory by walking up to find `.git/config`
  * (supports both normal `.git` directories and `.git` worktree pointer files).
  * Purely read-only and synchronous with zero child-process overhead.
  */
-export declare function discoverLocalGitRemote(directoryPath: string): string | undefined;
+export declare function discoverLocalGitRemote(directoryPath: string, options?: {
+    readonly originOnly?: boolean;
+}): string | undefined;
 /**
  * Batch-discover Git remote URLs for multiple paths on a remote SSH device in a single round-trip.
  * Read-only: runs `git -C <path> config --get remote.origin.url` for each path.

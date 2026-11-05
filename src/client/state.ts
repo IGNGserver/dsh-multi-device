@@ -148,7 +148,7 @@ const EMPTY_SNAPSHOT: MultiDeviceSnapshot = {
   sshConfigHosts: [],
   aggregationConfig: {
     autoGitAggregate: true,
-    prefixUnmatchedWithDevice: true,
+    prefixUnmatchedWithDevice: false,
     excludedMemberKeys: [],
     preferredDeviceByLogicalId: {},
     customTitleByLogicalId: {},
@@ -158,6 +158,17 @@ const EMPTY_SNAPSHOT: MultiDeviceSnapshot = {
   logicalWorkspaces: [],
   allPhysicalWorkspaces: [],
   sessionOrigins: {},
+  gitMatch: {
+    status: 'idle',
+    totalDevices: 0,
+    processedDevices: 0,
+    totalProjects: 0,
+    processedProjects: 0,
+    createdCount: 0,
+    alreadyTrackedCount: 0,
+    notFoundCount: 0,
+    reports: [],
+  },
 }
 
 function loadPersistedUiPrefs(): {
@@ -594,6 +605,20 @@ class MultiDeviceClientStore {
     }
     this.setState({ error: res.error })
     return { ok: false, error: res.error }
+  }
+
+  async startGitMatch(): Promise<{ ok: boolean; error?: string }> {
+    const res = await this.callControlPlane<{ snapshot: MultiDeviceSnapshot }>({ action: 'startGitMatch' })
+    if (res.ok) {
+      this.applyIncomingSnapshot(res.value.snapshot)
+      return { ok: true }
+    }
+    return { ok: false, error: res.error }
+  }
+
+  async cancelGitMatch(): Promise<boolean> {
+    const res = await this.callControlPlane<{ cancelled: boolean }>({ action: 'cancelGitMatch' })
+    return res.ok ? res.value.cancelled : false
   }
 
   async setPreferredDevice(logicalWorkspaceId: string, deviceId: DeviceId): Promise<void> {

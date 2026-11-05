@@ -11,6 +11,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { dirname } from 'node:path'
 import {
   type DeviceAuthState,
@@ -19,6 +20,7 @@ import {
   type DeviceView,
   decodeSessionId,
   encodeRemoteSessionId,
+  type GitMatchRun,
   LOCAL_DEVICE_ID,
   type MultiDeviceSnapshot,
   type RemoteSessionCreateInput,
@@ -31,9 +33,16 @@ import {
 import { DeviceAuthManager } from './auth.ts'
 import {
   DEFAULT_AGGREGATION_CONFIG,
+  discoverRemoteGitRemotesViaSsh,
   type PhysicalWorkspaceInput,
   WorkspaceAggregator,
 } from './git-aggregator.ts'
+import {
+  createIdleGitMatch,
+  GitMatchRunner,
+  type GitMatchDeviceTarget,
+} from './git-match.ts'
+import { scanLocalGitRepos, scanRemoteGitRepos, type ScannedRepository } from './git-scan.ts'
 import { requestRemote } from './http-request.ts'
 import { NativeProxyManager } from './native-proxy.ts'
 import {
@@ -96,6 +105,8 @@ interface PersistedRegistryDocument {
   readonly version: 1
   readonly devices: readonly DeviceConfig[]
   readonly aggregation: WorkspaceAggregationConfig
+  /** Last manual Git match outcome, so the panel can show it after a reload. */
+  readonly gitMatch?: GitMatchRun
 }
 
 export interface LocalHostProvider {
@@ -130,6 +141,9 @@ export class DeviceRegistry {
   private readonly workspaceListeners = new Set<() => void>()
 
   private revision = 1
+  private gitMatchRunner: GitMatchRunner | undefined
+  private gitMatchRun: GitMatchRun = createIdleGitMatch()
+  private localWorkspaceCreator: ((path: string) => Promise<void>) | undefined
   private aggregatedGatewayActive = false
   private aggregatedGatewayError: string | undefined
   private nativeProxyActive = true
@@ -539,6 +553,119 @@ export class DeviceRegistry {
     return updated
   }
 
+  /** Wire the local Workspace controller so a match can register local folders. */
+  setLocalWorkspaceCreator(creator: (path: string) => Promise<void>): void {
+    this.localWorkspaceCreator = creator
+  }
+
+  /** Latest manual Git match state (running progress or the last outcome). */
+  gitMatch(): GitMatchRun {
+    return this.gitMatchRun
+  }
+
+  /**
+   * Start the manual Git match run. This is the only trigger: nothing in the
+   * device/session streams starts a scan or registers a workspace.
+   */
+  startGitMatch(): { ok: true } | { ok: false; error: string } {
+    if (this.gitMatchRunner?.running === true) {
+      return { ok: false, error: 'A Git match run is already in progress' }
+    }
+    const targets = this.gitMatchTargets()
+    if (targets.length === 0) {
+      return { ok: false, error: 'No device to scan' }
+    }
+    const runner = new GitMatchRunner({
+      devices: () => this.gitMatchTargets(),
+      discoverRemoteOrigins: (deviceId, paths) => this.discoverRemoteOrigins(deviceId, paths),
+      scanRemoteRepos: (deviceId, roots) => this.scanRemoteRepos(deviceId, roots),
+      scanLocalRepos: roots => scanLocalGitRepos(roots),
+      createLocalWorkspace: async (path) => {
+        if (this.localWorkspaceCreator === undefined) {
+          return { ok: false as const, error: 'Local workspace creation is unavailable' }
+        }
+        try {
+          await this.localWorkspaceCreator(path)
+          return { ok: true as const }
+        } catch (error) {
+          return { ok: false as const, error: error instanceof Error ? error.message : String(error) }
+        }
+      },
+      createRemoteWorkspace: async (deviceId, path) => {
+        const res = await this.createRemoteWorkspace({ deviceId, path })
+        return res.ok ? { ok: true as const } : { ok: false as const, error: res.error }
+      },
+      noteOrigin: (deviceId, path, rawOrigin) => {
+        this.aggregator.noteGitRemote(deviceId, path, rawOrigin)
+      },
+      localHome: () => homedir(),
+      onProgress: (run) => {
+        this.gitMatchRun = run
+        this.bumpRevision()
+        // Persist the outcome, not every progress tick.
+        if (run.status !== 'running') this.saveToDisk()
+      },
+    })
+    this.gitMatchRunner = runner
+    void runner.execute()
+    return { ok: true }
+  }
+
+  /** Ask the running manual Git match to stop. */
+  cancelGitMatch(): boolean {
+    return this.gitMatchRunner?.cancel() === true
+  }
+
+  private gitMatchTargets(): GitMatchDeviceTarget[] {
+    const targets: GitMatchDeviceTarget[] = [
+      {
+        deviceId: LOCAL_DEVICE_ID,
+        deviceName: 'Local',
+        state: 'connected',
+        local: true,
+        home: homedir(),
+        workspacePaths: this.localHost.localWorkspaces().map(ws => ws.path),
+      },
+    ]
+    for (const [deviceId, config] of this.configs) {
+      const client = this.clients.get(deviceId)
+      const view = client?.toView()
+      targets.push({
+        deviceId,
+        deviceName: view?.name ?? config.name,
+        state: view?.state ?? 'connecting',
+        local: false,
+        ...(view?.remoteHome !== undefined ? { home: view.remoteHome } : {}),
+        workspacePaths: client?.workspaceItems().map(ws => ws.path) ?? [],
+      })
+    }
+    return targets
+  }
+
+  private async discoverRemoteOrigins(
+    deviceId: DeviceId,
+    paths: readonly string[],
+  ): Promise<Map<string, string>> {
+    if (paths.length === 0) return new Map()
+    const config = this.configs.get(deviceId)
+    if (config === undefined || config.transport.kind !== 'ssh') return new Map()
+    const found = await discoverRemoteGitRemotesViaSsh(config.transport, paths)
+    for (const [path, rawUrl] of found) this.aggregator.noteGitRemote(deviceId, path, rawUrl)
+    return found
+  }
+
+  private async scanRemoteRepos(
+    deviceId: DeviceId,
+    roots: readonly string[],
+  ): Promise<{ ok: true; repos: ScannedRepository[] } | { ok: false; error: string }> {
+    const config = this.configs.get(deviceId)
+    if (config === undefined) return { ok: false, error: 'Device is not configured' }
+    if (config.transport.kind !== 'ssh') {
+      return { ok: false, error: 'Scanning requires an SSH transport' }
+    }
+    return scanRemoteGitRepos(config.transport, roots)
+  }
+
   /** Build the complete snapshot for the Client UI and Aggregated Gateway. */
   snapshot(): MultiDeviceSnapshot {
     const physicalInputs: PhysicalWorkspaceInput[] = [...this.localHost.localWorkspaces()]
@@ -617,6 +744,7 @@ export class DeviceRegistry {
       logicalWorkspaces,
       allPhysicalWorkspaces,
       sessionOrigins,
+      gitMatch: this.gitMatchRun,
     }
   }
 
@@ -751,6 +879,21 @@ export class DeviceRegistry {
       if (raw.aggregation && typeof raw.aggregation === 'object') {
         this.aggregator.setConfig({ ...DEFAULT_AGGREGATION_CONFIG, ...raw.aggregation })
       }
+      if (raw.gitMatch && typeof raw.gitMatch === 'object') {
+        const restored = raw.gitMatch as GitMatchRun
+        // A run cannot survive the process that was driving it.
+        this.gitMatchRun = restored.status === 'running'
+          ? {
+              ...restored,
+              status: 'failed',
+              phase: 'finished',
+              error: 'Interrupted before completion',
+              currentDeviceId: undefined,
+              currentDeviceName: undefined,
+              currentProject: undefined,
+            }
+          : restored
+      }
       if (migratedSecrets) this.saveToDisk()
     } catch {
       // Ignore corrupt config file
@@ -765,6 +908,7 @@ export class DeviceRegistry {
       version: 1,
       devices: [...this.configs.values()],
       aggregation: this.aggregator.getConfig(),
+      gitMatch: this.gitMatchRun,
     }
     try {
       writeFileSync(tmp, JSON.stringify(doc, null, 2), { mode: 0o600 })

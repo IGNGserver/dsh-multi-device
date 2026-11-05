@@ -147,7 +147,15 @@ export declare class RemoteDeviceClient {
     private handle02EmitEvent;
     private pump02WorkspaceFollow;
     private pump02SessionControl;
-    private probeNewWorkspaceGitRemotes;
+    /**
+     * Read `remote.origin.url` for workspaces that are already registered on this
+     * device, so devices that both registered the same repository keep grouping.
+     *
+     * This is deliberately not a filesystem scan and it never registers anything:
+     * only the paths DSH already lists are read. Discovering projects that exist
+     * on disk but are not registered happens solely in the manual Git match.
+     */
+    private refreshRegisteredWorkspaceOrigins;
     private refreshLegacy01Lists;
     private runProtocol01Polling;
     private invokeLegacy01;

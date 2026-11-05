@@ -42,6 +42,7 @@ import {
   type DeviceId,
   type DeviceView,
   type DisplayMode,
+  type GitMatchRun,
   LOCAL_DEVICE_ID,
   type SshConfigHostEntry,
   type SshKeyEntry,
@@ -145,6 +146,70 @@ function SecretCredentialInput({
             <path d={revealed ? EYE_OFF_PATH : EYE_PATH} />
           </svg>
         </Button>
+      )}
+    </div>
+  )
+}
+
+/** Persisted outcome of the previous manual Git match run. */
+function GitMatchLastResult({
+  run,
+  t,
+}: {
+  run: GitMatchRun
+  t: (key: MultiDeviceLocaleKey) => string
+}): React.ReactElement {
+  const finished = run.finishedAt !== undefined ? new Date(run.finishedAt) : undefined
+  const created = run.reports.flatMap(report => report.created)
+  const errors = run.reports.filter(report => report.error !== undefined)
+  const tone =
+    run.status === 'failed' ? 'dsh-md-gitmatch-status-error' : 'dsh-md-gitmatch-status-ok'
+
+  return (
+    <div className="dsh-md-gitmatch-result">
+      <div className="dsh-md-gitmatch-line">
+        <span className={tone}>
+          {t(
+            run.status === 'completed'
+              ? 'gitMatchStatusCompleted'
+              : run.status === 'cancelled'
+                ? 'gitMatchStatusCancelled'
+                : 'gitMatchStatusFailed',
+          )}
+        </span>
+        {finished !== undefined && (
+          <span className="dsh-md-gitmatch-detail">
+            {t('gitMatchFinishedAt').replace('{time}', finished.toLocaleString())}
+          </span>
+        )}
+      </div>
+      <div className="dsh-md-gitmatch-line">
+        <span>{t('gitMatchCreatedCount').replace('{count}', String(run.createdCount))}</span>
+        <span>{t('gitMatchNotFoundCount').replace('{count}', String(run.notFoundCount))}</span>
+        <span>{t('gitMatchAlreadyCount').replace('{count}', String(run.alreadyTrackedCount))}</span>
+      </div>
+      {run.error !== undefined && <div className="dsh-md-gitmatch-detail">{run.error}</div>}
+      {created.length > 0 && (
+        <ul className="dsh-md-gitmatch-created">
+          {created.map(item => (
+            <li key={`${item.gitRemote}:${item.path}`} className="dsh-md-gitmatch-detail">
+              <span className="dsh-md-ellipsis" title={`${item.gitRemote} → ${item.path}`}>
+                {item.gitRemote}
+              </span>
+              <span className="dsh-md-gitmatch-path" title={item.path}>{item.path}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {errors.length > 0 && (
+        <ul className="dsh-md-gitmatch-created">
+          {errors.map(report => (
+            <li key={report.deviceId} className="dsh-md-gitmatch-detail">
+              <span>{report.deviceName}</span>
+              <span className="dsh-md-gitmatch-path">{report.error}</span>
+            </li>
+          ))}
+        </ul>
       )}
     </div>
   )
@@ -587,6 +652,22 @@ export function MultiDeviceHubPanel({
 
   const mergedWorkspaces = snapshot.logicalWorkspaces.filter(w => w.members.length > 1)
   const hasDevices = snapshot.devices.length > 0
+  const gitMatch = snapshot.gitMatch
+  const gitMatchRunning = gitMatch.status === 'running'
+  const [gitMatchBusy, setGitMatchBusy] = useState(false)
+
+  const startGitMatch = (): void => {
+    if (gitMatchBusy || gitMatchRunning) return
+    setGitMatchBusy(true)
+    void clientStore
+      .startGitMatch()
+      .then((res) => {
+        if (!res.ok) pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
+      })
+      .finally(() => {
+        setGitMatchBusy(false)
+      })
+  }
 
   const handleConfirmDelete = async (): Promise<void> => {
     if (deleteTarget === null || deleting) return
@@ -676,6 +757,75 @@ export function MultiDeviceHubPanel({
                 })
             }}
           />
+        </div>
+
+        <div className="dsh-md-gitmatch">
+          <div className="dsh-md-gitmatch-head">
+            <div>
+              <div className="dsh-md-pref-title">{t('gitMatchTitle')}</div>
+              <div className="dsh-md-pref-desc">{t('gitMatchDesc')}</div>
+            </div>
+            <div className="dsh-md-gitmatch-actions">
+              {gitMatchRunning ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    void clientStore.cancelGitMatch()
+                  }}
+                >
+                  {t('gitMatchCancel')}
+                </Button>
+              ) : (
+                <Button
+                  variant="primary"
+                  size="sm"
+                  disabled={gitMatchBusy}
+                  icon={<IconRefreshOutlineRegular size={13} />}
+                  onClick={startGitMatch}
+                >
+                  {gitMatchBusy ? t('gitMatchStarting') : t('gitMatchStart')}
+                </Button>
+              )}
+            </div>
+          </div>
+
+          {gitMatchRunning && (
+            <div className="dsh-md-gitmatch-progress" role="status">
+              <div className="dsh-md-gitmatch-line">
+                <span className="dsh-md-gitmatch-phase">
+                  {t(
+                    gitMatch.phase === 'discovering'
+                      ? 'gitMatchPhaseDiscovering'
+                      : gitMatch.phase === 'creating'
+                        ? 'gitMatchPhaseCreating'
+                        : 'gitMatchPhaseScanning',
+                  )}
+                </span>
+                {gitMatch.currentDeviceName !== undefined && (
+                  <span className="dsh-md-gitmatch-detail">{gitMatch.currentDeviceName}</span>
+                )}
+                {gitMatch.currentProject !== undefined && (
+                  <span className="dsh-md-gitmatch-detail dsh-md-ellipsis">
+                    {gitMatch.currentProject}
+                  </span>
+                )}
+              </div>
+              <div className="dsh-md-gitmatch-line">
+                <span>{t('gitMatchDeviceProgress')
+                  .replace('{done}', String(gitMatch.processedDevices))
+                  .replace('{total}', String(gitMatch.totalDevices))}</span>
+                <span>{t('gitMatchProjectProgress')
+                  .replace('{done}', String(gitMatch.processedProjects))
+                  .replace('{total}', String(gitMatch.totalProjects))}</span>
+                <span>{t('gitMatchCreatedCount').replace('{count}', String(gitMatch.createdCount))}</span>
+              </div>
+            </div>
+          )}
+
+          {!gitMatchRunning && gitMatch.status !== 'idle' && (
+            <GitMatchLastResult run={gitMatch} t={t} />
+          )}
         </div>
 
         {snapshot.aggregationConfig.autoGitAggregate && mergedWorkspaces.length > 0 && (

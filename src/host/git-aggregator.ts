@@ -47,9 +47,16 @@ export interface PhysicalWorkspaceInput {
 }
 
 /**
- * Parse a `.git/config` INI body and extract `remote "origin"` URL (or the first `remote` URL).
+ * Parse a `.git/config` INI body and extract the `remote "origin"` URL.
+ *
+ * `originOnly` keeps a repository identity tied to `origin`. Falling back to
+ * the first remote would resolve `nas` backup remotes and split one repository
+ * across devices, so scanning and matching always use `originOnly`.
  */
-export function parseGitConfigRemoteUrl(configText: string): string | undefined {
+export function parseGitConfigRemoteUrl(
+  configText: string,
+  options: { readonly originOnly?: boolean } = {},
+): string | undefined {
   let currentRemote: string | undefined
   let originUrl: string | undefined
   let fallbackUrl: string | undefined
@@ -79,7 +86,7 @@ export function parseGitConfigRemoteUrl(configText: string): string | undefined 
     }
   }
 
-  return originUrl ?? fallbackUrl
+  return originUrl ?? (options.originOnly === true ? undefined : fallbackUrl)
 }
 
 /**
@@ -87,7 +94,10 @@ export function parseGitConfigRemoteUrl(configText: string): string | undefined 
  * (supports both normal `.git` directories and `.git` worktree pointer files).
  * Purely read-only and synchronous with zero child-process overhead.
  */
-export function discoverLocalGitRemote(directoryPath: string): string | undefined {
+export function discoverLocalGitRemote(
+  directoryPath: string,
+  options: { readonly originOnly?: boolean } = {},
+): string | undefined {
   if (!directoryPath || !isAbsolute(directoryPath)) return undefined
   let current = directoryPath
   for (let depth = 0; depth < 6; depth++) {
@@ -98,7 +108,7 @@ export function discoverLocalGitRemote(directoryPath: string): string | undefine
         if (st.isDirectory()) {
           const configFile = join(dotGit, 'config')
           if (existsSync(configFile)) {
-            return parseGitConfigRemoteUrl(readFileSync(configFile, 'utf8'))
+            return parseGitConfigRemoteUrl(readFileSync(configFile, 'utf8'), options)
           }
         } else if (st.isFile()) {
           // Worktree or submodule pointer: `gitdir: /path/to/.git/worktrees/slug`
@@ -113,16 +123,16 @@ export function discoverLocalGitRemote(directoryPath: string): string | undefine
               const commonDir = isAbsolute(commonRel) ? commonRel : resolve(gitDir, commonRel)
               const commonConfig = join(commonDir, 'config')
               if (existsSync(commonConfig)) {
-                return parseGitConfigRemoteUrl(readFileSync(commonConfig, 'utf8'))
+                return parseGitConfigRemoteUrl(readFileSync(commonConfig, 'utf8'), options)
               }
             }
             const directConfig = join(gitDir, 'config')
             if (existsSync(directConfig)) {
-              return parseGitConfigRemoteUrl(readFileSync(directConfig, 'utf8'))
+              return parseGitConfigRemoteUrl(readFileSync(directConfig, 'utf8'), options)
             }
             const parentConfig = resolve(gitDir, '..', '..', 'config')
             if (existsSync(parentConfig)) {
-              return parseGitConfigRemoteUrl(readFileSync(parentConfig, 'utf8'))
+              return parseGitConfigRemoteUrl(readFileSync(parentConfig, 'utf8'), options)
             }
           }
         }
@@ -152,9 +162,9 @@ export async function discoverRemoteGitRemotesViaSsh(
   // Build a safe POSIX shell snippet that prints `PATH\tURL` per directory
   const commands = uniquePaths.map((p, idx) => {
     const escaped = `'${p.replaceAll("'", "'\\''")}'`
+    // origin only. A first-remote fallback would pick `nas` and split one repo.
     return [
       `u=$(git -C ${escaped} config --get remote.origin.url 2>/dev/null || true)`,
-      `if [ -z "$u" ]; then u=$(git -C ${escaped} config --get-regexp '^remote\\..*\\.url$' 2>/dev/null | head -n 1 | awk '{print $2}'); fi`,
       `printf "__DSH_GIT_%d__\\t%s\\n" ${idx} "$u"`,
     ].join('; ')
   })
@@ -177,7 +187,7 @@ export async function discoverRemoteGitRemotesViaSsh(
 
 export const DEFAULT_AGGREGATION_CONFIG: WorkspaceAggregationConfig = {
   autoGitAggregate: true,
-  prefixUnmatchedWithDevice: true,
+  prefixUnmatchedWithDevice: false,
   excludedMemberKeys: [],
   preferredDeviceByLogicalId: {},
   customTitleByLogicalId: {},
@@ -416,11 +426,7 @@ export class WorkspaceAggregator {
         : encodeRemoteWorkspaceId(entry.input.deviceId, entry.input.workspaceId)
       const customTitle = this.config.customTitleByLogicalId[workspaceId]
       const baseTitle = entry.input.title
-      const title =
-        customTitle ??
-        (!isLocal && this.config.prefixUnmatchedWithDevice
-          ? `[${entry.input.deviceName}] ${baseTitle}`
-          : baseTitle)
+      const title = customTitle ?? baseTitle
 
       logicalWorkspaces.push({
         logicalWorkspaceId: workspaceId,

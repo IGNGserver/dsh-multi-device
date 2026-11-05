@@ -26,6 +26,7 @@ import {
   SessionRowLeadingBadge,
 } from './ModeSwitcherOverlay.tsx'
 import { MultiDeviceHubPanel } from './MultiDeviceHubPanel.tsx'
+import { installProjectDeviceBadges } from './projectBadges.ts'
 import { MultiDeviceSidebarEntry } from './SidebarEntry.tsx'
 import { clientStore } from './state.ts'
 import { adoptMultiDeviceStyles } from './styles.ts'
@@ -120,6 +121,12 @@ export function apply(ctx: ClientContextLike): void {
   const handleOpenSettings = (): void => {
     openSettingsSection(ctx, SETTINGS_SECTION_ID)
   }
+
+  // Sidebar project rows get a device dot + device name / device count.
+  ctx.effect(
+    () => installProjectDeviceBadges(getTranslate()),
+    'dsh-multi-device: project device badges',
+  )
 
   // 1. Register keyboard shortcut (Cmd/Ctrl+Shift+M) to toggle Aggregated ⟷ Native mode
   ctx.inject(['shortcuts'], (shortcutCtx) => {
