@@ -37,6 +37,7 @@ import {
   Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import React, { useEffect, useId, useState } from 'react'
+import { DshSelect } from './DshSelect.tsx'
 import {
   type DeviceId,
   type DeviceView,
@@ -300,22 +301,20 @@ function DeviceEditorForm({
           {device !== undefined ? t('editDevice') : t('addDevice')}
         </span>
         {sshConfigHosts.length > 0 && (
-          <select
-            className="dsh-md-native-select dsh-md-native-select-compact"
+          <DshSelect
+            compact
+            clearOnSelect
             value=""
-            aria-label={t('importSshPlaceholder')}
+            placeholder={t('importSshPlaceholder')}
+            ariaLabel={t('importSshPlaceholder')}
             disabled={busy}
-            onChange={(e) => handleImportSshHost(e.currentTarget.value)}
-          >
-            <option value="" disabled>
-              {t('importSshPlaceholder')}
-            </option>
-            {sshConfigHosts.map((h) => (
-              <option key={h.alias} value={h.alias}>
-                {h.alias} ({h.user ? `${h.user}@` : ''}{h.hostName}{h.port && h.port !== 22 ? `:${String(h.port)}` : ''})
-              </option>
-            ))}
-          </select>
+            options={sshConfigHosts.map((h) => ({
+              value: h.alias,
+              label: h.alias,
+              description: `${h.user ? `${h.user}@` : ''}${h.hostName}${h.port && h.port !== 22 ? `:${String(h.port)}` : ''}`,
+            }))}
+            onChange={(alias) => handleImportSshHost(alias)}
+          />
         )}
       </div>
 
@@ -424,23 +423,23 @@ function DeviceEditorForm({
             <label className="dsh-md-field-label" htmlFor={`${formId}-key`}>
               {t('sshKeySelect')}
             </label>
-            <select
+            <DshSelect
               id={`${formId}-key`}
-              className="dsh-md-native-select"
               value={sshKeyPath}
+              placeholder={t('sshKeyAuto')}
               disabled={busy}
-              onChange={(e) => setSshKeyPath(e.currentTarget.value)}
-            >
-              <option value="">{t('sshKeyAuto')}</option>
-              {hasCustomKeyPath && (
-                <option value={sshKeyPath}>{sshKeyPath}</option>
-              )}
-              {sshKeys.map((key) => (
-                <option key={key.path} value={key.path}>
-                  {key.name}{key.encrypted ? ' (encrypted)' : ''}{key.permissionsTooOpen ? ' (!)' : ''}
-                </option>
-              ))}
-            </select>
+              options={[
+                { value: '', label: t('sshKeyAuto'), description: t('sshKeyAutoDesc') },
+                ...(hasCustomKeyPath ? [{ value: sshKeyPath, label: sshKeyPath, description: sshKeyPath }] : []),
+                ...sshKeys.map((key) => ({
+                  value: key.path,
+                  label: key.name,
+                  description: key.path,
+                  badge: key.encrypted ? 'encrypted' : key.permissionsTooOpen ? '(!)' : undefined,
+                })),
+              ]}
+              onChange={(next) => setSshKeyPath(next)}
+            />
           </div>
 
           {showPassphraseField && (
@@ -680,32 +679,69 @@ export function MultiDeviceHubPanel({
         </div>
 
         {snapshot.aggregationConfig.autoGitAggregate && mergedWorkspaces.length > 0 && (
-          <div className="dsh-md-merged-repos">
-            <div className="dsh-md-merged-repos-label">{t('targetDeviceHeading')}</div>
-            {mergedWorkspaces.map((lws) => (
-              <div key={lws.logicalWorkspaceId} className="dsh-md-merged-repo-row">
-                <span className="dsh-md-merged-repo-name" title={lws.gitRemote ?? lws.title}>
-                  {lws.title}
-                </span>
-                <select
-                  className="dsh-md-native-select dsh-md-native-select-compact"
-                  value={lws.targetDeviceId}
-                  aria-label={`${lws.title} - ${t('targetDeviceHeading')}`}
-                  onChange={(e) => {
-                    void clientStore.setPreferredDevice(
-                      lws.logicalWorkspaceId,
-                      e.currentTarget.value as DeviceId,
-                    )
-                  }}
+          <div className="dsh-md-subpanel">
+            <div className="dsh-md-subpanel-header">
+              <div className="dsh-md-subpanel-title-wrap">
+                <svg
+                  width={14}
+                  height={14}
+                  viewBox="0 0 16 16"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={1.3}
+                  aria-hidden="true"
+                  className="dsh-md-subpanel-icon"
                 >
-                  {lws.members.map(m => (
-                    <option key={`${m.deviceId}:${m.path}`} value={m.deviceId}>
-                      {m.deviceId === LOCAL_DEVICE_ID ? 'Local' : m.deviceName} ({m.path})
-                    </option>
-                  ))}
-                </select>
+                  <circle cx="4" cy="4" r="2" />
+                  <circle cx="4" cy="12" r="2" />
+                  <circle cx="12" cy="7" r="2" />
+                  <path d="M4 6v4M4 8c2.5 0 4.5-1 6-1" strokeLinecap="round" />
+                </svg>
+                <span className="dsh-md-subpanel-title">{t('targetDeviceHeading')}</span>
               </div>
-            ))}
+              <span className="dsh-md-subpanel-desc">{t('targetDeviceSubDesc')}</span>
+            </div>
+            <div className="dsh-md-merged-repos-list">
+              {mergedWorkspaces.map((lws) => {
+                const selectOptions = lws.members.map((m) => {
+                  const devView = snapshot.devices.find(d => d.id === m.deviceId)
+                  return {
+                    value: m.deviceId,
+                    label: m.deviceId === LOCAL_DEVICE_ID ? 'Local' : m.deviceName,
+                    description: m.path,
+                    dotState: m.deviceId === LOCAL_DEVICE_ID ? ('done' as const) : deviceStateToDotState(devView?.state ?? 'connected'),
+                  }
+                })
+
+                return (
+                  <div key={lws.logicalWorkspaceId} className="dsh-md-merged-repo-card">
+                    <div className="dsh-md-merged-repo-info">
+                      <span className="dsh-md-merged-repo-name" title={lws.title}>
+                        {lws.title}
+                      </span>
+                      {lws.gitRemote && (
+                        <span className="dsh-md-merged-repo-remote" title={lws.gitRemote}>
+                          {lws.gitRemote}
+                        </span>
+                      )}
+                    </div>
+                    <DshSelect
+                      compact
+                      value={lws.targetDeviceId}
+                      placeholder={t('selectDevicePlaceholder')}
+                      ariaLabel={`${lws.title} - ${t('targetDeviceHeading')}`}
+                      options={selectOptions}
+                      onChange={(next) => {
+                        void clientStore.setPreferredDevice(
+                          lws.logicalWorkspaceId,
+                          next as DeviceId,
+                        )
+                      }}
+                    />
+                  </div>
+                )
+              })}
+            </div>
           </div>
         )}
       </div>
@@ -713,7 +749,12 @@ export function MultiDeviceHubPanel({
       {/* Remote Devices List & Inline Editor (aligned with DSH Models Settings cards) */}
       <div className="dsh-md-devices-block">
         <div className="dsh-md-devices-header">
-          <h3 className="dsh-md-devices-heading">{t('devicesHeading')}</h3>
+          <div className="dsh-md-devices-heading-group">
+            <h3 className="dsh-md-devices-heading">{t('devicesHeading')}</h3>
+            {hasDevices && (
+              <span className="dsh-md-devices-count-pill">{snapshot.devices.length}</span>
+            )}
+          </div>
           {!addingNew && (
             <Button
               variant="outline"
@@ -759,19 +800,23 @@ export function MultiDeviceHubPanel({
                     <div className="dsh-md-row-identity">
                       <StateDot state={deviceStateToDotState(dev.state)} size={8} />
                       <span className="dsh-md-row-name">{dev.name}</span>
-                      <Tag>
-                        <span className="dsh-md-code-text">{formatCompactDeviceTarget(dev)}</span>
-                      </Tag>
+                      <span className="dsh-md-device-endpoint" title={formatCompactDeviceTarget(dev)}>
+                        {formatCompactDeviceTarget(dev)}
+                      </span>
                       {dev.latencyMs !== undefined && dev.state === 'connected' && (
-                        <Tag>{dev.latencyMs}ms</Tag>
+                        <span className="dsh-md-latency-text">{dev.latencyMs}ms</span>
                       )}
                       {dev.runningSessionCount > 0 && (
-                        <Tag>{t('runningCount').replace('{count}', String(dev.runningSessionCount))}</Tag>
+                        <span className="dsh-md-session-count-badge">
+                          {t('runningCount').replace('{count}', String(dev.runningSessionCount))}
+                        </span>
                       )}
                       {dev.pendingApprovalCount > 0 && (
                         <Tag>{t('pendingCount').replace('{count}', String(dev.pendingApprovalCount))}</Tag>
                       )}
-                      {dev.authState === 'required' && <Tag>{t('authRequired')}</Tag>}
+                      {dev.authState === 'required' && (
+                        <span className="dsh-md-auth-required-tag">{t('authRequired')}</span>
+                      )}
                     </div>
 
                     <div className="dsh-md-row-actions">
@@ -787,53 +832,55 @@ export function MultiDeviceHubPanel({
                         {t('openNative')}
                       </Button>
 
-                      <Tooltip label={t('reconnect')} side="top">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          aria-label={t('reconnect')}
-                          onClick={() => {
-                            void clientStore.reconnectDevice(dev.id).then((res) => {
-                              if (res.ok) {
-                                pushToast(t('reconnectedNotice'), 'success')
-                              } else {
-                                pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
-                              }
-                            })
-                          }}
-                        >
-                          <IconRefreshOutlineRegular size={14} />
-                        </Button>
-                      </Tooltip>
+                      <div className="dsh-md-icon-actions-group">
+                        <Tooltip label={t('reconnect')} side="top">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            aria-label={t('reconnect')}
+                            onClick={() => {
+                              void clientStore.reconnectDevice(dev.id).then((res) => {
+                                if (res.ok) {
+                                  pushToast(t('reconnectedNotice'), 'success')
+                                } else {
+                                  pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
+                                }
+                              })
+                            }}
+                          >
+                            <IconRefreshOutlineRegular size={14} />
+                          </Button>
+                        </Tooltip>
 
-                      <Tooltip label={t('editDevice')} side="top">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          aria-label={t('editDevice')}
-                          aria-expanded={isEditing}
-                          onClick={() => {
-                            setAddingNew(false)
-                            setEditingDeviceId(isEditing ? null : dev.id)
-                          }}
-                        >
-                          <IconEditOutlineRegular size={14} />
-                        </Button>
-                      </Tooltip>
+                        <Tooltip label={t('editDevice')} side="top">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            aria-label={t('editDevice')}
+                            aria-expanded={isEditing}
+                            onClick={() => {
+                              setAddingNew(false)
+                              setEditingDeviceId(isEditing ? null : dev.id)
+                            }}
+                          >
+                            <IconEditOutlineRegular size={14} />
+                          </Button>
+                        </Tooltip>
 
-                      <Tooltip label={t('remove')} side="top">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          aria-label={t('remove')}
-                          onClick={() => {
-                            setDeleteError(null)
-                            setDeleteTarget(dev)
-                          }}
-                        >
-                          <IconTrashOutlineRegular size={14} />
-                        </Button>
-                      </Tooltip>
+                        <Tooltip label={t('remove')} side="top">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            aria-label={t('remove')}
+                            onClick={() => {
+                              setDeleteError(null)
+                              setDeleteTarget(dev)
+                            }}
+                          >
+                            <IconTrashOutlineRegular size={14} />
+                          </Button>
+                        </Tooltip>
+                      </div>
                     </div>
                   </div>
 

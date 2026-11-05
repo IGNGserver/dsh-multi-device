@@ -21,6 +21,8 @@ export declare const zh: {
     readonly gitAutoTitle: "自动聚合相同 Git 仓库";
     readonly gitAutoDesc: "将不同设备上指向同一 Git 远端的工作区合并展示会话，不会同步或修改任何项目文件。";
     readonly targetDeviceHeading: "跨设备仓库的新建会话默认设备";
+    readonly targetDeviceSubDesc: "在聚合模式下向指向同一 Git 远端的仓库发起新会话时，由所选设备执行。";
+    readonly selectDevicePlaceholder: "选择承接设备…";
     readonly devicesHeading: "远端设备";
     readonly addDevice: "添加设备";
     readonly editDevice: "编辑设备";
@@ -40,6 +42,7 @@ export declare const zh: {
     readonly sshPort: "SSH 端口";
     readonly sshKeySelect: "SSH 私钥";
     readonly sshKeyAuto: "自动（SSH Agent / 默认密钥）";
+    readonly sshKeyAutoDesc: "优先复用系统 SSH Agent 或默认密钥对";
     readonly sshKeyPassphrase: "私钥口令";
     readonly sshKeyPassphrasePlaceholder: "输入加密私钥口令；留空使用 SSH Agent";
     readonly sshProxyJump: "ProxyJump 跳板机";
