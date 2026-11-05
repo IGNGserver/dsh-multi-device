@@ -1784,7 +1784,7 @@ describe('8. Native Settings UI & Streamlined Client State Helpers', () => {
     const React = await import('react')
     const { renderToStaticMarkup } = await import('react-dom/server')
     const clientEntry = await import('../src/client/index.tsx')
-    const { zh } = await import('../src/client/locales.ts')
+    const { zh, en } = await import('../src/client/locales.ts')
     const { clientStore } = await import('../src/client/state.ts')
 
     const injectedSlots: string[] = []
@@ -1902,6 +1902,24 @@ describe('8. Native Settings UI & Streamlined Client State Helpers', () => {
         }),
       )
       expect(menuHtml).toContain('data-primitive="MenuItemButton"')
+
+      // DshSelect renders compliant trigger and options
+      const { DshSelect } = await import('../src/client/DshSelect.tsx')
+      const selectHtml = renderToStaticMarkup(
+        React.createElement(DshSelect, {
+          value: 'val-1',
+          options: [
+            { value: 'val-1', label: 'Item 1', description: '/path/1' },
+            { value: 'val-2', label: 'Item 2', description: '/path/2' },
+          ],
+          onChange: () => {},
+          placeholder: 'Pick one',
+        }),
+      )
+      expect(selectHtml).toContain('dsh-md-select-container')
+      expect(selectHtml).toContain('Item 1')
+      expect(zh.targetDeviceSubDesc).toBeDefined()
+      expect(en.targetDeviceSubDesc).toBeDefined()
     } finally {
       for (const dispose of disposers) dispose()
       vi.doUnmock('@deepseek-ai/dsh-client-ui-primitives')
