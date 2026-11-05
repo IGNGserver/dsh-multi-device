@@ -20,6 +20,7 @@ import { join } from 'node:path'
 import {
   installAggregatedGateway02,
   readLocalPhysicalWorkspaces,
+  supportsWorkspaceReplaceFrames,
   type SessionControllerLike,
   type TypertGatewayLike,
   type WorkspaceControllerLike,
@@ -106,6 +107,23 @@ export function apply(ctx: Context, config?: Config): void {
   const getWorkspaceRegistry = (): WorkspaceRegistryLike | undefined => {
     try {
       return (ctx as unknown as { get?: (k: string) => unknown }).get?.('workspaceRegistry') as WorkspaceRegistryLike | undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * The Client WorkspaceModel ships with the same release as the Host. Its
+   * `clientModules` service publishes that release version; DSH 0.2.0 does
+   * not understand an incremental workspace `replace`, so the aggregated
+   * stream only uses it on newer clients.
+   */
+  const getClientReleaseVersion = (): string | undefined => {
+    try {
+      const service = (ctx as unknown as { get?: (k: string) => unknown }).get?.('clientModules') as
+        | { release?: { version?: unknown } }
+        | undefined
+      return typeof service?.release?.version === 'string' ? service.release.version : undefined
     } catch {
       return undefined
     }
@@ -273,6 +291,10 @@ export function apply(ctx: Context, config?: Config): void {
               workspaceController,
               typertGateway,
               getWorkspaceRegistry(),
+              {
+                workspaceReplaceFrames: () =>
+                  supportsWorkspaceReplaceFrames(getClientReleaseVersion()),
+              },
             )
             registry.setGatewayStatus(true)
             return () => {

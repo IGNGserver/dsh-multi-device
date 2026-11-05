@@ -68,11 +68,13 @@ import {
 import {
   installAggregatedGateway02,
   isSameDeviceChildSession,
+  supportsWorkspaceReplaceFrames,
   unavailableRemoteCatalog,
   type SessionControllerLike,
   type TypertGatewayLike,
   type WorkspaceControllerLike,
 } from '../src/host/gateway.ts'
+import { shouldDecorateProjectRows } from '../src/client/projectBadges.ts'
 import { requestRemote } from '../src/host/http-request.ts'
 import { NativeDeviceProxy } from '../src/host/native-proxy.ts'
 import { describeProbeFailure, DeviceRegistry } from '../src/host/registry.ts'
@@ -119,6 +121,26 @@ afterEach(() => {
       try { rmSync(dir, { recursive: true, force: true }) } catch { /* ignore */ }
     }
   }
+})
+
+describe('0. Mode/chrome regressions', () => {
+  it('only decorates workspace rows in aggregated mode', () => {
+    expect(shouldDecorateProjectRows('aggregated')).toBe(true)
+    expect(shouldDecorateProjectRows('native')).toBe(false)
+    expect(shouldDecorateProjectRows(undefined)).toBe(false)
+  })
+
+  it('enables incremental workspace replace frames only on clients that support them', () => {
+    expect(supportsWorkspaceReplaceFrames(undefined)).toBe(false)
+    expect(supportsWorkspaceReplaceFrames('0.2.0-rc.2')).toBe(false)
+    expect(supportsWorkspaceReplaceFrames('0.2.1-alpha.5')).toBe(false)
+    expect(supportsWorkspaceReplaceFrames('0.2.1-rc.0')).toBe(false)
+    expect(supportsWorkspaceReplaceFrames('0.2.1-rc.1')).toBe(true)
+    expect(supportsWorkspaceReplaceFrames('0.2.1-rc.5')).toBe(true)
+    expect(supportsWorkspaceReplaceFrames('0.2.1')).toBe(true)
+    expect(supportsWorkspaceReplaceFrames('0.2.2-rc.1')).toBe(true)
+    expect(supportsWorkspaceReplaceFrames('v0.3.0')).toBe(true)
+  })
 })
 
 describe('1. Identity Mapping & Git Remote URL Normalization', () => {
@@ -507,6 +529,7 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
     const remotePrompts: unknown[] = []
     const remoteApprovalResults: unknown[] = []
     let pushRemoteEvent: ((frame: unknown) => void) | undefined
+    let pushRemoteWorkspaceFrame: ((frame: unknown) => void) | undefined
 
     const wss = new WebSocketServer({ noServer: true })
     wss.on('connection', (ws) => {
@@ -559,6 +582,9 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
                 },
               }),
             )
+            pushRemoteWorkspaceFrame = (frame) => {
+              ws.send(JSON.stringify({ type: 'item', streamId: msg.streamId, value: frame }))
+            }
           } else if (msg.endpoint === 'session/control') {
             ws.send(
               JSON.stringify({
@@ -763,6 +789,30 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
         snap.allPhysicalWorkspaces.find(member => member.deviceId === devId)?.sessionCount,
       ).toBe(1)
 
+      // DSH 0.2.2 replaces the complete workspace projection when remote-access
+      // visibility changes. The plugin's RemoteDeviceClient must treat that as
+      // authoritative instead of ignoring the frame.
+      pushRemoteWorkspaceFrame?.({
+        type: 'replace',
+        value: {
+          items: [{
+            workspaceId: 'rws-1',
+            path: '/home/remoteuser/shared-repo',
+            title: 'shared-repo-replaced',
+            sessionIds: ['rsess-1'],
+            createdAt: '2026-10-01T00:00:00.000Z',
+            updatedAt: '2026-10-03T00:00:00.000Z',
+          }],
+          archivedSessionIds: [],
+          pinnedSessionIds: [],
+        },
+      })
+      for (let i = 0; i < 40; i++) {
+        if (registry.client(devId)?.workspaceItems()[0]?.title === 'shared-repo-replaced') break
+        await new Promise(r => setTimeout(r, 25))
+      }
+      expect(registry.client(devId)?.workspaceItems()[0]?.title).toBe('shared-repo-replaced')
+
       // Verify Native Mode Reverse Proxy serves remote HTML and strips X-Frame-Options & CSP frame-ancestors
       const proxyUrl = snap.devices[0]?.nativeProxyUrl
       expect(proxyUrl).toBeDefined()
@@ -883,6 +933,7 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
         mockWorkspaceController,
         mockGateway,
         mockWorkspaceRegistry,
+        { workspaceReplaceFrames: true },
       )
 
       // 1) Merged session.list
@@ -1004,6 +1055,16 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
       expect(remoteApprovalResults).toHaveLength(1)
       expect((remoteApprovalResults[0] as { eventId: string }).eventId).toBe('rem-ev-99')
 
+      // The long-lived follow stream below is the important shape: a real
+      // browser keeps this generation open across mode switches. Opening a
+      // fresh stream after the switch (as older tests did) always receives a
+      // baseline and cannot catch a `remove` that tombstoned an id.
+      const liveAbort = new AbortController()
+      const liveFrames = mockWorkspaceController.follow(liveAbort.signal)[Symbol.asyncIterator]()
+      const liveBaseline = await liveFrames.next()
+      expect(liveBaseline.done).toBe(false)
+      expect(liveBaseline.value.type).toBe('baseline')
+
       // 4) Native Mode makes the local tab strictly local on the Host side.
       const controlPlane = new MultiDeviceControlPlane(registry)
       const nativeMode = await controlPlane.dispatch({
@@ -1012,6 +1073,12 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
       })
       expect(nativeMode.ok).toBe(true)
       expect(registry.snapshot().displayMode).toBe('native')
+
+      const nativeReplace = await liveFrames.next()
+      expect(nativeReplace.done).toBe(false)
+      expect(nativeReplace.value.type).toBe('replace')
+      expect((nativeReplace.value.value as { items: { workspaceId: string }[] }).items)
+        .toEqual([expect.objectContaining({ workspaceId: 'lws-1' })])
 
       const nativeListed = await mockSessionController.list({}, new AbortController().signal)
       expect(nativeListed.items.map(item => item.sessionId)).toEqual(['lsess-1'])
@@ -1076,6 +1143,14 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
         payload: { displayMode: 'aggregated' },
       })
       expect(aggregatedMode.ok).toBe(true)
+
+      const aggregatedReplace = await liveFrames.next()
+      expect(aggregatedReplace.done).toBe(false)
+      expect(aggregatedReplace.value.type).toBe('replace')
+      expect((aggregatedReplace.value.value as { items: { workspaceId: string }[] }).items)
+        .toEqual([expect.objectContaining({ workspaceId: snap.logicalWorkspaces[0]?.logicalWorkspaceId })])
+      liveAbort.abort()
+
       const restored = await mockSessionController.list({}, new AbortController().signal)
       expect(restored.items.map(item => item.sessionId)).toEqual([
         encodeRemoteSessionId(devId, 'rsess-1'),
@@ -1087,6 +1162,25 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
       aggregatedAbort.abort()
       expect((aggregatedBaseline.value as { items: { workspaceId: string }[] }).items)
         .toEqual([expect.objectContaining({ workspaceId: snap.logicalWorkspaces[0]?.logicalWorkspaceId })])
+
+      // Deleting a merged logical Workspace only splits aggregation. The unary
+      // reply removes the old row in the Client immediately, so the Host must
+      // publish the replacement single rows on the same follow stream.
+      const splitAbort = new AbortController()
+      const splitFrames = mockWorkspaceController.follow(splitAbort.signal)[Symbol.asyncIterator]()
+      const splitBaseline = await splitFrames.next()
+      expect(splitBaseline.value.type).toBe('baseline')
+      const logicalId = snap.logicalWorkspaces[0]!.logicalWorkspaceId
+      const deleted = await mockWorkspaceController.delete({ workspaceId: logicalId })
+      expect(deleted.deleted).toBe(true)
+      const splitReplace = await splitFrames.next()
+      expect(splitReplace.value.type).toBe('replace')
+      const splitIds = (splitReplace.value.value as { items: { workspaceId: string }[] }).items
+        .map(item => item.workspaceId)
+      const expectedSplit = registry.snapshot().logicalWorkspaces.map(workspace => workspace.logicalWorkspaceId)
+      expect(expectedSplit).toHaveLength(2)
+      expect(new Set(splitIds)).toEqual(new Set(expectedSplit))
+      splitAbort.abort()
 
       disposeGateway()
       registry.dispose()

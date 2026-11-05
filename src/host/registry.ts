@@ -1001,6 +1001,17 @@ export class DeviceRegistry {
     )
   }
 
+  /**
+   * Publish a workspace-set change made directly through the aggregator
+   * (a logical-workspace split, an external organizer, ...). Workspace
+   * consumers derive both data and visibility from the registry snapshot, so
+   * they must be woken even when no platform controller method ran.
+   */
+  refreshWorkspaceView(): void {
+    this.bumpRevision()
+    this.notifyWorkspacesChanged()
+  }
+
   private bumpRevision(): void {
     this.revision += 1
     for (const listener of this.listeners) {
