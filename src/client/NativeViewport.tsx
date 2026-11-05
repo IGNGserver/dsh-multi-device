@@ -1,26 +1,26 @@
 /**
- * Native Mode Keep-Alive Viewport (`NativeViewport`).
+ * Native Mode tab bar and keep-alive viewport.
  *
- * Loads the complete DSH Web UI of any configured remote device inside DSH Desktop / Web,
- * preserving the remote device's DSH version, theme, installed plugins, and live WebSocket state.
+ * Native Mode is a tab strip that never disappears:
+ * - 本机 (leftmost) reveals the unmodified local DSH page; it is not an iframe.
+ * - Every configured remote device opens its complete remote DSH Web UI below
+ *   the same strip. There is deliberately no "Back to Aggregated" control;
+ *   the mode is switched from Settings.
  *
- * Keep-Alive Mechanism:
- * - Every device in `keepAliveDeviceIds` stays mounted in the DOM simultaneously.
- * - Inactive devices or backgrounded Native Mode use `display: none` + `visibility: hidden`
- *   instead of unmounting, so switching between devices or toggling between Aggregated Mode
- *   and Native Mode preserves the live WebSocket, conversations, and composer drafts.
- *   Chromium may throttle timers/rendering in hidden frames; state is kept, but background
- *   pages are not guaranteed to paint or poll at full speed.
- * - Supports Electron Desktop's `<webview>` guest bridge (`globalThis.dshDesktop?.browser`)
- *   as well as standard `<iframe>` pointed at the pre-authenticated local `nativeProxyUrl`.
+ * Keep-Alive:
+ * - Every device in `keepAliveDeviceIds` stays mounted in the DOM.
+ * - Inactive devices are hidden with `display: none` instead of unmounting, so
+ *   switching tabs or entering Aggregated Mode preserves live WebSocket state,
+ *   conversations, and composer drafts.
+ * - Supports Electron Desktop's `<webview>` guest bridge
+ *   (`globalThis.dshDesktop?.browser`) and a standard authenticated `<iframe>`.
  *
  * @module dsh-multi-device/client/NativeViewport
  */
 import {
   Button,
-  IconChevronLeftOutlineRegular,
   IconCloseOutlineRegular,
-  IconPlusOutlineRegular,
+  IconGlobeOutlineRegular,
   IconRefreshOutlineRegular,
   IconRightUpOutlineRegular,
   IconSettingsOutlineRegular,
@@ -180,184 +180,165 @@ function KeepAliveDeviceFrame({
   )
 }
 
-export function NativeViewport({
+/**
+ * Always-visible Native Mode tab strip. 本机 is the first tab and the stable
+ * fallback when no remote device is selected.
+ */
+export function NativeTabBar({
   t,
-  embedded = false,
   onOpenSettings,
 }: {
   t: (key: MultiDeviceLocaleKey) => string
-  embedded?: boolean
-  onOpenSettings?: () => void
+  onOpenSettings: () => void
+}): React.ReactElement | null {
+  const state = useMultiDeviceState()
+  const { devices } = state.snapshot
+  if (state.displayMode !== 'native') return null
+
+  const activeDevice = devices.find(device => device.id === state.activeNativeDeviceId)
+  const localActive = activeDevice === undefined
+
+  return (
+    <div className="dsh-md-native-bar">
+      <div className="dsh-md-native-tabs" role="tablist" aria-label={t('nativeTabsLabel')}>
+        <div className="dsh-md-native-tab-item">
+          <Pill
+            active={localActive}
+            role="tab"
+            aria-selected={localActive}
+            onClick={() => clientStore.selectLocalNativeTab()}
+          >
+            <span className="dsh-md-pill-inner">
+              <IconGlobeOutlineRegular size={13} />
+              <span>{t('nativeLocalTab')}</span>
+            </span>
+          </Pill>
+        </div>
+
+        {devices.map((dev) => {
+          const isSelected = dev.id === state.activeNativeDeviceId
+          const isKeptAlive = state.keepAliveDeviceIds.includes(dev.id)
+          return (
+            <div key={dev.id} className="dsh-md-native-tab-item">
+              <Pill
+                active={isSelected}
+                role="tab"
+                aria-selected={isSelected}
+                onClick={() => { void clientStore.selectNativeDevice(dev.id) }}
+              >
+                <span className="dsh-md-pill-inner">
+                  <StateDot state={deviceStateToDotState(dev.state)} size={8} />
+                  <span>{dev.name}</span>
+                  {dev.runningSessionCount > 0 && (
+                    <span className="dsh-md-muted">
+                      {t('runningCount').replace('{count}', String(dev.runningSessionCount))}
+                    </span>
+                  )}
+                  {dev.latencyMs !== undefined && (
+                    <span className="dsh-md-muted">{dev.latencyMs}ms</span>
+                  )}
+                </span>
+              </Pill>
+              {isKeptAlive && (
+                <Tooltip label={t('releaseKeepAlive')} side="bottom">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label={t('releaseKeepAlive')}
+                    onClick={() => clientStore.releaseKeepAliveDevice(dev.id)}
+                  >
+                    <IconCloseOutlineRegular size={12} />
+                  </Button>
+                </Tooltip>
+              )}
+            </div>
+          )
+        })}
+      </div>
+
+      {activeDevice !== undefined && (
+        <div className="dsh-md-native-bar-actions">
+          <Tooltip label={t('reloadPage')} side="bottom">
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label={t('reloadPage')}
+              onClick={() => clientStore.reloadNativeDevice(activeDevice.id)}
+            >
+              <IconRefreshOutlineRegular size={14} />
+            </Button>
+          </Tooltip>
+          {(activeDevice.nativeProxyUrl ?? activeDevice.effectiveBaseUrl) !== undefined && (
+            <Tooltip label={t('openExternal')} side="bottom">
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label={t('openExternal')}
+                onClick={() => {
+                  const url = activeDevice.nativeProxyUrl ?? activeDevice.effectiveBaseUrl
+                  if (url !== undefined) window.open(url, '_blank', 'noopener,noreferrer')
+                }}
+              >
+                <IconRightUpOutlineRegular size={14} />
+              </Button>
+            </Tooltip>
+          )}
+        </div>
+      )}
+
+      <Tooltip label={t('settingsSectionTitle')} side="bottom">
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label={t('settingsSectionTitle')}
+          onClick={onOpenSettings}
+        >
+          <IconSettingsOutlineRegular size={14} />
+        </Button>
+      </Tooltip>
+    </div>
+  )
+}
+
+/**
+ * Keep-Alive remote viewports below the tab bar. The local DSH page is never
+ * rendered here: when 本机 is active this stage is hidden and the host frame
+ * underneath remains visible and interactive.
+ */
+export function NativeViewport({
+  t,
+  onOpenSettings,
+}: {
+  t: (key: MultiDeviceLocaleKey) => string
+  onOpenSettings: () => void
 }): React.ReactElement {
   const state = useMultiDeviceState()
   const { devices } = state.snapshot
   const isNative = state.displayMode === 'native'
-  const exitButtonRef = useRef<HTMLButtonElement | null>(null)
-  const activeDevice =
-    devices.find(d => d.id === state.activeNativeDeviceId) ?? devices[0]
+  const activeDevice = devices.find(device => device.id === state.activeNativeDeviceId)
 
-  // Esc is the universal escape hatch: the toolbar is the only chrome in Native
-  // Mode, so a keyboard fallback must never depend on focus staying on the host.
-  useEffect(() => {
-    if (!isNative) return
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape' || event.defaultPrevented) return
-      event.preventDefault()
-      clientStore.setDisplayMode('aggregated')
-    }
-    window.addEventListener('keydown', onKeyDown, true)
-    const focusTimer = window.setTimeout(() => exitButtonRef.current?.focus(), 60)
-    return () => {
-      window.removeEventListener('keydown', onKeyDown, true)
-      window.clearTimeout(focusTimer)
-    }
-  }, [isNative])
-
-  // Keep all keep-alive devices plus the currently selected device mounted
+  // Keep all keep-alive devices plus the currently selected device mounted.
   const mountedDeviceIds = new Set<DeviceId>(state.keepAliveDeviceIds)
   if (activeDevice !== undefined) mountedDeviceIds.add(activeDevice.id)
-  const mountedDevices = devices.filter(d => mountedDeviceIds.has(d.id))
+  const mountedDevices = devices.filter(device => mountedDeviceIds.has(device.id))
+  const visible = isNative && activeDevice !== undefined
 
   return (
     <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        flex: 1,
-        minHeight: embedded ? 480 : 0,
-        height: '100%',
-      }}
+      className="dsh-md-native-stage"
+      data-visible={visible ? 'true' : 'false'}
+      aria-hidden={!visible}
     >
-      <div className="dsh-md-native-toolbar" style={embedded ? { paddingLeft: 12 } : undefined}>
-        {!embedded && (
-          <Button
-            ref={exitButtonRef}
-            variant="outline"
-            size="sm"
-            className="dsh-md-native-exit"
-            title={t('nativeExitHint')}
-            icon={<IconChevronLeftOutlineRegular size={14} />}
-            onClick={() => clientStore.setDisplayMode('aggregated')}
-          >
-            {t('switchToAggregated')}
-          </Button>
-        )}
-
-        <div className="dsh-md-native-tabs">
-          {devices.map((dev) => {
-            const isSelected = dev.id === activeDevice?.id
-            const isKeptAlive = state.keepAliveDeviceIds.includes(dev.id)
-            return (
-              <div key={dev.id} className="dsh-md-native-tab-item">
-                <Pill
-                  active={isSelected}
-                  onClick={() => clientStore.selectNativeDevice(dev.id)}
-                >
-                  <span className="dsh-md-pill-inner">
-                    <StateDot state={deviceStateToDotState(dev.state)} size={8} />
-                    <span>{dev.name}</span>
-                    {dev.runningSessionCount > 0 && (
-                      <span className="dsh-md-muted">
-                        {t('runningCount').replace('{count}', String(dev.runningSessionCount))}
-                      </span>
-                    )}
-                    {dev.latencyMs !== undefined && (
-                      <span className="dsh-md-muted">{dev.latencyMs}ms</span>
-                    )}
-                  </span>
-                </Pill>
-                {isKeptAlive && (
-                  <Tooltip label={t('releaseKeepAlive')} side="bottom">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      aria-label={t('releaseKeepAlive')}
-                      onClick={() => clientStore.releaseKeepAliveDevice(dev.id)}
-                    >
-                      <IconCloseOutlineRegular size={12} />
-                    </Button>
-                  </Tooltip>
-                )}
-              </div>
-            )
-          })}
-        </div>
-
-        {activeDevice !== undefined && (
-          <div className="dsh-md-native-tab-item">
-            <Tooltip label={t('reloadPage')} side="bottom">
-              <Button
-                variant="ghost"
-                size="icon"
-                aria-label={t('reloadPage')}
-                onClick={() => clientStore.reloadNativeDevice(activeDevice.id)}
-              >
-                <IconRefreshOutlineRegular size={14} />
-              </Button>
-            </Tooltip>
-            {(activeDevice.nativeProxyUrl ?? activeDevice.effectiveBaseUrl) !== undefined && (
-              <Tooltip label={t('openExternal')} side="bottom">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  aria-label={t('openExternal')}
-                  onClick={() => {
-                    const url = activeDevice.nativeProxyUrl ?? activeDevice.effectiveBaseUrl
-                    if (url !== undefined) window.open(url, '_blank', 'noopener,noreferrer')
-                  }}
-                >
-                  <IconRightUpOutlineRegular size={14} />
-                </Button>
-              </Tooltip>
-            )}
-          </div>
-        )}
-
-        {onOpenSettings !== undefined && (
-          <Tooltip label={t('settingsSectionTitle')} side="bottom">
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label={t('settingsSectionTitle')}
-              onClick={onOpenSettings}
-            >
-              <IconSettingsOutlineRegular size={14} />
-            </Button>
-          </Tooltip>
-        )}
-      </div>
-
-      <div className="dsh-md-native-stage">
-        {devices.length === 0 ? (
-          <div className="dsh-md-native-placeholder">
-            <div className="dsh-md-row-name">{t('noDevicesTitle')}</div>
-            <div className="dsh-md-pref-desc" style={{ maxWidth: 420 }}>
-              {t('noDevicesDesc')}
-            </div>
-            {onOpenSettings !== undefined && (
-              <Button
-                variant="primary"
-                size="sm"
-                icon={<IconPlusOutlineRegular size={13} />}
-                onClick={onOpenSettings}
-              >
-                {t('addDevice')}
-              </Button>
-            )}
-          </div>
-        ) : (
-          mountedDevices.map((dev) => (
-            <KeepAliveDeviceFrame
-              key={dev.id}
-              device={dev}
-              active={dev.id === activeDevice?.id}
-              reloadCount={state.reloadCounters[dev.id] ?? 0}
-              t={t}
-              onOpenSettings={onOpenSettings ?? (() => {})}
-            />
-          ))
-        )}
-      </div>
+      {mountedDevices.map((device) => (
+        <KeepAliveDeviceFrame
+          key={device.id}
+          device={device}
+          active={visible && device.id === activeDevice?.id}
+          reloadCount={state.reloadCounters[device.id] ?? 0}
+          t={t}
+          onOpenSettings={onOpenSettings}
+        />
+      ))}
     </div>
   )
 }

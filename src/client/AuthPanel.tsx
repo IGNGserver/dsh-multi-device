@@ -115,9 +115,9 @@ export function AuthRequiredPanel({
             size="sm"
             disabled={busy !== null}
             icon={<IconChevronLeftOutlineRegular size={13} />}
-            onClick={() => clientStore.setDisplayMode('aggregated')}
+            onClick={() => clientStore.selectLocalNativeTab()}
           >
-            {t('authBack')}
+            {t('authBackLocal')}
           </Button>
           <Button
             variant="ghost"

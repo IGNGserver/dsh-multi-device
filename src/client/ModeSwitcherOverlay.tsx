@@ -1,33 +1,38 @@
 /**
- * Persistent Native Mode viewport & sidebar session row enhancements.
+ * Persistent Native Mode tab bar, keep-alive viewports, and sidebar metadata.
  *
  * 1. `ModeSwitcherOverlay`: Mounted in `shell.overlay` (`id: 'multi-device-switcher'`).
- *    - Keeps `NativeViewport` mounted in the DOM (`display: none` while in Aggregated Mode)
- *      so Native Mode keep-alive pages are never unmounted across mode switches.
- *    - The mode/device toggle lives in the native `sidebar.footer.action` entry
- *      (`SidebarEntry.tsx`), never in a floating bar over shell chrome.
- * 2. `SessionHeaderDeviceBadge`, `ActiveSessionReporter`, `SessionRowHoverDeviceSection`,
- *    `SessionMenuOpenInNativeItem`:
- *    - Official DSH 0.2 slot contributions for `conversation.session.header.utilities`,
- *      `conversation.input.right`, `sidebar.session.row.hover`, and
- *      `sidebar.workspaces.session.menu.item`.
- *    - Device identity is shown only after a Session is opened (right side of the
- *      conversation header); Session rows stay visually identical to local rows.
+ *    - In Native Mode it reserves a top strip and renders the always-visible
+ *      `[本机][device…]` bar plus the remote keep-alive viewports.
+ *    - In Aggregated Mode it renders no chrome and no device navigation; remote
+ *      viewports may stay mounted but hidden so Keep-Alive survives a switch.
+ *    - The mode itself is switched only from Settings. There is no sidebar
+ *      entry and no "back to aggregated" control here.
+ * 2. `ActiveSessionReporter`, `SessionHeaderDeviceBadge`, `SessionRowHoverDeviceSection`:
+ *    - Official DSH 0.2 slot contributions for `conversation.input.right`,
+ *      `conversation.session.header.utilities`, and `sidebar.session.row.hover`.
+ *    - The active Session is reported so the Host can scope the model catalog;
+ *      the owning device is shown on the opened conversation header. Session
+ *      rows stay visually identical to local rows.
  *
  * @module dsh-multi-device/client/ModeSwitcherOverlay
  */
-import {
-  IconRightUpOutlineRegular,
-  MenuItemButton,
-  Modal,
-  StateDot,
-} from '@deepseek-ai/dsh-client-ui-primitives'
-import React from 'react'
+import { Modal, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
+import React, { useEffect, useLayoutEffect, useRef } from 'react'
 import { decodeSessionId } from '../contract.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
 import { MultiDeviceHubPanel } from './MultiDeviceHubPanel.tsx'
-import { NativeViewport } from './NativeViewport.tsx'
+import { NativeTabBar, NativeViewport } from './NativeViewport.tsx'
 import { clientStore, deviceStateToDotState, useMultiDeviceState } from './state.ts'
+
+const FRAME_NATIVE_CLASS = 'dsh-md-frame-native'
+const FRAME_DESKTOP_CLASS = 'dsh-md-frame-desktop'
+const useBrowserLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect
+
+function isDesktopRuntime(): boolean {
+  const desktop = (globalThis as { dshDesktop?: { protocolVersion?: number } }).dshDesktop
+  return desktop?.protocolVersion === 1
+}
 
 export function ModeSwitcherOverlay({
   t,
@@ -38,21 +43,30 @@ export function ModeSwitcherOverlay({
 }): React.ReactElement {
   const state = useMultiDeviceState()
   const isNative = state.displayMode === 'native'
+  const layerRef = useRef<HTMLDivElement | null>(null)
+
+  // Reserve the 42px strip *inside the host frame* so the tab bar never covers
+  // the local sidebar brand row or the session header. The class is removed on
+  // unmount and when returning to Aggregated Mode.
+  useBrowserLayoutEffect(() => {
+    const frame = layerRef.current?.closest('[data-shell-overlay]')?.parentElement
+    if (!(frame instanceof HTMLElement)) return
+    frame.classList.toggle(FRAME_NATIVE_CLASS, isNative)
+    frame.classList.toggle(FRAME_DESKTOP_CLASS, isDesktopRuntime())
+    return () => {
+      frame.classList.remove(FRAME_NATIVE_CLASS)
+      frame.classList.remove(FRAME_DESKTOP_CLASS)
+    }
+  }, [isNative])
 
   return (
     <>
-      {/* Persistent Native Mode container: kept in DOM with display:none when in Aggregated Mode for Keep-Alive */}
-      {(isNative || state.keepAliveDeviceIds.length > 0) && (
-        <div
-          className="dsh-md-native-fullscreen"
-          style={{
-            display: isNative ? 'flex' : 'none',
-            pointerEvents: isNative ? 'auto' : 'none',
-          }}
-        >
+      <div ref={layerRef} className="dsh-md-native-layer" data-native={isNative ? 'true' : 'false'}>
+        {isNative && <NativeTabBar t={t} onOpenSettings={onOpenSettings} />}
+        {(isNative || state.keepAliveDeviceIds.length > 0) && (
           <NativeViewport t={t} onOpenSettings={onOpenSettings} />
-        </div>
-      )}
+        )}
+      </div>
 
       {/* Fallback Settings Modal when host shell does not expose sidebar.settings store */}
       <Modal
@@ -150,31 +164,5 @@ export function SessionRowHoverDeviceSection({
         </div>
       )}
     </div>
-  )
-}
-
-/** Context menu item in a Session's `...` menu (`sidebar.workspaces.session.menu.item`). */
-export function SessionMenuOpenInNativeItem({
-  sessionId,
-  useMenuOpenState,
-  t,
-}: {
-  sessionId: string
-  useMenuOpenState: () => readonly [boolean, (open: boolean) => void]
-  t: (key: MultiDeviceLocaleKey) => string
-}): React.ReactElement | null {
-  const [, setMenuOpen] = useMenuOpenState()
-  const decoded = decodeSessionId(sessionId)
-  if (!decoded.isRemote) return null
-  return (
-    <MenuItemButton
-      icon={<IconRightUpOutlineRegular size={14} />}
-      onSelect={() => {
-        setMenuOpen(false)
-        clientStore.selectNativeDevice(decoded.deviceId)
-      }}
-    >
-      {t('menuOpenInNative')}
-    </MenuItemButton>
   )
 }

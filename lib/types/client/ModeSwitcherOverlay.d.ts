@@ -27,9 +27,3 @@ export declare function SessionRowHoverDeviceSection({ sessionId, t, }: {
     sessionId: string;
     t: (key: MultiDeviceLocaleKey) => string;
 }): React.ReactElement | null;
-/** Context menu item in a Session's `...` menu (`sidebar.workspaces.session.menu.item`). */
-export declare function SessionMenuOpenInNativeItem({ sessionId, useMenuOpenState, t, }: {
-    sessionId: string;
-    useMenuOpenState: () => readonly [boolean, (open: boolean) => void];
-    t: (key: MultiDeviceLocaleKey) => string;
-}): React.ReactElement | null;

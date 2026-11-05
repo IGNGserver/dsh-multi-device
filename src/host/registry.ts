@@ -18,6 +18,7 @@ import {
   type DeviceConfig,
   DeviceId,
   type DeviceView,
+  type DisplayMode,
   decodeSessionId,
   encodeRemoteSessionId,
   type GitMatchRun,
@@ -106,6 +107,12 @@ interface PersistedRegistryDocument {
   readonly version: 1
   readonly devices: readonly DeviceConfig[]
   readonly aggregation: WorkspaceAggregationConfig
+  /**
+   * Host-side mode. Persisting it matters: `native` means the local DSH
+   * surface must stay local-only from the very first API response after a
+   * restart, before any browser-side mode state could be applied.
+   */
+  readonly displayMode?: DisplayMode
   /** Last manual Git match outcome, so the panel can show it after a reload. */
   readonly gitMatch?: GitMatchRun
 }
@@ -155,6 +162,7 @@ export class DeviceRegistry {
   >()
   private readonly workspaceListeners = new Set<() => void>()
   private readonly modelCatalogListeners = new Set<() => void>()
+  private readonly modeListeners = new Set<(mode: DisplayMode) => void>()
 
   private activeSessionSeq = -1
   private activeSessionClientId: string | undefined
@@ -162,6 +170,7 @@ export class DeviceRegistry {
   private activeSessionDeviceId: DeviceId | undefined
 
   private revision = 1
+  private displayMode: DisplayMode = 'aggregated'
   private gitMatchRunner: GitMatchRunner | undefined
   private gitMatchRun: GitMatchRun = createIdleGitMatch()
   private localWorkspaceCreator: ((path: string) => Promise<void>) | undefined
@@ -290,6 +299,37 @@ export class DeviceRegistry {
   private notifyModelCatalogChanged(): void {
     for (const listener of this.modelCatalogListeners) {
       try { listener() } catch { /* ignore */ }
+    }
+  }
+
+  onDisplayModeChanged(listener: (mode: DisplayMode) => void): () => void {
+    this.modeListeners.add(listener)
+    return () => this.modeListeners.delete(listener)
+  }
+
+  /** Host-authoritative UI mode. Defaults to aggregated for existing installs. */
+  getDisplayMode(): DisplayMode {
+    return this.displayMode
+  }
+
+  /** Aggregated mode is the only mode that may merge or route remote data. */
+  isAggregatedMode(): boolean {
+    return this.displayMode === 'aggregated'
+  }
+
+  /**
+   * Persist and publish a mode change. The workspace stream recomputes its
+   * snapshot immediately, so already-connected clients receive remove/upsert
+   * frames for the rows that just became invisible (or visible again).
+   */
+  setDisplayMode(mode: DisplayMode): void {
+    if (this.displayMode === mode) return
+    this.displayMode = mode
+    this.saveToDisk()
+    this.bumpRevision()
+    this.notifyWorkspacesChanged()
+    for (const listener of this.modeListeners) {
+      try { listener(mode) } catch { /* ignore */ }
     }
   }
 
@@ -838,6 +878,7 @@ export class DeviceRegistry {
 
     return {
       revision: this.revision,
+      displayMode: this.displayMode,
       hostStatus: {
         aggregatedGatewayActive: this.aggregatedGatewayActive,
         ...(this.aggregatedGatewayError !== undefined ? { aggregatedGatewayError: this.aggregatedGatewayError } : {}),
@@ -1000,6 +1041,8 @@ export class DeviceRegistry {
       if (raw.aggregation && typeof raw.aggregation === 'object') {
         this.aggregator.setConfig({ ...DEFAULT_AGGREGATION_CONFIG, ...raw.aggregation })
       }
+      if (raw.displayMode === 'native') this.displayMode = 'native'
+      else if (raw.displayMode === 'aggregated') this.displayMode = 'aggregated'
       if (raw.gitMatch && typeof raw.gitMatch === 'object') {
         const restored = raw.gitMatch as GitMatchRun
         // A run cannot survive the process that was driving it.
@@ -1029,6 +1072,7 @@ export class DeviceRegistry {
       version: 1,
       devices: [...this.configs.values()],
       aggregation: this.aggregator.getConfig(),
+      displayMode: this.displayMode,
       gitMatch: this.gitMatchRun,
     }
     try {

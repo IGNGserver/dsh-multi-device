@@ -862,11 +862,27 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
         dispatchRpc: async () => ({ ok: true, value: undefined }),
       }
 
+      const mockWorkspaceRegistry = {
+        list: () => [
+          {
+            id: 'lws-1',
+            path: '/Users/local/shared-repo',
+            title: 'shared-repo',
+            sessionIds: ['lsess-1'],
+            createdAt: '2026-10-01T00:00:00.000Z',
+            updatedAt: '2026-10-01T00:00:00.000Z',
+          },
+        ],
+        archivedSessionIds: [],
+        pinnedSessionIds: [],
+      }
+
       const disposeGateway = installAggregatedGateway02(
         registry,
         mockSessionController,
         mockWorkspaceController,
         mockGateway,
+        mockWorkspaceRegistry,
       )
 
       // 1) Merged session.list
@@ -987,6 +1003,90 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
       expect(resultRes.ok).toBe(true)
       expect(remoteApprovalResults).toHaveLength(1)
       expect((remoteApprovalResults[0] as { eventId: string }).eventId).toBe('rem-ev-99')
+
+      // 4) Native Mode makes the local tab strictly local on the Host side.
+      const controlPlane = new MultiDeviceControlPlane(registry)
+      const nativeMode = await controlPlane.dispatch({
+        action: 'setDisplayMode',
+        payload: { displayMode: 'native' },
+      })
+      expect(nativeMode.ok).toBe(true)
+      expect(registry.snapshot().displayMode).toBe('native')
+
+      const nativeListed = await mockSessionController.list({}, new AbortController().signal)
+      expect(nativeListed.items.map(item => item.sessionId)).toEqual(['lsess-1'])
+
+      const nativeCatalog = (await mockSessionController.modelCatalog()) as {
+        groups: { id: string }[]
+        routableProviders: string[]
+      }
+      expect(nativeCatalog.groups.map(group => group.id)).toEqual(['local-provider'])
+      expect(nativeCatalog.routableProviders).toEqual(['local-provider'])
+
+      const nativeCreate = await mockSessionController.create({
+        sessionId: encodeRemoteSessionId(devId, 'rsess-1'),
+      })
+      expect(nativeCreate.sessionId).toBe('lsess-new')
+
+      const promptsBeforeNative = remotePrompts.length
+      await mockSessionController.prompt(
+        {
+          requestId: 'req-native',
+          sessionId: encodeRemoteSessionId(devId, 'rsess-1'),
+          mode: 'queue',
+          content: [{ type: 'text', text: 'must not leave the machine' }],
+        },
+        new AbortController().signal,
+      )
+      expect(remotePrompts).toHaveLength(promptsBeforeNative)
+
+      const nativeDispatch = await mockGateway.dispatchRpc!(
+        '$events/result',
+        {
+          args: {
+            clientId: 'local-client-1',
+            eventId: encodeRemoteEventId(devId, 'rem-ev-100'),
+            outcome: { kind: 'result', value: 'allowed-once' },
+          },
+        },
+        new AbortController().signal,
+        undefined,
+      )
+      expect(nativeDispatch.ok).toBe(true)
+      expect(remoteApprovalResults).toHaveLength(1)
+
+      const readBaseline = async (
+        stream: AsyncIterable<Record<string, unknown>>,
+      ): Promise<Record<string, unknown>> => {
+        for await (const frame of stream) return frame
+        throw new Error('workspace follow ended without a baseline')
+      }
+
+      const nativeAbort = new AbortController()
+      const nativeBaseline = await readBaseline(mockWorkspaceController.follow(nativeAbort.signal))
+      nativeAbort.abort()
+      expect(nativeBaseline.type).toBe('baseline')
+      expect((nativeBaseline.value as { items: { workspaceId: string }[] }).items)
+        .toEqual([expect.objectContaining({ workspaceId: 'lws-1' })])
+
+      // 5) Returning to Aggregated Mode restores the merged view for the same
+      // connected client; no page reload is required.
+      const aggregatedMode = await controlPlane.dispatch({
+        action: 'setDisplayMode',
+        payload: { displayMode: 'aggregated' },
+      })
+      expect(aggregatedMode.ok).toBe(true)
+      const restored = await mockSessionController.list({}, new AbortController().signal)
+      expect(restored.items.map(item => item.sessionId)).toEqual([
+        encodeRemoteSessionId(devId, 'rsess-1'),
+        'lsess-1',
+      ])
+
+      const aggregatedAbort = new AbortController()
+      const aggregatedBaseline = await readBaseline(mockWorkspaceController.follow(aggregatedAbort.signal))
+      aggregatedAbort.abort()
+      expect((aggregatedBaseline.value as { items: { workspaceId: string }[] }).items)
+        .toEqual([expect.objectContaining({ workspaceId: snap.logicalWorkspaces[0]?.logicalWorkspaceId })])
 
       disposeGateway()
       registry.dispose()
@@ -1896,6 +1996,10 @@ describe('8. Native Settings UI & Streamlined Client State Helpers', () => {
       expect(injectedSlots).not.toContain('sidebar.panellist')
       expect(injectedSlots).not.toContain('main')
       expect(injectedSlots).not.toContain('settings.plugins.tab')
+      // Aggregated Mode has no device navigation: neither a sidebar footer
+      // entry nor a Session context-menu jump into Native Mode.
+      expect(injectedSlots).not.toContain('sidebar.footer.action')
+      expect(injectedSlots).not.toContain('sidebar.workspaces.session.menu.item')
 
       // openSettingsSection routes straight to sidebar.settings shellStore when available
       expect(clientEntry.openSettingsSection(mockCtx)).toBe(true)
@@ -1929,25 +2033,54 @@ describe('8. Native Settings UI & Streamlined Client State Helpers', () => {
       expect(bundleReg).toBeDefined()
       expect(bundleReg!.component({ view: 'summary', t: (k: keyof typeof zh) => zh[k] })).toBe(zh.pluginSummary)
 
-      // Overlay bar stays hidden when 0 devices are configured in Aggregated Mode
+      // Overlay renders no device chrome in Aggregated Mode.
       const overlayReg = registeredSlots.get('shell.overlay:multi-device-switcher')
       expect(overlayReg).toBeDefined()
       const overlayEmptyHtml = renderToStaticMarkup(
         React.createElement(overlayReg!.component as React.ComponentType<any>, { t: (k: keyof typeof zh) => zh[k] }),
       )
       expect(overlayEmptyHtml).not.toContain('dsh-md-overlay-bar')
+      expect(overlayEmptyHtml).not.toContain('dsh-md-native-bar')
 
-      // Context menu item renders official MenuItemButton
-      const menuReg = registeredSlots.get('sidebar.workspaces.session.menu.item:multi-device-open-native')
-      expect(menuReg).toBeDefined()
-      const menuHtml = renderToStaticMarkup(
-        React.createElement(menuReg!.component as React.ComponentType<any>, {
-          sessionId: encodeRemoteSessionId(DeviceId('dev-a'), 'sess-1'),
-          useMenuOpenState: () => [true, () => {}] as const,
-          t: (k: keyof typeof zh) => zh[k],
-        }),
+      // Native Mode has a persistent [本机][device] strip and no "Back to
+      // Aggregated" control.
+      const baseSnapshot = clientStore.getSnapshot().snapshot
+      const nativeSnapshot = {
+        ...baseSnapshot,
+        revision: baseSnapshot.revision + 10,
+        displayMode: 'native' as const,
+        devices: [
+          {
+            id: DeviceId('dev-a'),
+            name: 'Dev A',
+            enabled: true,
+            state: 'connected' as const,
+            transportKind: 'ssh' as const,
+            targetSummary: 'ssh://dev-a',
+            keepNativeAlive: true,
+            protocolVersion: '0.2' as const,
+            realtime: true,
+            runningSessionCount: 0,
+            pendingApprovalCount: 0,
+          },
+        ],
+      }
+      let nextSnapshot: typeof nativeSnapshot = nativeSnapshot
+      const fetchMock = vi.fn(async () => ({
+        json: async () => ({ ok: true, value: { snapshot: nextSnapshot } }),
+      }))
+      vi.stubGlobal('fetch', fetchMock)
+      await clientStore.setDisplayMode('native')
+      const nativeHtml = renderToStaticMarkup(
+        React.createElement(overlayReg!.component as React.ComponentType<any>, { t: (k: keyof typeof zh) => zh[k] }),
       )
-      expect(menuHtml).toContain('data-primitive="MenuItemButton"')
+      expect(nativeHtml).toContain('dsh-md-native-bar')
+      expect(nativeHtml).toContain(zh.nativeLocalTab)
+      expect(nativeHtml).toContain('Dev A')
+      expect(nativeHtml).not.toContain('返回聚合模式')
+      expect(nativeHtml).not.toContain('Back to Aggregated')
+      nextSnapshot = { ...nativeSnapshot, revision: nativeSnapshot.revision + 1, displayMode: 'aggregated' }
+      await clientStore.setDisplayMode('aggregated')
 
       // DshSelect renders compliant trigger and options
       const { DshSelect } = await import('../src/client/DshSelect.tsx')
@@ -1968,6 +2101,7 @@ describe('8. Native Settings UI & Streamlined Client State Helpers', () => {
       expect(en.targetDeviceSubDesc).toBeDefined()
     } finally {
       for (const dispose of disposers) dispose()
+      vi.unstubAllGlobals()
       vi.doUnmock('@deepseek-ai/dsh-client-ui-primitives')
     }
   })

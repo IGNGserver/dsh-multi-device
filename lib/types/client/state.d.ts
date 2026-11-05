@@ -1,9 +1,11 @@
 /**
  * Client-side reactive store, SSE live synchronization, and control-plane RPC client.
  *
- * Persists UI mode (`aggregated` vs `native`) and active device selection in `localStorage`,
- * and maintains the LRU Keep-Alive set of Native Mode device pages so switching between
- * Aggregated Mode and Native Mode never destroys loaded remote DSH pages.
+ * The Host owns the aggregated/native mode (it must, because it decides whether
+ * remote workspaces and sessions are merged into the local DSH surface). This
+ * store mirrors the host snapshot and maintains the LRU Keep-Alive set of
+ * Native Mode device pages. `activeNativeDeviceId === undefined` means the
+ * leftmost Native tab, 本机, which is the unmodified local DSH page.
  *
  * @module dsh-multi-device/client/state
  */
@@ -26,9 +28,9 @@ export interface MultiDeviceClientState {
     readonly snapshot: MultiDeviceSnapshot;
     readonly loading: boolean;
     readonly error?: string;
-    /** Current global mode: `'aggregated'` (unified sidebar) or `'native'` (full-window remote DSH Web UI). */
+    /** Host-authoritative mode: `'aggregated'` (merged sidebar) or `'native'` (local page + device tabs). */
     readonly displayMode: DisplayMode;
-    /** Currently selected device in Native Mode. */
+    /** Selected remote device tab in Native Mode; `undefined` is the 本机 tab. */
     readonly activeNativeDeviceId?: DeviceId;
     /**
      * The Session currently shown in the conversation pane. The Host uses this to
@@ -64,9 +66,24 @@ declare class MultiDeviceClientStore {
     start(): () => void;
     private connectSse;
     private applyIncomingSnapshot;
-    setDisplayMode(mode: DisplayMode, targetDeviceId?: DeviceId): void;
-    toggleDisplayMode(): void;
-    selectNativeDevice(deviceId: DeviceId): void;
+    private activateNativeDevice;
+    /**
+     * Switch modes through the Host. The Host persists the mode and immediately
+     * stops/starts merging remote rows into the local surface; the resulting
+     * snapshot is applied here. `targetDeviceId` selects a remote tab; omitting
+     * it lands on 本机.
+     */
+    setDisplayMode(mode: DisplayMode, targetDeviceId?: DeviceId): Promise<{
+        ok: boolean;
+        error?: string;
+    }>;
+    /** Switch to a remote device tab, entering Native Mode if necessary. */
+    selectNativeDevice(deviceId: DeviceId): Promise<{
+        ok: boolean;
+        error?: string;
+    }>;
+    /** Return to the 本机 tab while staying in Native Mode. */
+    selectLocalNativeTab(): void;
     releaseKeepAliveDevice(deviceId: DeviceId): void;
     reloadNativeDevice(deviceId: DeviceId): void;
     setActiveHubTab(tab: HubTabId): void;

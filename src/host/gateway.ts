@@ -211,6 +211,10 @@ export function installAggregatedGateway02(
   // 1. session.list
   patchMethod(sessionController, 'list', async (_request, signal) => {
     const local = await origSessionList(_request, signal)
+    // Native Mode's local tab must be strictly local. The Host, not the
+    // browser, owns this answer so a stale or second client cannot leak
+    // remote sessions into it.
+    if (!registry.isAggregatedMode()) return local
     const seen = new Set<string>()
     const merged: Record<string, unknown>[] = []
 
@@ -238,6 +242,7 @@ export function installAggregatedGateway02(
 
   // 2. session.search
   patchMethod(sessionController, 'search', async (request, signal) => {
+    if (!registry.isAggregatedMode()) return origSessionSearch(request, signal)
     const localPromise = origSessionSearch(request, signal).catch(() => ({ items: [], hasMore: false }))
     const remotePromises = registry.clientList().map(async (client) => {
       try {
@@ -279,6 +284,7 @@ export function installAggregatedGateway02(
 
   // 3. session.create
   patchMethod(sessionController, 'create', async (request) => {
+    if (!registry.isAggregatedMode()) return origSessionCreate(request)
     // Case A: Reusing an existing remote blank sessionId
     if (request.sessionId !== undefined) {
       const owner = registry.resolveSessionOwner(request.sessionId)
@@ -357,6 +363,7 @@ export function installAggregatedGateway02(
 
   // 4. Session-addressed unary commands
   patchMethod(sessionController, 'selectModel', async (request) => {
+    if (!registry.isAggregatedMode()) return origSessionSelectModel(request)
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner === undefined) return origSessionSelectModel(request)
     return (await owner.client.invokeUnary('session', 'selectModel', {
@@ -372,6 +379,11 @@ export function installAggregatedGateway02(
   // remote DSH's models; merging local groups makes local-only models look
   // selectable and hides the remote's real provider ids.
   patchMethod(sessionController, 'modelCatalog', async () => {
+    if (!registry.isAggregatedMode()) {
+      // Native Mode's local tab is strictly local; never expose a remote
+      // Session's catalog (or a merged one) here.
+      return origSessionModelCatalog() as Promise<Record<string, unknown>>
+    }
     const scope = registry.activeSessionScope()
     if (scope.kind === 'local') {
       return origSessionModelCatalog() as Promise<Record<string, unknown>>
@@ -394,6 +406,7 @@ export function installAggregatedGateway02(
   })
 
   patchMethod(sessionController, 'rename', async (request) => {
+    if (!registry.isAggregatedMode()) return origSessionRename(request)
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner === undefined) return origSessionRename(request)
     return (await owner.client.invokeUnary('session', 'rename', {
@@ -402,6 +415,7 @@ export function installAggregatedGateway02(
   })
 
   patchMethod(sessionController, 'fork', async (request) => {
+    if (!registry.isAggregatedMode()) return origSessionFork(request)
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner === undefined) return origSessionFork(request)
     const res = (await owner.client.invokeUnary('session', 'fork', {
@@ -414,6 +428,7 @@ export function installAggregatedGateway02(
   })
 
   patchMethod(sessionController, 'prompt', async (request, signal) => {
+    if (!registry.isAggregatedMode()) return origSessionPrompt(request, signal)
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner === undefined) return origSessionPrompt(request, signal)
     return (await owner.client.invokeUnary(
@@ -425,6 +440,7 @@ export function installAggregatedGateway02(
   })
 
   patchMethod(sessionController, 'attachment', async (request) => {
+    if (!registry.isAggregatedMode()) return origSessionAttachment(request)
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner === undefined) return origSessionAttachment(request)
     return (await owner.client.invokeUnary('session', 'attachment', {
@@ -433,6 +449,7 @@ export function installAggregatedGateway02(
   })
 
   patchMethod(sessionController, 'updateQueue', async (request) => {
+    if (!registry.isAggregatedMode()) return origSessionUpdateQueue(request)
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner === undefined) return origSessionUpdateQueue(request)
     return (await owner.client.invokeUnary('session', 'updateQueue', {
@@ -441,6 +458,7 @@ export function installAggregatedGateway02(
   })
 
   patchMethod(sessionController, 'cancel', (request) => {
+    if (!registry.isAggregatedMode()) return origSessionCancel(request)
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner === undefined) return origSessionCancel(request)
     return owner.client.invokeUnary('session', 'cancel', {
@@ -449,6 +467,7 @@ export function installAggregatedGateway02(
   })
 
   patchMethod(sessionController, 'projections', async (request, signal) => {
+    if (!registry.isAggregatedMode()) return origSessionProjections(request, signal)
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner === undefined) return origSessionProjections(request, signal)
     return (await owner.client.invokeUnary(
@@ -478,6 +497,7 @@ export function installAggregatedGateway02(
 
   // 5. session.page & session.follow (address-routed)
   patchMethod(sessionController, 'page', async (request, signal) => {
+    if (!registry.isAggregatedMode()) return origSessionPage(request, signal)
     const routed = routeSessionAddress(registry, request.address as Record<string, unknown> | undefined)
     if (routed === undefined) return origSessionPage(request, signal)
     return (await routed.client.invokeUnary(
@@ -489,6 +509,7 @@ export function installAggregatedGateway02(
   })
 
   patchMethod(sessionController, 'follow', (request, signal) => {
+    if (!registry.isAggregatedMode()) return origSessionFollow(request, signal)
     const routed = routeSessionAddress(registry, request.address as Record<string, unknown> | undefined)
     if (routed === undefined) return origSessionFollow(request, signal)
     return (async function* () {
@@ -521,6 +542,7 @@ export function installAggregatedGateway02(
 
   // 7. Workspace commands & workspace.follow
   patchMethod(workspaceController, 'rename', async (request) => {
+    if (!registry.isAggregatedMode()) return origWorkspaceRename(request)
     if (decodeLogicalWorkspaceId(request.workspaceId) !== undefined) {
       registry.updateAggregationConfig({
         customTitleByLogicalId: {
@@ -552,6 +574,7 @@ export function installAggregatedGateway02(
   })
 
   patchMethod(workspaceController, 'delete', async (request) => {
+    if (!registry.isAggregatedMode()) return origWorkspaceDelete(request)
     const logical = decodeLogicalWorkspaceId(request.workspaceId)
     if (logical !== undefined) {
       if (logical.kind === 'manual') {
@@ -583,6 +606,7 @@ export function installAggregatedGateway02(
   })
 
   patchMethod(workspaceController, 'insertBefore', async (request) => {
+    if (!registry.isAggregatedMode()) return origWorkspaceInsertBefore(request)
     if (decodeLogicalWorkspaceId(request.workspaceId) !== undefined) {
       const snapshot = registry.snapshot()
       const ids = snapshot.logicalWorkspaces.map(workspace => workspace.logicalWorkspaceId)
@@ -619,6 +643,7 @@ export function installAggregatedGateway02(
   })
 
   patchMethod(workspaceController, 'insertSessionBefore', async (request) => {
+    if (!registry.isAggregatedMode()) return origWorkspaceInsertSessionBefore(request)
     // A Session cannot be moved between physical machines. For a logical
     // Workspace the visual grouping stays as-is; the UI must not send the
     // synthetic id to the local Workspace controller.
@@ -653,6 +678,10 @@ export function installAggregatedGateway02(
   })
 
   patchMethod(workspaceController, 'archiveSession', async (request) => {
+    if (!registry.isAggregatedMode()) {
+      const localRes = await origWorkspaceArchive(request)
+      return { archivedSessionIds: localRes.archivedSessionIds }
+    }
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner !== undefined) {
       await owner.client.invokeUnary('workspace', 'archiveSession', {
@@ -670,6 +699,10 @@ export function installAggregatedGateway02(
   })
 
   patchMethod(workspaceController, 'unarchiveSession', async (request) => {
+    if (!registry.isAggregatedMode()) {
+      const localRes = await origWorkspaceUnarchive(request)
+      return { archivedSessionIds: localRes.archivedSessionIds }
+    }
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner !== undefined) {
       await owner.client.invokeUnary('workspace', 'unarchiveSession', {
@@ -684,6 +717,10 @@ export function installAggregatedGateway02(
   })
 
   patchMethod(workspaceController, 'pinSession', async (request) => {
+    if (!registry.isAggregatedMode()) {
+      const localRes = await origWorkspacePin(request)
+      return { pinnedSessionIds: localRes.pinnedSessionIds }
+    }
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner !== undefined) {
       await owner.client.invokeUnary('workspace', 'pinSession', {
@@ -698,6 +735,10 @@ export function installAggregatedGateway02(
   })
 
   patchMethod(workspaceController, 'unpinSession', async (request) => {
+    if (!registry.isAggregatedMode()) {
+      const localRes = await origWorkspaceUnpin(request)
+      return { pinnedSessionIds: localRes.pinnedSessionIds }
+    }
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner !== undefined) {
       await owner.client.invokeUnary('workspace', 'unpinSession', {
@@ -729,7 +770,12 @@ export function installAggregatedGateway02(
   if (typeof typertGateway.dispatchRpc === 'function') {
     const origDispatchRpc = typertGateway.dispatchRpc.bind(typertGateway)
     typertGateway.dispatchRpc = async (endpoint, payload, signal, peer) => {
-      if (endpoint === '$events/result' && isRecord(payload) && isRecord(payload.args)) {
+      if (
+        registry.isAggregatedMode() &&
+        endpoint === '$events/result' &&
+        isRecord(payload) &&
+        isRecord(payload.args)
+      ) {
         const eventId = payload.args.eventId
         const outcome = payload.args.outcome
         if (typeof eventId === 'string' && isRecord(outcome)) {
@@ -888,6 +934,7 @@ async function* multiplexControlStream(
   }
 
   const offRemote = registry.onControlProjection((_deviceId, frame) => {
+    if (!registry.isAggregatedMode()) return
     push({
       type: 'projection',
       sessionId: frame.sessionId,
@@ -901,15 +948,17 @@ async function* multiplexControlStream(
     for await (const frame of localStream) {
       if (signal.aborted) return
       if (frame.type === 'baseline' && isRecord(frame.value) && isRecord(frame.value.projections)) {
-        const mergedProjections: Record<string, unknown> = { ...frame.value.projections }
-        for (const client of registry.clientList()) {
-          for (const [rawSid, block] of client.controlProjections().entries()) {
-            mergedProjections[encodeRemoteSessionId(client.id, rawSid)] = block
+        const projections: Record<string, unknown> = { ...frame.value.projections }
+        if (registry.isAggregatedMode()) {
+          for (const client of registry.clientList()) {
+            for (const [rawSid, block] of client.controlProjections().entries()) {
+              projections[encodeRemoteSessionId(client.id, rawSid)] = block
+            }
           }
         }
         push({
           type: 'baseline',
-          value: { projections: mergedProjections },
+          value: { projections },
         })
       } else {
         push(frame)
@@ -959,6 +1008,24 @@ async function* multiplexWorkspaceFollow(
   }
 
   const computeCurrentState = () => {
+    // Native Mode's local tab is the normal local DSH surface. Keep the
+    // Host's own workspace registry and archive/pin sets untouched; remote
+    // logical workspaces must disappear (and reappear on the way back).
+    if (!registry.isAggregatedMode()) {
+      const localItems = (workspaceRegistry?.list() ?? []).map(workspace => ({
+        workspaceId: workspace.id,
+        path: workspace.path,
+        title: workspace.title,
+        sessionIds: [...workspace.sessionIds],
+        createdAt: workspace.createdAt,
+        updatedAt: workspace.updatedAt,
+      }))
+      return {
+        items: localItems,
+        archivedSessionIds: workspaceRegistry?.archivedSessionIds.map(String) ?? [],
+        pinnedSessionIds: workspaceRegistry?.pinnedSessionIds.map(String) ?? [],
+      }
+    }
     const snap = registry.snapshot()
     const items = snap.logicalWorkspaces.map(logicalToWorkspaceView)
     const archivedSessionIds = collectMergedArchivedIds(registry, workspaceRegistry)
@@ -1078,14 +1145,44 @@ async function* multiplexRemoteEventsStream(
 ): AsyncIterable<unknown> {
   const queue = new BoundedStreamQueue<unknown>()
   let readySent = false
+  const deliveredWaterfalls = new Set<string>()
 
   const push = (item: unknown): void => {
     queue.push(item)
   }
 
+  const pushPendingRemoteWaterfalls = (): void => {
+    if (!registry.isAggregatedMode()) return
+    // Deliver remote approval/question waterfalls to the local UI. Called on
+    // the first ready frame and again when the operator returns from Native
+    // Mode, because the existing event stream is not reconnected by a mode
+    // switch. `deliveredWaterfalls` keeps a still-pending event from being
+    // shown twice when it was already delivered before the mode switch.
+    for (const client of registry.clientList()) {
+      for (const pending of client.pendingInteractionList()) {
+        if (deliveredWaterfalls.has(pending.namespacedEventId)) continue
+        deliveredWaterfalls.add(pending.namespacedEventId)
+        push({
+          type: 'waterfall',
+          event: pending.eventName,
+          eventId: pending.namespacedEventId,
+          agentId: pending.namespacedSessionId,
+          request: pending.request,
+        })
+      }
+    }
+  }
+
   const offRemote = registry.onRemoteEvent((_deviceId, frame) => {
-    if (!readySent) return
+    if (!readySent || !registry.isAggregatedMode()) return
+    if (isRecord(frame) && frame.type === 'waterfall' && typeof frame.eventId === 'string') {
+      deliveredWaterfalls.add(frame.eventId)
+    }
     push(frame)
+  })
+  const offMode = registry.onDisplayModeChanged((mode) => {
+    if (!readySent || mode !== 'aggregated') return
+    pushPendingRemoteWaterfalls()
   })
 
   const pumpLocal = (async () => {
@@ -1094,33 +1191,26 @@ async function* multiplexRemoteEventsStream(
       push(frame)
       if (!readySent && isRecord(frame) && frame.type === 'ready') {
         readySent = true
-        // Deliver any already-pending remote approval/question waterfalls to this new client generation
-        for (const client of registry.clientList()) {
-          for (const pending of client.pendingInteractionList()) {
-            push({
-              type: 'waterfall',
-              event: pending.eventName,
-              eventId: pending.namespacedEventId,
-              agentId: pending.namespacedSessionId,
-              request: pending.request,
-            })
-          }
+        pushPendingRemoteWaterfalls()
+        if (registry.isAggregatedMode()) {
           // DSH's Session store fetched `session.list` once before SSH devices
           // finished connecting. Replay every known remote summary into this
           // generation; without it, workspace rows point at Session ids the
           // sidebar has no summary for and silently hides those rows.
-          for (const summary of client.sessionSummaries()) {
-            push({
-              type: 'emit',
-              event: 'api-session/added',
-              args: [client.namespaceSummary(summary)],
-            })
+          for (const client of registry.clientList()) {
+            for (const summary of client.sessionSummaries()) {
+              push({
+                type: 'emit',
+                event: 'api-session/added',
+                args: [client.namespaceSummary(summary)],
+              })
+            }
           }
-        }
-        // A fresh browser generation starts with the local model catalog
-        // cached; make it refetch the active remote Session's catalog.
-        if (registry.activeSessionScope().kind === 'remote') {
-          push({ type: 'emit', event: 'llm/adapters-updated', args: [] })
+          // A fresh browser generation starts with the local model catalog
+          // cached; make it refetch the active remote Session's catalog.
+          if (registry.activeSessionScope().kind === 'remote') {
+            push({ type: 'emit', event: 'llm/adapters-updated', args: [] })
+          }
         }
       }
     }
@@ -1146,6 +1236,7 @@ async function* multiplexRemoteEventsStream(
   } finally {
     signal.removeEventListener('abort', onAbort)
     offRemote()
+    offMode()
     await pumpLocal.catch(() => {})
   }
 }

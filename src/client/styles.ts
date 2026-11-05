@@ -753,216 +753,65 @@ const CSS_TEXT = `
   margin-left: auto;
 }
 
-/* Sidebar footer entry, device popover & Native Viewport chrome */
-.dsh-md-sidebar-entry {
-  box-sizing: border-box;
-  flex: none;
-  display: block;
-  width: 36px;
-  min-width: 36px;
+/* Native Mode tab bar, host-frame reservation and keep-alive stage */
+html {
+  --dsh-md-native-bar-height: 42px;
+  --dsh-md-native-bar-top: var(--dsh-frame-chrome-top, 0px);
 }
 
-.dsh-md-sidebar-entry.isWide {
-  width: auto;
-  max-width: 100%;
+/* macOS Desktop keeps its traffic lights and the collapsed-sidebar leading
+ * controls in the reserved title area; place the tab strip below that area.
+ * Browser-hosted DSH on macOS has no such native title area and keeps 0. */
+html[data-platform='darwin'] .dsh-md-frame-native.dsh-md-frame-desktop {
+  --dsh-md-native-bar-top: var(--dsh-frame-top-clearance, 48px);
 }
 
-.dsh-md-sidebar-button {
-  box-sizing: border-box;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  min-height: 36px;
-  padding: 0;
-  gap: 0;
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--dsw-alias-label-primary);
-  font: inherit;
-  cursor: pointer;
-  -webkit-app-region: no-drag;
+.dsh-md-native-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 21;
+  pointer-events: none;
 }
 
-.dsh-md-sidebar-button:hover {
-  background: var(--dsw-alias-interactive-bg-hover);
-}
-
-.dsh-md-sidebar-button:focus-visible {
-  outline: var(--dsh-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-brand-primary));
-  outline-offset: -2px;
-}
-
-.dsh-md-sidebar-entry.isWide .dsh-md-sidebar-button {
-  width: auto;
-  max-width: 100%;
-  justify-content: flex-start;
-  gap: 6px;
-  padding: 0 8px;
-  border-radius: 8px;
-  font-size: 14px;
-  line-height: 20px;
-}
-
-.dsh-md-sidebar-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.dsh-md-sidebar-count {
-  flex: none;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
-  border-radius: 999px;
-  background: var(--dsw-alias-bg-layer-4, var(--dsw-alias-bg-layer-3));
-  color: var(--dsw-alias-label-secondary);
-  font-size: 10px;
-  line-height: 16px;
-  text-align: center;
-}
-
-.dsh-md-sidebar-entry.isWide .dsh-md-sidebar-count {
-  margin-inline-start: auto;
-}
-
-.dsh-md-device-popover {
-  position: fixed;
-  z-index: 950;
-  box-sizing: border-box;
-  width: min(272px, calc(100vw - 24px));
-  max-height: min(440px, calc(100vh - 96px));
-  overflow: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 8px;
-  border: 0.5px solid var(--dsw-alias-border-l2);
-  border-radius: 12px;
-  background: var(--dsw-alias-bg-layer-2);
-  box-shadow: var(--dsw-elevation-prominent);
-  color: var(--dsw-alias-label-primary);
-  -webkit-app-region: no-drag;
-}
-
-.dsh-md-device-popover-title {
-  padding: 4px 8px 6px;
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 11px;
-  line-height: 16px;
-}
-
-.dsh-md-device-popover-empty {
-  padding: 10px 8px;
-  color: var(--dsw-alias-label-secondary);
-  font-size: 12px;
-  line-height: 18px;
-}
-
-.dsh-md-device-popover-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  min-height: 34px;
-  padding: 6px 8px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  text-align: start;
-  cursor: pointer;
-}
-
-.dsh-md-device-popover-row:hover {
-  background: var(--dsw-alias-interactive-bg-hover);
-}
-
-.dsh-md-device-popover-name {
-  min-width: 0;
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 13px;
-  line-height: 20px;
-}
-
-.dsh-md-device-popover-state {
-  flex: none;
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 11px;
-  line-height: 16px;
-}
-
-.dsh-md-device-popover-state.isWarn {
-  color: var(--dsw-alias-state-warn-label, var(--dsw-alias-state-warn-primary));
-}
-
-.dsh-md-device-popover-sep {
-  height: 0.5px;
-  margin: 6px 4px;
-  background: var(--dsw-alias-border-l2);
-}
-
-.dsh-md-device-popover-action {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  min-height: 30px;
-  padding: 4px 8px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--dsw-alias-label-secondary);
-  font: inherit;
-  font-size: 12px;
-  line-height: 18px;
-  text-align: start;
-  cursor: pointer;
-}
-
-.dsh-md-device-popover-action:hover {
-  background: var(--dsw-alias-interactive-bg-hover);
-  color: var(--dsw-alias-label-primary);
-}
-
-.dsh-md-native-fullscreen {
-  position: fixed;
-  inset: var(--dsh-frame-chrome-top, 0px) 0 0;
-  z-index: 80;
+.dsh-md-native-layer > * {
   pointer-events: auto;
-  display: flex;
-  flex-direction: column;
-  background: var(--dsw-alias-bg-base);
-  color: var(--dsw-alias-label-primary);
 }
 
-.dsh-md-native-toolbar {
+/*
+ * Reserve the tab-strip height inside the Host frame, below the platform
+ * titlebar. !important is intentional: the layout plugin writes its own
+ * padding-top for the Windows caption row.
+ */
+.dsh-md-frame-native {
   box-sizing: border-box;
-  height: 42px;
-  padding: 0 12px;
-  padding-left: calc(var(--dsh-frame-leading-clearance, 0px) + 12px);
+  padding-top: calc(var(--dsh-md-native-bar-top) + var(--dsh-md-native-bar-height)) !important;
+}
+
+.dsh-md-native-bar {
+  position: absolute;
+  top: var(--dsh-md-native-bar-top);
+  left: 0;
+  right: 0;
+  height: var(--dsh-md-native-bar-height);
+  box-sizing: border-box;
+  z-index: 2;
   display: flex;
   align-items: center;
   gap: 8px;
+  padding: 0 12px;
   border-bottom: 0.5px solid var(--dsw-alias-border-l2);
   background: var(--dsw-specific-sidebar-fill, var(--dsw-alias-bg-layer-1));
-  flex-shrink: 0;
-  overflow-x: auto;
-  position: relative;
-  z-index: 2;
+  color: var(--dsw-alias-label-primary);
+  pointer-events: auto;
   -webkit-app-region: no-drag;
 }
 
-.dsh-md-native-toolbar button,
-.dsh-md-native-toolbar [role='button'] {
+html[data-platform='darwin'] .dsh-md-native-bar {
+  -webkit-app-region: drag;
+}
+
+.dsh-md-native-bar button,
+.dsh-md-native-bar [role='button'] {
   -webkit-app-region: no-drag;
 }
 
@@ -973,6 +822,18 @@ const CSS_TEXT = `
   flex: 1;
   min-width: 0;
   overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.dsh-md-native-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.dsh-md-native-bar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
 }
 
 .dsh-md-native-tab-item {
@@ -994,11 +855,22 @@ const CSS_TEXT = `
 }
 
 .dsh-md-native-stage {
-  flex: 1;
-  min-height: 0;
-  position: relative;
+  position: absolute;
+  top: calc(var(--dsh-md-native-bar-top) + var(--dsh-md-native-bar-height));
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1;
   display: flex;
   flex-direction: column;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  pointer-events: auto;
+}
+
+.dsh-md-native-stage[data-visible='false'] {
+  display: none;
+  pointer-events: none;
 }
 
 .dsh-md-native-frame-wrap {
@@ -1139,12 +1011,6 @@ const CSS_TEXT = `
 
   .dsh-md-auth-card {
     padding: 18px;
-  }
-
-  .dsh-md-native-toolbar {
-    height: auto;
-    min-height: 42px;
-    padding-block: 4px;
   }
 }
 `
