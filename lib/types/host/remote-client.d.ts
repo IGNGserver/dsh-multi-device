@@ -1,7 +1,7 @@
-import { type DeviceCatalogCache, type DeviceConfig, type DeviceConnectionState, type DeviceId, type DeviceView, type PendingInteractionKind } from '../contract.ts';
+import { type DeviceAuthState, type DeviceCatalogCache, type DeviceConfig, type DeviceConnectionState, type DeviceId, type DeviceView, type PendingInteractionKind } from '../contract.ts';
 import { DeviceAuthManager } from './auth.ts';
-/** Map a remote waterfall event name to the pending kind shown in the UI. */
-export declare function pendingInteractionKind(event: string): PendingInteractionKind | undefined;
+/** Map a remote waterfall event name (and payload) to the pending kind shown in the UI. */
+export declare function pendingInteractionKind(event: string, request?: Record<string, unknown>): PendingInteractionKind | undefined;
 export interface RemoteSessionSummary {
     readonly sessionId: string;
     readonly updatedAt: number;
@@ -61,6 +61,8 @@ export interface RemoteDeviceCallbacks {
     readonly onGitRemotesDiscovered: (deviceId: DeviceId, remotesByPath: ReadonlyMap<string, string>) => void;
     /** The device's model list changed (or it just connected); refresh the picker. */
     readonly onModelCatalogChanged: (deviceId: DeviceId) => void;
+    /** Optional auth-state callback so 401/403 on control/RPC surfaces in the UI. */
+    readonly onAuthState?: (deviceId: DeviceId, state: DeviceAuthState, error?: string) => void;
 }
 export declare class RemoteDeviceClient {
     private readonly authManager;
@@ -124,7 +126,14 @@ export declare class RemoteDeviceClient {
     sessionSummaries(): readonly RemoteSessionSummary[];
     workspaceItems(): readonly RemoteWorkspaceItem[];
     archivedIds(): readonly string[];
+    setArchivedIds(ids: readonly string[]): void;
     pinnedIds(): readonly string[];
+    setPinnedIds(ids: readonly string[]): void;
+    /**
+     * Refresh the remote `session/list` catalog and notify local `$events`
+     * listeners of any newly created or updated remote Sessions.
+     */
+    refreshSessionCatalog(signal?: AbortSignal): Promise<void>;
     controlProjections(): ReadonlyMap<string, {
         asOfSeq: number;
         values: Record<string, unknown>;
@@ -181,6 +190,7 @@ export declare class RemoteDeviceClient {
     private runProtocol02Streams;
     private pump02RemoteEvents;
     private handle02EmitEvent;
+    private sanitizeRemoteWorkspace;
     private pump02WorkspaceFollow;
     private pump02SessionControl;
     /**
@@ -206,6 +216,8 @@ export declare class RemoteDeviceClient {
      * ids; the sidebar silently skips ids with no summary.
      */
     private reconcileSessionSummaries;
+    namespaceProjectionValue(key: string, value: unknown): unknown;
+    namespaceProjectionValues(values: Record<string, unknown>): Record<string, unknown>;
     namespaceSummary(summary: RemoteSessionSummary): RemoteSessionSummary;
     private closeMuxSocket;
     private rawRpcPost;

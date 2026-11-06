@@ -117,6 +117,10 @@ export interface ClientContextLike {
   }
   layout?: {
     selectPanel(panelId: string | null): void
+    readonly panelInfo?: {
+      getSnapshot(): { readonly activePanelId: string | null }
+      subscribe?(listener: () => void): () => void
+    }
   }
   sessions?: SessionsServiceLike
   uiWorkspace?: UiWorkspaceServiceLike
@@ -232,9 +236,25 @@ function installModeSideEffects(ctx: ClientContextLike): () => void {
     void reconcile(mode)
   })
 
-  const unsubscribeSessions = ctx.sessions?.list.subscribe?.(() => {
+  const resolveLayout = (): ClientContextLike['layout'] =>
+    ctx.layout ?? (ctx.get?.('layout') as ClientContextLike['layout'])
+
+  const isGlobalPanelActive = (): boolean => {
+    try {
+      const activePanelId = resolveLayout()?.panelInfo?.getSnapshot()?.activePanelId
+      return activePanelId !== undefined && activePanelId !== null
+    } catch {
+      return false
+    }
+  }
+
+  const syncMainSession = (): string | undefined => {
     const list = ctx.sessions?.list.getSnapshot()
     const current = list === undefined ? undefined : currentMainSessionId(list)
+    if (isGlobalPanelActive()) {
+      void clientStore.setActiveSession(undefined)
+      return current
+    }
     if (current !== undefined) {
       // The Native Pane and the Host model-catalog scope both need the active
       // Session even when the slot that normally reports it never mounts (for
@@ -242,6 +262,11 @@ function installModeSideEffects(ctx: ClientContextLike): () => void {
       // deduped fallback, not a second source of truth.
       void clientStore.setActiveSession(current)
     }
+    return current
+  }
+
+  const unsubscribeSessions = ctx.sessions?.list.subscribe?.(() => {
+    const current = syncMainSession()
     if (clientStore.getSnapshot().displayMode !== 'native' || guarding) return
     if (current === undefined || !decodeSessionId(current).isRemote) return
     guarding = true
@@ -250,15 +275,18 @@ function installModeSideEffects(ctx: ClientContextLike): () => void {
     })
   })
 
-  const initialMain = ctx.sessions?.list.getSnapshot()
-  const initialSession = initialMain === undefined ? undefined : currentMainSessionId(initialMain)
-  if (initialSession !== undefined) void clientStore.setActiveSession(initialSession)
+  const unsubscribePanelInfo = resolveLayout()?.panelInfo?.subscribe?.(() => {
+    syncMainSession()
+  })
+
+  syncMainSession()
 
   if (clientStore.getSnapshot().displayMode === 'native') void reconcile('native')
 
   return () => {
     unsubscribeStore()
     unsubscribeSessions?.()
+    unsubscribePanelInfo?.()
   }
 }
 

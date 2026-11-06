@@ -264,6 +264,7 @@ export class MultiDeviceControlPlane {
           const rule = payload as unknown as ManualWorkspaceRule
           this.registry.aggregator.upsertManualRule(rule)
           this.registry.saveToDisk()
+          this.registry.refreshWorkspaceView()
           return { ok: true, value: this.registry.snapshot() }
         }
 
@@ -271,6 +272,7 @@ export class MultiDeviceControlPlane {
           const ruleId = String(payload.ruleId ?? '')
           this.registry.aggregator.removeManualRule(ruleId)
           this.registry.saveToDisk()
+          this.registry.refreshWorkspaceView()
           return { ok: true, value: this.registry.snapshot() }
         }
 
@@ -281,6 +283,7 @@ export class MultiDeviceControlPlane {
           try {
             this.registry.aggregator.setMemberExcluded(memberKey, excluded)
             this.registry.saveToDisk()
+            this.registry.refreshWorkspaceView()
           } catch (error) {
             return { ok: false, error: error instanceof Error ? error.message : String(error) }
           }
@@ -307,6 +310,7 @@ export class MultiDeviceControlPlane {
           const deviceId = String(payload.deviceId ?? '') as DeviceId
           this.registry.aggregator.setPreferredDevice(logicalWorkspaceId, deviceId)
           this.registry.saveToDisk()
+          this.registry.refreshWorkspaceView()
           return { ok: true, value: this.registry.snapshot() }
         }
 
@@ -326,6 +330,7 @@ export class MultiDeviceControlPlane {
           const title = String(payload.title ?? '')
           this.registry.aggregator.setCustomTitle(logicalWorkspaceId, title)
           this.registry.saveToDisk()
+          this.registry.refreshWorkspaceView()
           return { ok: true, value: this.registry.snapshot() }
         }
 

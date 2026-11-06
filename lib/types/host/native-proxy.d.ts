@@ -43,6 +43,7 @@ export declare class NativeDeviceProxy {
     private stopped;
     private lastAuthAttemptAt;
     private lastAuthRecoveryAt;
+    private authRecoveryInFlight;
     private readonly token;
     private bridgeServer;
     private readonly bridgeClients;
@@ -62,6 +63,8 @@ export declare class NativeDeviceProxy {
     private refreshHostState;
     proxyUrl(): string | undefined;
     private proxyOrigin;
+    private allowedFramingAncestors;
+    private isAllowedCallerOrigin;
     port(): number | undefined;
     start(): Promise<void>;
     stop(): void;

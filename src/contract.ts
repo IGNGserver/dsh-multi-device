@@ -471,6 +471,8 @@ export interface MultiDeviceUiPreferences {
 /** Complete Hub snapshot returned to the Client UI. */
 export interface MultiDeviceSnapshot {
   readonly revision: number
+  /** Stable Host identity used to detect self-loops across any hostname/IP. */
+  readonly hostId?: string
   /**
    * Host-authoritative UI mode. `aggregated` merges remote workspaces and
    * sessions into the local DSH surface; `native` keeps that surface local-only
@@ -510,6 +512,24 @@ const LOGICAL_WORKSPACE_PREFIX = 'md-lws~'
 const REMOTE_EVENT_PREFIX = 'md-ev~'
 const SEPARATOR = '~'
 
+/** True when a Session ID is already namespaced by `dsh-multi-device`. */
+export function isNamespacedSessionId(sessionId: string): boolean {
+  return sessionId.startsWith(REMOTE_SESSION_PREFIX)
+}
+
+/** True when a Workspace ID is already a remote or logical workspace from `dsh-multi-device`. */
+export function isNamespacedWorkspaceId(workspaceId: string): boolean {
+  return (
+    workspaceId.startsWith(REMOTE_WORKSPACE_PREFIX) ||
+    workspaceId.startsWith(LOGICAL_WORKSPACE_PREFIX)
+  )
+}
+
+/** True when an Event ID is already namespaced by `dsh-multi-device`. */
+export function isNamespacedEventId(eventId: string): boolean {
+  return eventId.startsWith(REMOTE_EVENT_PREFIX)
+}
+
 /** Waterfall interactions the host tracks per remote device. */
 export type PendingInteractionKind = 'approval' | 'question' | 'plan-review'
 
@@ -527,6 +547,7 @@ export type PendingInteractionKind = 'approval' | 'question' | 'plan-review'
  */
 export function encodeRemoteSessionId(deviceId: DeviceId, remoteSessionId: string): string {
   if (deviceId === LOCAL_DEVICE_ID) return remoteSessionId
+  if (remoteSessionId.startsWith(REMOTE_SESSION_PREFIX)) return remoteSessionId
   return `${REMOTE_SESSION_PREFIX}${escapeSegment(deviceId)}${SEPARATOR}${remoteSessionId}`
 }
 
@@ -549,8 +570,11 @@ export function decodeSessionId(sessionId: string): {
   if (sepIndex <= 0 || sepIndex === rest.length - 1) {
     return { deviceId: LOCAL_DEVICE_ID, rawSessionId: sessionId, isRemote: false }
   }
-  const deviceId = unescapeSegment(rest.slice(0, sepIndex)) as DeviceId
   const rawSessionId = rest.slice(sepIndex + 1)
+  if (rawSessionId.startsWith(REMOTE_SESSION_PREFIX)) {
+    return { deviceId: LOCAL_DEVICE_ID, rawSessionId: sessionId, isRemote: false }
+  }
+  const deviceId = unescapeSegment(rest.slice(0, sepIndex)) as DeviceId
   return { deviceId, rawSessionId, isRemote: true }
 }
 
@@ -559,6 +583,7 @@ export function decodeSessionId(sessionId: string): {
  */
 export function encodeRemoteWorkspaceId(deviceId: DeviceId, remoteWorkspaceId: string): string {
   if (deviceId === LOCAL_DEVICE_ID) return remoteWorkspaceId
+  if (isNamespacedWorkspaceId(remoteWorkspaceId)) return remoteWorkspaceId
   return `${REMOTE_WORKSPACE_PREFIX}${escapeSegment(deviceId)}${SEPARATOR}${remoteWorkspaceId}`
 }
 
@@ -578,9 +603,13 @@ export function decodeRemoteWorkspaceId(workspaceId: string): {
   if (sepIndex <= 0 || sepIndex === rest.length - 1) {
     return { deviceId: LOCAL_DEVICE_ID, rawWorkspaceId: workspaceId, isRemote: false }
   }
+  const rawWorkspaceId = rest.slice(sepIndex + 1)
+  if (isNamespacedWorkspaceId(rawWorkspaceId)) {
+    return { deviceId: LOCAL_DEVICE_ID, rawWorkspaceId: workspaceId, isRemote: false }
+  }
   return {
     deviceId: unescapeSegment(rest.slice(0, sepIndex)) as DeviceId,
-    rawWorkspaceId: rest.slice(sepIndex + 1),
+    rawWorkspaceId,
     isRemote: true,
   }
 }

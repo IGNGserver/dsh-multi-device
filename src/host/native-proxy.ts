@@ -163,6 +163,7 @@ export class NativeDeviceProxy {
   private stopped = false
   private lastAuthAttemptAt = 0
   private lastAuthRecoveryAt = 0
+  private authRecoveryInFlight: Promise<boolean> | undefined
   private readonly token = randomUUID().replaceAll('-', '')
   private bridgeServer: WebSocketServer | undefined
   private readonly bridgeClients = new Set<WebSocket>()
@@ -205,6 +206,44 @@ export class NativeDeviceProxy {
 
   private proxyOrigin(): string | undefined {
     return this.localPort === undefined ? undefined : `http://127.0.0.1:${this.localPort}`
+  }
+
+  private allowedFramingAncestors(): string[] {
+    const local = this.localOrigin?.()
+    if (local === undefined || local === '') return []
+    const origins = new Set<string>([local])
+    try {
+      const parsed = new URL(local)
+      const host = parsed.hostname.toLowerCase()
+      if (host === '127.0.0.1' || host === 'localhost' || host === '[::1]' || host === '::1') {
+        const portSuffix = parsed.port !== '' ? `:${parsed.port}` : ''
+        origins.add(`${parsed.protocol}//127.0.0.1${portSuffix}`)
+        origins.add(`${parsed.protocol}//localhost${portSuffix}`)
+        origins.add(`${parsed.protocol}//[::1]${portSuffix}`)
+      }
+    } catch {
+      // Keep raw local origin
+    }
+    return [...origins]
+  }
+
+  private isAllowedCallerOrigin(origin: string | undefined): boolean {
+    if (origin === undefined || origin === '') return true
+    const allowed = new Set<string>(this.allowedFramingAncestors())
+    const proxyOrigin = this.proxyOrigin()
+    if (proxyOrigin !== undefined) {
+      allowed.add(proxyOrigin)
+      try {
+        const parsed = new URL(proxyOrigin)
+        const portSuffix = parsed.port !== '' ? `:${parsed.port}` : ''
+        allowed.add(`${parsed.protocol}//127.0.0.1${portSuffix}`)
+        allowed.add(`${parsed.protocol}//localhost${portSuffix}`)
+        allowed.add(`${parsed.protocol}//[::1]${portSuffix}`)
+      } catch {
+        // Ignore
+      }
+    }
+    return allowed.has(origin)
   }
 
   port(): number | undefined {
@@ -413,7 +452,7 @@ export class NativeDeviceProxy {
       return
     }
 
-    void this.ensureAuthenticated(upstreamBase)
+    await this.ensureAuthenticated(upstreamBase)
 
     const upstream = splitUpstreamBase(upstreamBase)
     const upstreamPath = `${upstream.prefix}${rawTarget}`
@@ -481,11 +520,18 @@ export class NativeDeviceProxy {
                 })
               return
             }
-            this.hooks.onAuthState?.(
-              this.device.id,
-              'required',
-              `Remote DSH returned HTTP ${status}`,
-            )
+            // For non-idempotent requests (e.g. POST /api/session/list from an
+            // already-loaded SPA), trigger background re-auth so the next retry
+            // succeeds without destroying the Keep-Alive frame unless recovery fails.
+            void this.recoverAuthentication(upstreamBase, status).then((recovered) => {
+              if (!recovered) {
+                this.hooks.onAuthState?.(
+                  this.device.id,
+                  'required',
+                  `Remote DSH returned HTTP ${status}`,
+                )
+              }
+            })
             this.respondAuthRequired(res, status)
             return
           }
@@ -504,9 +550,12 @@ export class NativeDeviceProxy {
             if (lower === 'content-security-policy') {
               const cleaned = (Array.isArray(val) ? val.join('; ') : val)
                 .replace(/frame-ancestors[^;]*;?/gi, '')
+                .replace(/;\s*$/u, '')
                 .trim()
-              const local = this.localOrigin?.()
-              const framing = local !== undefined ? `frame-ancestors 'self' ${local}` : ''
+              const allowedAncestors = this.allowedFramingAncestors()
+              const framing = allowedAncestors.length > 0
+                ? `frame-ancestors 'self' ${allowedAncestors.join(' ')}`
+                : ''
               const next = [cleaned, framing].filter(part => part !== '').join('; ')
               if (next !== '') resHeaders[key] = next
               continue
@@ -655,7 +704,7 @@ export class NativeDeviceProxy {
       return
     }
     const origin = req.headers.origin
-    if (origin !== undefined && origin !== proxyOrigin && origin !== this.localOrigin?.()) {
+    if (!this.isAllowedCallerOrigin(origin)) {
       clientSocket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
       return
     }
@@ -759,17 +808,30 @@ export class NativeDeviceProxy {
   }
 
   private async recoverAuthentication(upstreamBase: string, status: number): Promise<boolean> {
+    if (this.authRecoveryInFlight !== undefined) return this.authRecoveryInFlight
     const now = Date.now()
     if (now - this.lastAuthRecoveryAt < 5_000) return false
     this.lastAuthRecoveryAt = now
-    const result = await this.authManager.ensureAuthenticated(this.device, upstreamBase, true)
-    if (result.ok) return true
-    this.hooks.onAuthState?.(
-      this.device.id,
-      status === 401 ? 'required' : 'error',
-      result.error,
-    )
-    return false
+    const promise = (async () => {
+      try {
+        this.authManager.invalidate(this.device.id)
+        const result = await this.authManager.ensureAuthenticated(this.device, upstreamBase, true)
+        if (result.ok && this.authManager.getAuthHeaders(this.device)['Cookie'] !== undefined) {
+          this.hooks.onAuthState?.(this.device.id, 'ok')
+          return true
+        }
+        this.hooks.onAuthState?.(
+          this.device.id,
+          status === 401 ? 'required' : 'error',
+          result.ok ? `Remote DSH returned HTTP ${status}` : result.error,
+        )
+        return false
+      } finally {
+        this.authRecoveryInFlight = undefined
+      }
+    })()
+    this.authRecoveryInFlight = promise
+    return promise
   }
 
   private respondAuthRequired(res: ServerResponse, status: number): void {
@@ -809,7 +871,7 @@ export class NativeDeviceProxy {
       return
     }
     const origin = req.headers.origin
-    if (origin !== undefined && origin !== proxyOrigin && origin !== this.localOrigin?.()) {
+    if (!this.isAllowedCallerOrigin(origin)) {
       clientSocket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
       return
     }
@@ -863,11 +925,15 @@ export class NativeDeviceProxy {
     proxyReq.on('response', (proxyRes) => {
       const status = proxyRes.statusCode ?? 403
       if (status === 401 || status === 403) {
-        this.hooks.onAuthState?.(
-          this.device.id,
-          'required',
-          `Remote DSH WebSocket returned HTTP ${status}`,
-        )
+        void this.recoverAuthentication(upstreamBase, status).then((recovered) => {
+          if (!recovered) {
+            this.hooks.onAuthState?.(
+              this.device.id,
+              'required',
+              `Remote DSH WebSocket returned HTTP ${status}`,
+            )
+          }
+        })
       }
       clientSocket.end(`HTTP/1.1 ${status} ${proxyRes.statusMessage ?? 'Rejected'}\r\nConnection: close\r\n\r\n`)
     })
@@ -1154,8 +1220,8 @@ function renderAuthRequiredHtml(deviceName: string, status: number): string {
     title: deviceName,
     paragraphs: [
       `远端 DSH 拒绝了当前凭据（HTTP ${String(status)}）。SSH 隧道已连通，但浏览器 Cookie 无效或已过期。`,
-      '请在 DSH 中打开侧栏底部的「多设备」，选择该设备后输入 dsh web 启动链接/Token，或点击「通过 SSH 自动修复」重新签发 Cookie。',
-      `The remote DSH rejected this credential (HTTP ${String(status)}). Open Multi-Device in the sidebar, pick this device, then paste a launch token or repair the cookie over SSH.`,
+      '请在 DSH 中打开「设置 → 多设备」，选择该设备后输入 dsh web 启动链接/Token，或点击「通过 SSH 自动修复」重新签发 Cookie。',
+      `The remote DSH rejected this credential (HTTP ${String(status)}). Open Settings → Multi-Device, pick this device, then paste a launch token or repair the cookie over SSH.`,
     ],
   })
 }
@@ -1182,8 +1248,8 @@ function renderProxyRejectedHtml(reason: string): string {
     title: '请重新打开该设备 / Reopen the device',
     paragraphs: [
       reason,
-      '请从 DSH 的「多设备」面板重新打开该设备。',
-      'Reopen the device from the Multi-Device panel in DSH.',
+      '请从 DSH 的「设置 → 多设备」重新打开或刷新该设备。',
+      'Reopen or reload the device from Settings → Multi-Device in DSH.',
     ],
     retry: false,
   })

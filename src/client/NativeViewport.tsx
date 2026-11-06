@@ -37,7 +37,7 @@ import { AuthRequiredPanel } from './AuthPanel.tsx'
 import { useSessionSummary } from './clientServices.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
 import { SessionDeviceChip } from './SessionDeviceChip.tsx'
-import { nativePaneTarget, shouldShowNativePane } from './nativePane.ts'
+import { nativePaneTarget, resolveSameSiteProxyUrl, shouldShowNativePane } from './nativePane.ts'
 import { clientStore, deviceStateToDotState, useMultiDeviceState } from './state.ts'
 
 interface DesktopBrowserBridgeLike {
@@ -69,7 +69,7 @@ function KeepAliveDeviceFrame({
   t: (key: MultiDeviceLocaleKey) => string
   onOpenSettings: () => void
 }): React.ReactElement {
-  const targetUrl = device.nativeProxyUrl ?? device.effectiveBaseUrl
+  const targetUrl = resolveSameSiteProxyUrl(device.nativeProxyUrl)
   const authRequired = device.authState === 'required' || device.authState === 'error'
   const containerRef = useRef<HTMLDivElement | null>(null)
   const webviewLeaseRef = useRef<string | undefined>(undefined)
@@ -301,7 +301,7 @@ export function NativeTabBar({
                 size="icon"
                 aria-label={t('openExternal')}
                 onClick={() => {
-                  const url = activeDevice.nativeProxyUrl ?? activeDevice.effectiveBaseUrl
+                  const url = resolveSameSiteProxyUrl(activeDevice.nativeProxyUrl) ?? activeDevice.effectiveBaseUrl
                   if (url !== undefined) window.open(url, '_blank', 'noopener,noreferrer')
                 }}
               >
@@ -420,7 +420,7 @@ function usePaneGeometry(
       : new MutationObserver(schedule)
     mutationObserver?.observe(frame, {
       attributes: true,
-      attributeFilter: ['style', 'class', 'data-sidebar-collapsed'],
+      attributeFilter: ['style', 'class', 'data-sidebar-collapsed', 'data-dragging'],
     })
     window.addEventListener('resize', schedule)
 
@@ -561,28 +561,26 @@ export function NativeViewport({
   }, [target?.deviceId])
 
   // A framed status page cannot recover on its own when the tunnel returns.
-  // Reload exactly once on the same device's non-connected -> connected edge.
-  const previousDevice = useRef<{ id?: DeviceId; state?: DeviceView['state'] }>({
-    ...(paneDevice?.id !== undefined ? { id: paneDevice.id } : {}),
-    ...(paneDevice?.state !== undefined ? { state: paneDevice.state } : {}),
-  })
+  // Reload exactly once on any mounted device's non-connected -> connected edge.
+  const previousStates = useRef<Map<DeviceId, DeviceView['state']>>(new Map())
   useEffect(() => {
-    const previous = previousDevice.current
-    previousDevice.current = {
-      ...(paneDevice?.id !== undefined ? { id: paneDevice.id } : {}),
-      ...(paneDevice?.state !== undefined ? { state: paneDevice.state } : {}),
+    const prevMap = previousStates.current
+    const nextMap = new Map<DeviceId, DeviceView['state']>()
+    for (const dev of devices) {
+      nextMap.set(dev.id, dev.state)
+      const prevState = prevMap.get(dev.id)
+      if (
+        prevState !== undefined &&
+        prevState !== 'connected' &&
+        dev.state === 'connected' &&
+        (dev.nativePaneState === 'idle' || dev.nativePaneState === 'failed' || dev.nativePaneState === undefined) &&
+        (state.keepAliveDeviceIds.includes(dev.id) || activeDevice?.id === dev.id || paneDevice?.id === dev.id)
+      ) {
+        clientStore.reloadNativeDevice(dev.id)
+      }
     }
-    if (paneDevice === undefined) return
-    if (
-      previous.id === paneDevice.id &&
-      previous.state !== undefined &&
-      previous.state !== 'connected' &&
-      paneDevice.state === 'connected' &&
-      (paneDevice.nativePaneState === 'idle' || paneDevice.nativePaneState === 'failed')
-    ) {
-      clientStore.reloadNativeDevice(paneDevice.id)
-    }
-  }, [paneDevice])
+    previousStates.current = nextMap
+  }, [devices, state.keepAliveDeviceIds, activeDevice?.id, paneDevice?.id])
 
   // Keep every keep-alive device, the native tab and the pane's device mounted.
   const mountedDeviceIds = new Set<DeviceId>(state.keepAliveDeviceIds)

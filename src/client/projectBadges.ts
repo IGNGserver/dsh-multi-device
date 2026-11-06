@@ -42,15 +42,23 @@ export function shouldDecorateProjectRows(mode: DisplayMode | undefined): boolea
 }
 
 function dotTone(snapshot: MultiDeviceSnapshot, workspace: LogicalWorkspaceView): DotTone {
-  let tone: DotTone = 'ok'
+  let hasOnline = false
+  let hasOffline = false
+  let hasPending = false
   for (const member of workspace.members) {
-    if (member.deviceId === LOCAL_DEVICE_ID) continue
+    if (member.deviceId === LOCAL_DEVICE_ID) {
+      hasOnline = true
+      continue
+    }
     const device = snapshot.devices.find(candidate => candidate.id === member.deviceId)
     const state = deviceStateToDotState(device?.state ?? 'disabled')
-    if (state === 'error' || state === 'idle') return 'offline'
-    if (state === 'ongoing') tone = 'pending'
+    if (state === 'done') hasOnline = true
+    else if (state === 'ongoing') hasPending = true
+    else hasOffline = true
   }
-  return tone
+  if (hasOffline && !hasOnline && !hasPending) return 'offline'
+  if (hasOffline || hasPending) return 'pending'
+  return 'ok'
 }
 
 function labelFor(

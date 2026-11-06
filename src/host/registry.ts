@@ -68,7 +68,11 @@ import {
   resolveProbedProtocol,
   type RemoteDeviceCallbacks,
 } from './remote-client.ts'
-import { listLocalSshKeys, listSshConfigHosts } from './ssh-config.ts'
+import {
+  listLocalSshKeys,
+  listSshConfigHosts,
+  resolveSshConfigForTransport,
+} from './ssh-config.ts'
 import { execSshCommand, probeSshTunnel } from './tunnel.ts'
 
 /**
@@ -401,6 +405,9 @@ export class DeviceRegistry {
   observeLocalSessionStatus(sessionId: string, running: boolean): void {
     if (typeof sessionId !== 'string' || sessionId === '') return
     this.readTracker.observeRunning(sessionId, running)
+    if (!running && sessionId === this.activeSessionId) {
+      this.readTracker.markRead(sessionId)
+    }
   }
 
   /** Persisted fold state for one device; the bridge injection uses this map. */
@@ -448,15 +455,26 @@ export class DeviceRegistry {
    * carries the final flag, and a live `true -> false` there is a completion
    * for the same reason a stream event is.
    */
+  private isCurrentlyViewedSession(sessionId: string): boolean {
+    if (sessionId === this.activeSessionId) return true
+    const decoded = decodeSessionId(sessionId)
+    if (!decoded.isRemote) return false
+    const pane = this.nativePanes.get(decoded.deviceId)
+    return pane?.state === 'ready' && pane.sessionId === decoded.rawSessionId && (
+      this.displayMode === 'native' || this.paneEmbeddedDeviceId === decoded.deviceId
+    )
+  }
+
   private reconcileRunningForDevice(deviceId: DeviceId): void {
     const client = this.clients.get(deviceId)
     if (client === undefined || !client.isConnected()) return
     if (client.toView().catalogStale === true) return
     for (const summary of client.sessionSummaries()) {
-      this.readTracker.observeRunning(
-        encodeRemoteSessionId(deviceId, summary.sessionId),
-        summary.running,
-      )
+      const namespacedId = encodeRemoteSessionId(deviceId, summary.sessionId)
+      this.readTracker.observeRunning(namespacedId, summary.running)
+      if (!summary.running && this.isCurrentlyViewedSession(namespacedId)) {
+        this.readTracker.markRead(namespacedId)
+      }
     }
   }
 
@@ -477,6 +495,9 @@ export class DeviceRegistry {
     const client = this.clients.get(deviceId)
     if (client === undefined || !client.isConnected()) return
     this.readTracker.observeRunning(sessionId, running)
+    if (!running && this.isCurrentlyViewedSession(sessionId)) {
+      this.readTracker.markRead(sessionId)
+    }
   }
 
   /**
@@ -863,8 +884,14 @@ export class DeviceRegistry {
     if (input.auth?.credential !== undefined) {
       this.authManager.setAuthCredential(id, input.auth.credential)
     }
-    if (input.transport.kind === 'ssh' && input.transport.passphrase !== undefined) {
-      this.authManager.setSshPassphrase(id, input.transport.passphrase)
+    if (input.transport.kind === 'ssh') {
+      const keyPath = input.transport.privateKeyPath?.trim() ?? ''
+      if (input.transport.passphrase !== undefined && input.transport.passphrase.trim() !== '') {
+        this.authManager.setSshPassphrase(id, input.transport.passphrase)
+      } else if (keyPath === '') {
+        // Switching back to Auto (SSH Agent / default keys) clears any old encrypted-key passphrase.
+        this.authManager.setSshPassphrase(id, null)
+      }
     }
     const sanitized = sanitizeDeviceConfig(config)
     this.configs.set(id, sanitized)
@@ -954,14 +981,15 @@ export class DeviceRegistry {
     deviceId: DeviceId,
     credential?: string,
   ): Promise<{ ok: true; authState: DeviceAuthState } | { ok: false; error: string }> {
-    const config = this.configs.get(deviceId)
+    const storedConfig = this.configs.get(deviceId)
     const client = this.clients.get(deviceId)
-    if (config === undefined || client === undefined) {
+    if (storedConfig === undefined || client === undefined) {
       return { ok: false, error: 'Device is not configured' }
     }
     if (credential !== undefined && credential.trim() !== '') {
       this.authManager.setAuthCredential(deviceId, credential.trim())
     }
+    const config = this.hydrateConfig(storedConfig)
     const baseUrl = client.effectiveBaseUrl()
     if (baseUrl === undefined) {
       return { ok: false, error: 'The SSH tunnel is not ready yet. Try again in a moment.' }
@@ -1014,6 +1042,8 @@ export class DeviceRegistry {
           ...(input.agentPreset !== undefined ? { agentPreset: input.agentPreset } : {}),
         },
       })) as { sessionId: string; agentPreset?: string }
+      await client.refreshSessionCatalog().catch(() => {})
+      this.nativeProxyManager.requestRefresh(input.deviceId)
       this.bumpRevision()
       this.notifyWorkspacesChanged()
       return {
@@ -1058,24 +1088,45 @@ export class DeviceRegistry {
       }
     }
 
+    const existingId = input.id !== undefined && input.id.trim() !== ''
+      ? DeviceId(input.id.trim())
+      : undefined
+    const existingSecret = existingId !== undefined ? this.authManager.storedSecret(existingId) : undefined
+    const effectiveTransport: UpsertDeviceInput['transport'] =
+      input.transport.kind === 'ssh' &&
+      (input.transport.passphrase === undefined || input.transport.passphrase === '') &&
+      existingSecret?.sshPassphrase !== undefined &&
+      existingSecret.sshPassphrase !== '' &&
+      input.transport.privateKeyPath !== undefined &&
+      input.transport.privateKeyPath.trim() !== ''
+        ? { ...input.transport, passphrase: existingSecret.sshPassphrase }
+        : input.transport
+    const effectiveCredential =
+      input.auth?.credential?.trim() || existingSecret?.authCredential
+
     let baseUrl: string
     let cleanup: (() => void) | undefined
 
-    if (input.transport.kind === 'ssh') {
-      const probed = await probeSshTunnel(input.transport)
+    if (effectiveTransport.kind === 'ssh') {
+      const probed = await probeSshTunnel(effectiveTransport)
       if (!probed.ok) return probed
       baseUrl = probed.baseUrl
       cleanup = probed.close
     } else {
-      baseUrl = input.transport.baseUrl.replace(/\/+$/, '')
+      baseUrl = effectiveTransport.baseUrl.replace(/\/+$/, '')
     }
 
     const tempConfig: DeviceConfig = {
       id: DeviceId('probe-temp'),
       name: input.name || 'probe',
       enabled: true,
-      transport: input.transport,
-      auth: input.auth ?? { mode: 'auto' },
+      transport: effectiveTransport,
+      auth: {
+        mode: input.auth?.mode ?? 'auto',
+        ...(effectiveCredential !== undefined && effectiveCredential !== ''
+          ? { credential: effectiveCredential }
+          : {}),
+      },
     }
 
     try {
@@ -1086,6 +1137,26 @@ export class DeviceRegistry {
       const headers: Record<string, string> = {
         ...this.authManager.getAuthHeaders(tempConfig),
         'content-type': 'application/json',
+      }
+
+      // Self-loop check by Host identity over any IP/alias
+      const selfProbe = await requestRemote(new URL('/multi-device/api', baseUrl).href, {
+        method: 'GET',
+        headers,
+        timeoutMs: 3_000,
+      }).catch(() => undefined)
+      if (selfProbe !== undefined && selfProbe.status === 200) {
+        try {
+          const parsedSelf = JSON.parse(selfProbe.body.toString('utf8')) as {
+            ok?: boolean
+            value?: { hostId?: string }
+          }
+          if (parsedSelf?.value?.hostId === this.hostId) {
+            return { ok: false, error: 'Self-loop rejected: target points to this local DSH host' }
+          }
+        } catch {
+          // Not a matching control-plane endpoint
+        }
       }
 
       // Probe 0.2
@@ -1248,8 +1319,10 @@ export class DeviceRegistry {
     paths: readonly string[],
   ): Promise<Map<string, string>> {
     if (paths.length === 0) return new Map()
-    const config = this.configs.get(deviceId)
-    if (config === undefined || config.transport.kind !== 'ssh') return new Map()
+    const storedConfig = this.configs.get(deviceId)
+    if (storedConfig === undefined || storedConfig.transport.kind !== 'ssh') return new Map()
+    const config = this.hydrateConfig(storedConfig)
+    if (config.transport.kind !== 'ssh') return new Map()
     const found = await discoverRemoteGitRemotesViaSsh(config.transport, paths)
     for (const [path, rawUrl] of found) this.aggregator.noteGitRemote(deviceId, path, rawUrl)
     return found
@@ -1259,8 +1332,9 @@ export class DeviceRegistry {
     deviceId: DeviceId,
     roots: readonly string[],
   ): Promise<{ ok: true; repos: ScannedRepository[] } | { ok: false; error: string }> {
-    const config = this.configs.get(deviceId)
-    if (config === undefined) return { ok: false, error: 'Device is not configured' }
+    const storedConfig = this.configs.get(deviceId)
+    if (storedConfig === undefined) return { ok: false, error: 'Device is not configured' }
+    const config = this.hydrateConfig(storedConfig)
     if (config.transport.kind !== 'ssh') {
       return { ok: false, error: 'Scanning requires an SSH transport' }
     }
@@ -1365,6 +1439,7 @@ export class DeviceRegistry {
 
     return {
       revision: this.revision,
+      hostId: this.hostId,
       displayMode: this.displayMode,
       hostStatus: {
         aggregatedGatewayActive: this.aggregatedGatewayActive,
@@ -1513,6 +1588,9 @@ export class DeviceRegistry {
         }
         this.bumpRevision()
       },
+      onAuthState: (deviceId, state, error) => {
+        this.setAuthState(deviceId, state, error)
+      },
     }
 
     if (client === undefined) {
@@ -1527,6 +1605,7 @@ export class DeviceRegistry {
     if (this.nativeProxyActive) {
       const proxyUrl = await this.nativeProxyManager.ensureProxy(config, () => client.effectiveBaseUrl())
       client.setNativeProxyUrl(proxyUrl)
+      if (proxyUrl !== undefined) this.bumpRevision()
     }
 
     if (config.enabled) {
@@ -1549,10 +1628,17 @@ export class DeviceRegistry {
       }
     }
     // An SSH tunnel pointing back at this same DSH listener creates a loop.
-    const hostPart = transport.host.trim().replace(/^.*@/, '').replace(/:\d+$/, '')
+    // Resolve `~/.ssh/config` so an alias pointing at 127.0.0.1:22 is caught,
+    // while a non-22 SSH port (e.g. a local VM/container port forward) is allowed.
+    const resolved = resolveSshConfigForTransport(transport)
+    const hostPart = resolved.hostName.trim().toLowerCase()
     const remotePort = transport.remotePort ?? 3080
+    const sshPort = resolved.port
     return (
-      ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(hostPart.toLowerCase()) &&
+      ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(hostPart) &&
+      sshPort === 22 &&
+      resolved.proxyJump === undefined &&
+      resolved.proxyCommand === undefined &&
       remotePort === localPort
     )
   }
@@ -1635,7 +1721,7 @@ export class DeviceRegistry {
         this.readTracker.hydrate(raw.readState.entries)
         this.readTracker.retain(sessionId => {
           const decoded = decodeSessionId(sessionId)
-          return decoded.isRemote && this.configs.has(decoded.deviceId)
+          return !decoded.isRemote || this.configs.has(decoded.deviceId)
         })
       }
       if (raw.gitMatch && typeof raw.gitMatch === 'object') {

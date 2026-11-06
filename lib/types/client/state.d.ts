@@ -57,8 +57,10 @@ declare class MultiDeviceClientStore {
     private started;
     /** Latest Session reported to the Host, used to dedupe mount/cleanup races. */
     private reportedSessionId;
+    private activeSessionInFlight;
     /** Monotonic control-plane sequence so an older HTTP request cannot win. */
     private activeSessionSeq;
+    private lastPollAt;
     /** Sessions for which this client already asked the Host to clear unread. */
     private readonly unreadClearInFlight;
     constructor();

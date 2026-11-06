@@ -33,8 +33,10 @@ import { clientStore, deviceStateToDotState, useMultiDeviceState } from './state
 type Translate = (key: MultiDeviceLocaleKey) => string
 
 interface PopoverPosition {
-  readonly top: number
-  readonly right: number
+  readonly top?: number
+  readonly bottom?: number
+  readonly left?: number
+  readonly right?: number
 }
 
 /** One remote device plus the workspaces a device-first session can start in. */
@@ -119,21 +121,29 @@ export function SessionDeviceChip({
   const [pendingTarget, setPendingTarget] = useState<DeviceId | undefined>(undefined)
   const [actionError, setActionError] = useState<string | undefined>(undefined)
   const buttonRef = useRef<HTMLButtonElement | null>(null)
+  const popoverRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     if (!open) return
     // Any layout change moves the anchor; closing is cheaper and less janky
     // than chasing it in a fixed-position popover.
     const close = (): void => setOpen(false)
+    const onScroll = (event: Event): void => {
+      const target = event.target
+      if (target instanceof Node && popoverRef.current?.contains(target)) {
+        return
+      }
+      close()
+    }
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') close()
     }
     window.addEventListener('resize', close)
-    window.addEventListener('scroll', close, true)
+    window.addEventListener('scroll', onScroll, true)
     document.addEventListener('keydown', onKeyDown)
     return () => {
       window.removeEventListener('resize', close)
-      window.removeEventListener('scroll', close, true)
+      window.removeEventListener('scroll', onScroll, true)
       document.removeEventListener('keydown', onKeyDown)
     }
   }, [open])
@@ -157,9 +167,18 @@ export function SessionDeviceChip({
     }
     const rect = buttonRef.current?.getBoundingClientRect()
     if (rect === undefined) return
+    const vw = typeof window !== 'undefined' ? window.innerWidth : 1024
+    const vh = typeof window !== 'undefined' ? window.innerHeight : 768
+    const estimatedWidth = 340
+    const alignLeft = rect.right < estimatedWidth + 16 && rect.left + estimatedWidth + 8 <= vw
+    const openUpward = vh - rect.bottom < 260 && rect.top > vh - rect.bottom
     setPosition({
-      top: Math.round(rect.bottom + 6),
-      right: Math.max(8, Math.round(window.innerWidth - rect.right)),
+      ...(openUpward
+        ? { bottom: Math.max(8, Math.round(vh - rect.top + 6)) }
+        : { top: Math.round(rect.bottom + 6) }),
+      ...(alignLeft
+        ? { left: Math.max(8, Math.round(rect.left)) }
+        : { right: Math.max(8, Math.min(vw - 8, Math.round(vw - rect.right))) }),
     })
     setActionError(undefined)
     setPanel('target')
@@ -201,9 +220,17 @@ export function SessionDeviceChip({
         return
       }
       const services = getClientServices()
-      services.uiWorkspace?.openSession(result.sessionId)
-      void services.sessions?.refresh?.().catch(() => {})
-      setOpen(false)
+      try {
+        await services.sessions?.refresh?.()
+      } catch {
+        // Proceed to openSession if already in list via $events
+      }
+      try {
+        services.uiWorkspace?.openSession(result.sessionId)
+        setOpen(false)
+      } catch (error) {
+        setActionError(error instanceof Error ? error.message : t('actionFailed'))
+      }
     } finally {
       setPendingTarget(undefined)
     }
@@ -328,20 +355,22 @@ export function SessionDeviceChip({
           <div className="dsh-md-device-chip-backdrop" onClick={() => setOpen(false)} />
           {panel === 'other' ? (
             <div
+              ref={popoverRef}
               className="dsh-md-device-popover dsh-md-device-menu"
               role="dialog"
               aria-label={aria}
-              style={{ top: position.top, right: position.right }}
+              style={position}
             >
               {otherPanel}
               {footer}
             </div>
           ) : canSwitchDevice && workspace !== undefined ? (
             <div
+              ref={popoverRef}
               className="dsh-md-device-popover dsh-md-device-menu"
               role="dialog"
               aria-label={aria}
-              style={{ top: position.top, right: position.right }}
+              style={position}
             >
               <div className="dsh-md-device-popover-head">
                 <span className="dsh-md-device-popover-name">{t('deviceTargetTitle')}</span>
@@ -396,10 +425,11 @@ export function SessionDeviceChip({
             </div>
           ) : (
             <div
+              ref={popoverRef}
               className="dsh-md-device-popover"
               role="dialog"
               aria-label={aria}
-              style={{ top: position.top, right: position.right }}
+              style={position}
             >
               <div className="dsh-md-device-popover-head">
                 <StateDot state={deviceStateToDotState(device.state)} size={8} />

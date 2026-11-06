@@ -58,6 +58,8 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
   var failedReason = null;
   var captured = null;
   var lastSelection = null;
+  var requestedSessionId = null;
+  var requestedAt = 0;
 
   // Workspace fold state is owned by the local Host. The injected prefix is
   // applied before the workspace browser first renders, so there is no
@@ -109,9 +111,40 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
     return null;
   }
 
+  function hasKnownSession(sessionId) {
+    if (!captured || !captured.sessions || !captured.sessions.list || typeof captured.sessions.list.getSnapshot !== 'function') {
+      return false;
+    }
+    try {
+      var snap = captured.sessions.list.getSnapshot();
+      return Boolean(snap && snap.byId && snap.byId[sessionId]);
+    } catch (error) {
+      return false;
+    }
+  }
+
   function report() {
     if (!readySent) return;
     var sessionId = currentSelection();
+    if (
+      requestedSessionId &&
+      sessionId &&
+      sessionId !== requestedSessionId &&
+      Date.now() - requestedAt < 2500 &&
+      hasKnownSession(requestedSessionId)
+    ) {
+      var target = requestedSessionId;
+      requestedAt = 0;
+      try {
+        if (captured && captured.uiWorkspace && typeof captured.uiWorkspace.openSession === 'function') {
+          captured.uiWorkspace.openSession(target);
+          sessionId = currentSelection();
+        }
+      } catch (error) {}
+    }
+    if (sessionId === requestedSessionId) {
+      requestedAt = 0;
+    }
     if (sessionId !== lastSelection) {
       lastSelection = sessionId;
       send({ type: 'selection', sessionId: sessionId });
@@ -138,10 +171,16 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
     if (!captured || typeof sessionId !== 'string' || sessionId === '') return;
     var workspace = captured.uiWorkspace;
     if (!workspace || typeof workspace.openSession !== 'function') return;
+    requestedSessionId = sessionId;
+    requestedAt = Date.now();
     var run = function () {
       try { workspace.openSession(sessionId); } catch (error) {}
       report();
     };
+    if (hasKnownSession(sessionId)) {
+      run();
+      return;
+    }
     if (captured.sessions && typeof captured.sessions.refresh === 'function') {
       try {
         var pending = captured.sessions.refresh();
@@ -404,7 +443,23 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
       || document.querySelector('[class*="_sidebarCol"]');
   }
 
+  function ensureEmbeddedStyleTag() {
+    try {
+      if (!document.head || document.querySelector('style[data-dsh-md-pane-css="1"]')) return;
+      var style = document.createElement('style');
+      style.setAttribute('data-dsh-md-pane-css', '1');
+      style.textContent =
+        '[data-dsh-md-native-pane="1"] > [data-side="sidebar"],' +
+        '[data-dsh-md-native-pane="1"] > [data-shell-leading],' +
+        '[data-dsh-md-native-pane="1"] [data-conversation-header-leading] {' +
+        '  display: none !important; pointer-events: none !important;' +
+        '}';
+      document.head.appendChild(style);
+    } catch (error) {}
+  }
+
   function applyEmbedded() {
+    ensureEmbeddedStyleTag();
     var sidebar = findSidebar();
     if (!sidebar) return false;
     var frame = sidebar.parentElement;

@@ -36,3 +36,9 @@ export interface NativePaneVisibilityInput {
  *   and leave the local mirror in place.
  */
 export declare function shouldShowNativePane(input: NativePaneVisibilityInput): boolean;
+/**
+ * Align the local proxy loopback hostname (`127.0.0.1` vs `localhost`) with the
+ * current page so the browser never treats the framed proxy as cross-site when
+ * the user opened DSH at `http://localhost:3080`.
+ */
+export declare function resolveSameSiteProxyUrl(rawUrl: string | undefined): string | undefined;

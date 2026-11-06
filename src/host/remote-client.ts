@@ -19,6 +19,7 @@
 import { randomUUID } from 'node:crypto'
 import WebSocket from 'ws'
 import {
+  type DeviceAuthState,
   type DeviceCatalogCache,
   type DeviceConfig,
   type DeviceConnectionState,
@@ -26,6 +27,9 @@ import {
   type DeviceView,
   encodeRemoteEventId,
   encodeRemoteSessionId,
+  isNamespacedEventId,
+  isNamespacedSessionId,
+  isNamespacedWorkspaceId,
   type PendingInteractionKind,
   type RemoteProtocolVersion,
 } from '../contract.ts'
@@ -35,13 +39,21 @@ import { headerValue, requestRemote, responseAsFetchResponse } from './http-requ
 import { BoundedStreamQueue } from './stream-queue.ts'
 import { SshTunnel } from './tunnel.ts'
 
-/** Map a remote waterfall event name to the pending kind shown in the UI. */
-export function pendingInteractionKind(event: string): PendingInteractionKind | undefined {
+/** Map a remote waterfall event name (and payload) to the pending kind shown in the UI. */
+export function pendingInteractionKind(
+  event: string,
+  request?: Record<string, unknown>,
+): PendingInteractionKind | undefined {
   switch (event) {
     case 'approval/request':
       return 'approval'
-    case 'user-questions/request':
+    case 'user-questions/request': {
+      const questions = Array.isArray(request?.questions) ? request.questions : []
+      if (questions.length === 1 && isRecord(questions[0]) && isRecord(questions[0].intent)) {
+        if (questions[0].intent.kind === 'plan-review') return 'plan-review'
+      }
       return 'question'
+    }
     case 'plan-review/request':
       return 'plan-review'
     default:
@@ -102,6 +114,8 @@ export interface RemoteDeviceCallbacks {
   readonly onGitRemotesDiscovered: (deviceId: DeviceId, remotesByPath: ReadonlyMap<string, string>) => void
   /** The device's model list changed (or it just connected); refresh the picker. */
   readonly onModelCatalogChanged: (deviceId: DeviceId) => void
+  /** Optional auth-state callback so 401/403 on control/RPC surfaces in the UI. */
+  readonly onAuthState?: (deviceId: DeviceId, state: DeviceAuthState, error?: string) => void
 }
 
 /** Plain predicate keeps callers from narrowing a live lifecycle field. */
@@ -353,8 +367,32 @@ export class RemoteDeviceClient {
     return this.archivedSessionIds
   }
 
+  setArchivedIds(ids: readonly string[]): void {
+    this.archivedSessionIds = ids.filter(id => typeof id === 'string' && !isNamespacedSessionId(id))
+  }
+
   pinnedIds(): readonly string[] {
     return this.pinnedSessionIds
+  }
+
+  setPinnedIds(ids: readonly string[]): void {
+    this.pinnedSessionIds = ids.filter(id => typeof id === 'string' && !isNamespacedSessionId(id))
+  }
+
+  /**
+   * Refresh the remote `session/list` catalog and notify local `$events`
+   * listeners of any newly created or updated remote Sessions.
+   */
+  async refreshSessionCatalog(signal?: AbortSignal): Promise<void> {
+    if (this.protocolVersion !== '0.2') return
+    const previousSummaries = new Map(this.summaries.map(summary => [summary.sessionId, summary]))
+    const res = await this.rawRpcPost('session/list', { args: { _request: {} } }, signal)
+    if (res.ok && isRecord(res.value) && Array.isArray(res.value.items)) {
+      this.summaries = (res.value.items as RemoteSessionSummary[]).filter(
+        item => typeof item?.sessionId === 'string' && !isNamespacedSessionId(item.sessionId),
+      )
+      this.reconcileSessionSummaries(previousSummaries)
+    }
   }
 
   controlProjections(): ReadonlyMap<string, { asOfSeq: number; values: Record<string, unknown> }> {
@@ -489,6 +527,10 @@ export class RemoteDeviceClient {
     const endpoint = `${namespace}/${method}`
     const response = await this.rawRpcPost(endpoint, { args }, signal)
     if (!response.ok) {
+      const rawDetails = isRecord(response.error.details) ? { ...response.error.details } : {}
+      if (typeof rawDetails.sessionId === 'string' && !isNamespacedSessionId(rawDetails.sessionId)) {
+        rawDetails.sessionId = encodeRemoteSessionId(this.id, rawDetails.sessionId)
+      }
       const err = new Error(response.error.message) as Error & {
         code: string
         details: object
@@ -496,7 +538,7 @@ export class RemoteDeviceClient {
       }
       err.name = 'RemoteError'
       err.code = response.error.code
-      err.details = response.error.details ?? {}
+      err.details = rawDetails
       err.isDSHRemoteError = true
       throw err
     }
@@ -599,8 +641,10 @@ export class RemoteDeviceClient {
       | { readonly kind: 'rejected'; readonly error: { readonly name: string; readonly message: string; readonly code?: string; readonly details?: unknown } },
     signal?: AbortSignal,
   ): Promise<{ ok: boolean; error?: string }> {
-    this.pendingInteractions.delete(remoteEventId)
-    this.callbacks.onStateChanged(this.id)
+    if (outcome.kind !== 'next') {
+      this.pendingInteractions.delete(remoteEventId)
+      this.callbacks.onStateChanged(this.id)
+    }
 
     if (this.protocolVersion === '0.1') {
       const value = outcome.kind === 'result' ? outcome.value : undefined
@@ -670,18 +714,28 @@ export class RemoteDeviceClient {
         if (probed.remoteDshVersion !== undefined) {
           this.remoteDshVersion = probed.remoteDshVersion
         }
-        this.state = 'connected'
-        this.connectedAt = Date.now()
-        this.lastError = undefined
-        this.reconnectAttempt = 0
-        this.lastSyncedAt = Date.now()
-        this.catalogStale = false
-        this.callbacks.onStateChanged(this.id)
 
-        // Step 4: Hold live streams until disconnection
+        // Step 4: Hold live streams until disconnection.
+        // For 0.2, only mark `connected` once `/api/remote.mux` WebSocket is open
+        // so `waitForClient` callers never hit a still-connecting mux socket.
         if (this.protocolVersion === '0.2') {
-          await this.runProtocol02Streams(baseUrl, signal)
+          await this.runProtocol02Streams(baseUrl, signal, () => {
+            this.state = 'connected'
+            this.connectedAt = Date.now()
+            this.lastError = undefined
+            this.reconnectAttempt = 0
+            this.lastSyncedAt = Date.now()
+            this.catalogStale = false
+            this.callbacks.onStateChanged(this.id)
+          })
         } else {
+          this.state = 'connected'
+          this.connectedAt = Date.now()
+          this.lastError = undefined
+          this.reconnectAttempt = 0
+          this.lastSyncedAt = Date.now()
+          this.catalogStale = false
+          this.callbacks.onStateChanged(this.id)
           await this.runProtocol01Polling(baseUrl, signal)
         }
       } catch (error) {
@@ -733,10 +787,17 @@ export class RemoteDeviceClient {
   ): Promise<{ protocolVersion: '0.2' | '0.1'; remoteDshVersion?: string }> {
     // Try DSH 0.2 `/api/session/list` first
     let res02 = await this.rawRpcPost('session/list', { args: { _request: {} } }, signal)
-    if (!res02.ok && res02.httpStatus === 401) {
+    if (!res02.ok && (res02.httpStatus === 401 || res02.httpStatus === 403)) {
       // Force re-auth and retry once
+      this.authManager.invalidate(this.config.id)
       await this.authManager.ensureAuthenticated(this.config, baseUrl, true)
       res02 = await this.rawRpcPost('session/list', { args: { _request: {} } }, signal)
+      if (!res02.ok && (res02.httpStatus === 401 || res02.httpStatus === 403)) {
+        this.callbacks.onAuthState?.(this.id, 'required', res02.error.message)
+      }
+    }
+    if (res02.ok) {
+      this.callbacks.onAuthState?.(this.id, 'ok')
     }
 
     const previousSummaries = new Map(this.summaries.map(summary => [summary.sessionId, summary]))
@@ -752,7 +813,9 @@ export class RemoteDeviceClient {
     const resolved = resolveProbedProtocol(body02, hostValue)
     if (resolved?.protocol === '0.2') {
       if (isRecord(body02) && Array.isArray(body02.items)) {
-        this.summaries = body02.items as RemoteSessionSummary[]
+        this.summaries = (body02.items as RemoteSessionSummary[]).filter(
+          item => typeof item?.sessionId === 'string' && !isNamespacedSessionId(item.sessionId),
+        )
       }
       this.reconcileSessionSummaries(previousSummaries)
       this.realtime = true
@@ -770,7 +833,11 @@ export class RemoteDeviceClient {
     throw new Error(res02.ok ? 'Unrecognized DSH /api response' : res02.error.message)
   }
 
-  private async runProtocol02Streams(baseUrl: string, signal: AbortSignal): Promise<void> {
+  private async runProtocol02Streams(
+    baseUrl: string,
+    signal: AbortSignal,
+    onReady?: () => void,
+  ): Promise<void> {
     const wsUrl = new URL('/api/remote.mux', baseUrl)
     wsUrl.protocol = wsUrl.protocol === 'https:' ? 'wss:' : 'ws:'
     const headers = this.authManager.getAuthHeaders(this.config)
@@ -801,6 +868,8 @@ export class RemoteDeviceClient {
       socket.once('error', onErr)
     })
 
+    onReady?.()
+
     socket.on('message', (data) => {
       try {
         const frame = JSON.parse(data.toString('utf8')) as {
@@ -819,6 +888,13 @@ export class RemoteDeviceClient {
       }
     })
 
+    const pingInterval = setInterval(() => {
+      if (socket.readyState === WebSocket.OPEN) {
+        try { socket.ping() } catch { /* ignore */ }
+      }
+    }, 15_000)
+    pingInterval.unref?.()
+
     const closed = new Promise<void>((_, reject) => {
       socket.once('close', (code, reason) => {
         reject(new Error(`Remote stream WebSocket closed (${String(code)} ${reason.toString()})`))
@@ -826,14 +902,16 @@ export class RemoteDeviceClient {
       socket.once('error', (err) => reject(err))
     })
 
-    await Promise.race([
-      closed,
-      Promise.all([
+    try {
+      await Promise.race([
+        closed,
         this.pump02RemoteEvents(signal),
         this.pump02WorkspaceFollow(signal),
         this.pump02SessionControl(signal),
-      ]),
-    ])
+      ])
+    } finally {
+      clearInterval(pingInterval)
+    }
   }
 
   private async pump02RemoteEvents(signal: AbortSignal): Promise<void> {
@@ -866,9 +944,10 @@ export class RemoteDeviceClient {
         typeof item.agentId === 'string' &&
         isRecord(item.request)
       ) {
+        if (isNamespacedSessionId(item.agentId) || isNamespacedEventId(item.eventId)) continue
         const namespacedSessionId = encodeRemoteSessionId(this.id, item.agentId)
         const namespacedEventId = encodeRemoteEventId(this.id, item.eventId)
-        const kind = pendingInteractionKind(item.event)
+        const kind = pendingInteractionKind(item.event, item.request)
         if (kind !== undefined) {
           this.pendingInteractions.set(item.eventId, {
             eventId: item.eventId,
@@ -893,6 +972,7 @@ export class RemoteDeviceClient {
       }
 
       if (item.type === 'cancel' && typeof item.eventId === 'string') {
+        if (isNamespacedEventId(item.eventId)) continue
         this.pendingInteractions.delete(item.eventId)
         this.callbacks.onStateChanged(this.id)
         this.callbacks.onRemoteEventFrame(this.id, {
@@ -908,6 +988,7 @@ export class RemoteDeviceClient {
       case 'api-session/added': {
         const raw = args[0]
         if (isRecord(raw) && typeof raw.sessionId === 'string') {
+          if (isNamespacedSessionId(raw.sessionId)) break
           const summary = raw as unknown as RemoteSessionSummary
           const idx = this.summaries.findIndex(s => s.sessionId === summary.sessionId)
           if (idx === -1) this.summaries = [summary, ...this.summaries]
@@ -925,6 +1006,7 @@ export class RemoteDeviceClient {
       case 'api-session/removed': {
         const sessionId = args[0]
         if (typeof sessionId === 'string') {
+          if (isNamespacedSessionId(sessionId)) break
           this.summaries = this.summaries.filter(s => s.sessionId !== sessionId)
           this.projectionsBySession.delete(sessionId)
           this.callbacks.onStateChanged(this.id)
@@ -940,6 +1022,7 @@ export class RemoteDeviceClient {
       case 'api-session/status': {
         const [sessionId, running] = args
         if (typeof sessionId === 'string' && typeof running === 'boolean') {
+          if (isNamespacedSessionId(sessionId)) break
           this.summaries = this.summaries.map(s =>
             s.sessionId === sessionId ? { ...s, running, agentAvailable: true } : s,
           )
@@ -955,6 +1038,7 @@ export class RemoteDeviceClient {
       case 'api-session/activity': {
         const [sessionId, updatedAt] = args
         if (typeof sessionId === 'string' && typeof updatedAt === 'number') {
+          if (isNamespacedSessionId(sessionId)) break
           this.summaries = this.summaries.map(s =>
             s.sessionId === sessionId && updatedAt > s.updatedAt ? { ...s, updatedAt } : s,
           )
@@ -970,6 +1054,7 @@ export class RemoteDeviceClient {
       case 'api-session/error': {
         const [sessionId, message] = args
         if (typeof sessionId === 'string' && typeof message === 'string') {
+          if (isNamespacedSessionId(sessionId)) break
           this.callbacks.onRemoteEventFrame(this.id, {
             type: 'emit',
             event,
@@ -992,6 +1077,14 @@ export class RemoteDeviceClient {
     }
   }
 
+  private sanitizeRemoteWorkspace(ws: RemoteWorkspaceItem): RemoteWorkspaceItem | undefined {
+    if (typeof ws?.workspaceId !== 'string' || isNamespacedWorkspaceId(ws.workspaceId)) return undefined
+    const sessionIds = Array.isArray(ws.sessionIds)
+      ? ws.sessionIds.filter(id => typeof id === 'string' && !isNamespacedSessionId(id))
+      : []
+    return { ...ws, sessionIds }
+  }
+
   private async pump02WorkspaceFollow(signal: AbortSignal): Promise<void> {
     for await (const frame of this.openStream('workspace/follow', {}, signal)) {
       if (!isRecord(frame) || typeof frame.type !== 'string') continue
@@ -1000,12 +1093,16 @@ export class RemoteDeviceClient {
       // row set is no longer authoritative.
       if ((frame.type === 'baseline' || frame.type === 'replace') && isRecord(frame.value)) {
         const val = frame.value
-        this.workspaces = Array.isArray(val.items) ? (val.items as RemoteWorkspaceItem[]) : []
+        this.workspaces = Array.isArray(val.items)
+          ? (val.items as RemoteWorkspaceItem[])
+              .map(w => this.sanitizeRemoteWorkspace(w))
+              .filter((w): w is RemoteWorkspaceItem => w !== undefined)
+          : []
         this.archivedSessionIds = Array.isArray(val.archivedSessionIds)
-          ? (val.archivedSessionIds as string[])
+          ? (val.archivedSessionIds as string[]).filter(id => typeof id === 'string' && !isNamespacedSessionId(id))
           : []
         this.pinnedSessionIds = Array.isArray(val.pinnedSessionIds)
-          ? (val.pinnedSessionIds as string[])
+          ? (val.pinnedSessionIds as string[]).filter(id => typeof id === 'string' && !isNamespacedSessionId(id))
           : []
         this.callbacks.onStateChanged(this.id)
         this.callbacks.onWorkspacesChanged(this.id)
@@ -1013,13 +1110,15 @@ export class RemoteDeviceClient {
         continue
       }
       if (frame.type === 'upsert' && isRecord(frame.workspace)) {
-        const ws = frame.workspace as unknown as RemoteWorkspaceItem
+        const ws = this.sanitizeRemoteWorkspace(frame.workspace as unknown as RemoteWorkspaceItem)
+        if (ws === undefined) continue
         const idx = this.workspaces.findIndex(w => w.workspaceId === ws.workspaceId)
         if (idx === -1) this.workspaces = [ws, ...this.workspaces]
         else this.workspaces = this.workspaces.map((w, i) => (i === idx ? ws : w))
         this.callbacks.onWorkspacesChanged(this.id)
         void this.refreshRegisteredWorkspaceOrigins()
       } else if (frame.type === 'remove' && typeof frame.workspaceId === 'string') {
+        if (isNamespacedWorkspaceId(frame.workspaceId)) continue
         this.workspaces = this.workspaces.filter(w => w.workspaceId !== frame.workspaceId)
         this.callbacks.onWorkspacesChanged(this.id)
       } else if (frame.type === 'order' && Array.isArray(frame.workspaceIds)) {
@@ -1029,10 +1128,14 @@ export class RemoteDeviceClient {
         )
         this.callbacks.onWorkspacesChanged(this.id)
       } else if (frame.type === 'archived' && Array.isArray(frame.archivedSessionIds)) {
-        this.archivedSessionIds = frame.archivedSessionIds as string[]
+        this.archivedSessionIds = (frame.archivedSessionIds as string[]).filter(
+          id => typeof id === 'string' && !isNamespacedSessionId(id),
+        )
         this.callbacks.onWorkspacesChanged(this.id)
       } else if (frame.type === 'pinned' && Array.isArray(frame.pinnedSessionIds)) {
-        this.pinnedSessionIds = frame.pinnedSessionIds as string[]
+        this.pinnedSessionIds = (frame.pinnedSessionIds as string[]).filter(
+          id => typeof id === 'string' && !isNamespacedSessionId(id),
+        )
         this.callbacks.onWorkspacesChanged(this.id)
       }
     }
@@ -1044,12 +1147,14 @@ export class RemoteDeviceClient {
       if (frame.type === 'baseline' && isRecord(frame.value) && isRecord(frame.value.projections)) {
         this.projectionsBySession.clear()
         for (const [sid, block] of Object.entries(frame.value.projections)) {
+          if (isNamespacedSessionId(sid)) continue
           if (isRecord(block) && typeof block.asOfSeq === 'number' && isRecord(block.values)) {
+            const namespacedValues = this.namespaceProjectionValues(block.values)
             this.projectionsBySession.set(sid, {
               asOfSeq: block.asOfSeq,
-              values: block.values as Record<string, unknown>,
+              values: namespacedValues,
             })
-            for (const [key, value] of Object.entries(block.values)) {
+            for (const [key, value] of Object.entries(namespacedValues)) {
               this.callbacks.onControlProjectionFrame(this.id, {
                 sessionId: encodeRemoteSessionId(this.id, sid),
                 key,
@@ -1067,14 +1172,16 @@ export class RemoteDeviceClient {
         typeof frame.key === 'string' &&
         typeof frame.seq === 'number'
       ) {
+        if (isNamespacedSessionId(frame.sessionId)) continue
+        const namespacedValue = this.namespaceProjectionValue(frame.key, frame.value)
         const existing = this.projectionsBySession.get(frame.sessionId) ?? { asOfSeq: frame.seq, values: {} }
-        existing.values[frame.key] = frame.value
+        existing.values[frame.key] = namespacedValue
         existing.asOfSeq = Math.max(existing.asOfSeq, frame.seq)
         this.projectionsBySession.set(frame.sessionId, existing)
         this.callbacks.onControlProjectionFrame(this.id, {
           sessionId: encodeRemoteSessionId(this.id, frame.sessionId),
           key: frame.key,
-          value: frame.value,
+          value: namespacedValue,
           seq: frame.seq,
         })
       }
@@ -1262,12 +1369,44 @@ export class RemoteDeviceClient {
     if (changed) this.callbacks.onWorkspacesChanged(this.id)
   }
 
+  namespaceProjectionValue(key: string, value: unknown): unknown {
+    if (key === 'subagentCatalog' && Array.isArray(value)) {
+      return value.map(entry => {
+        if (!isRecord(entry) || typeof entry.id !== 'string') return entry
+        return {
+          ...entry,
+          id: encodeRemoteSessionId(this.id, entry.id),
+          ...(typeof entry.parentSessionId === 'string'
+            ? { parentSessionId: encodeRemoteSessionId(this.id, entry.parentSessionId) }
+            : {}),
+        }
+      })
+    }
+    return value
+  }
+
+  namespaceProjectionValues(values: Record<string, unknown>): Record<string, unknown> {
+    const out: Record<string, unknown> = {}
+    for (const [key, val] of Object.entries(values)) {
+      out[key] = this.namespaceProjectionValue(key, val)
+    }
+    return out
+  }
+
   namespaceSummary(summary: RemoteSessionSummary): RemoteSessionSummary {
     return {
       ...summary,
       sessionId: encodeRemoteSessionId(this.id, summary.sessionId),
       ...(summary.parentSessionId !== undefined
         ? { parentSessionId: encodeRemoteSessionId(this.id, summary.parentSessionId) }
+        : {}),
+      ...(summary.projections !== undefined
+        ? {
+            projections: {
+              ...summary.projections,
+              values: this.namespaceProjectionValues(summary.projections.values),
+            },
+          }
         : {}),
     }
   }

@@ -72,6 +72,12 @@ export interface ClientContextLike {
     };
     layout?: {
         selectPanel(panelId: string | null): void;
+        readonly panelInfo?: {
+            getSnapshot(): {
+                readonly activePanelId: string | null;
+            };
+            subscribe?(listener: () => void): () => void;
+        };
     };
     sessions?: SessionsServiceLike;
     uiWorkspace?: UiWorkspaceServiceLike;
