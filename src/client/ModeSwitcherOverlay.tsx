@@ -8,12 +8,13 @@
  *      viewports may stay mounted but hidden so Keep-Alive survives a switch.
  *    - The mode itself is switched only from Settings. There is no sidebar
  *      entry and no "back to aggregated" control here.
- * 2. `ActiveSessionReporter`, `SessionHeaderDeviceBadge`, `SessionRowHoverDeviceSection`:
- *    - Official DSH 0.2 slot contributions for `conversation.input.right`,
- *      `conversation.session.header.utilities`, and `sidebar.session.row.hover`.
+ * 2. `ActiveSessionReporter` and `SessionRowHoverDeviceSection`:
+ *    - Official DSH 0.2 slot contributions for `conversation.input.right` and
+ *      `sidebar.session.row.hover`.
  *    - The active Session is reported so the Host can scope the model catalog;
- *      the owning device is shown on the opened conversation header. Session
- *      rows stay visually identical to local rows.
+ *      the owning device lives on the conversation-page chip
+ *      (`SessionDeviceChip`), not here. Session rows stay visually identical to
+ *      local rows.
  *
  * @module dsh-multi-device/client/ModeSwitcherOverlay
  */
@@ -111,32 +112,6 @@ export function ActiveSessionReporter({
   return null
 }
 
-/**
- * Device identity on the right side of an opened Session header
- * (`conversation.session.header.utilities`). Local Sessions show nothing, so
- * only remote conversations carry a device label.
- */
-export function SessionHeaderDeviceBadge({
-  sessionId,
-  t,
-}: {
-  sessionId: string
-  t?: (key: MultiDeviceLocaleKey) => string
-}): React.ReactElement | null {
-  const decoded = decodeSessionId(sessionId)
-  const state = useMultiDeviceState()
-  if (!decoded.isRemote) return null
-  const origin = state.snapshot.sessionOrigins[sessionId]
-  const deviceName = origin?.deviceName ?? decoded.deviceId
-  const label = t?.('hoverDeviceLabel') ?? 'Device'
-  return (
-    <span className="dsh-md-session-device" title={`${label}: ${deviceName}`}>
-      <StateDot state={deviceStateToDotState(origin?.deviceState ?? 'connected')} size={8} />
-      <span className="dsh-md-session-device-name">{deviceName}</span>
-    </span>
-  )
-}
-
 /** Device & Git repo metadata inside the Session row HoverCard (`sidebar.session.row.hover`). */
 export function SessionRowHoverDeviceSection({
   sessionId,
@@ -163,6 +138,11 @@ export function SessionRowHoverDeviceSection({
           {t('hoverGitRepoLabel')}: {origin.gitRemote}
         </div>
       )}
+      {origin?.deviceState === 'error' || origin?.deviceState === 'disabled' ? (
+        <div style={{ color: 'var(--dsw-alias-state-warn-primary)' }}>
+          {t('deviceOfflineShort')}
+        </div>
+      ) : null}
     </div>
   )
 }

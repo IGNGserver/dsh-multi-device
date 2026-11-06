@@ -282,10 +282,21 @@ export interface LogicalWorkspaceView {
   readonly kind: 'git' | 'manual' | 'single'
   /** Canonical normalized Git remote (`github.com/org/repo`), if any. */
   readonly gitRemote?: string
-  /** Device ID where "+ New Session" will create a session. */
+  /** Preferred device ID for "+ New Session" (the user's choice, kept even while offline). */
   readonly targetDeviceId: DeviceId
-  /** Target path on `targetDeviceId` where "+ New Session" will create a session. */
+  /** Preferred target path on `targetDeviceId`. */
   readonly targetPath: string
+  /**
+   * Device that actually hosts the next new Session. Equals `targetDeviceId`
+   * while that device is reachable; otherwise the Host falls back to an online
+   * member (the local machine first) so "+ New Session" never dead-ends on an
+   * offline machine.
+   */
+  readonly effectiveTargetDeviceId: DeviceId
+  /** Member path on `effectiveTargetDeviceId` (the Session's `cwd`). */
+  readonly effectiveTargetPath: string
+  /** Whether `effectiveTargetDeviceId` is reachable right now; when false a create surfaces an offline error. */
+  readonly effectiveTargetOnline: boolean
   /** All physical device workspace members belonging to this logical workspace. */
   readonly members: readonly WorkspaceMemberRef[]
   /** All merged session IDs (with remote IDs namespaced) in display order. */

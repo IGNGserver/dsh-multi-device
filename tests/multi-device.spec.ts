@@ -28,8 +28,11 @@ import {
   encodeRemoteEventId,
   encodeRemoteSessionId,
   encodeRemoteWorkspaceId,
+  type DeviceConnectionState,
+  type DeviceView,
   type GitMatchRun,
   LOCAL_DEVICE_ID,
+  type MultiDeviceSnapshot,
   normalizeGitRemote,
   normalizeWorkspacePath,
 } from '../src/contract.ts'
@@ -75,6 +78,12 @@ import {
   type WorkspaceControllerLike,
 } from '../src/host/gateway.ts'
 import { shouldDecorateProjectRows } from '../src/client/projectBadges.ts'
+import {
+  deviceTargetsForWorkspace,
+  effectiveTargetOf,
+  resolveSessionDevice,
+  resolveSessionLogicalWorkspace,
+} from '../src/client/sessionDevice.ts'
 import { requestRemote } from '../src/host/http-request.ts'
 import { NativeDeviceProxy } from '../src/host/native-proxy.ts'
 import { describeProbeFailure, DeviceRegistry } from '../src/host/registry.ts'
@@ -518,6 +527,293 @@ describe('4. Git Remote Discovery & WorkspaceAggregator', () => {
     ])
     expect(afterSplit.logicalWorkspaces).toHaveLength(2)
     expect(afterSplit.logicalWorkspaces.every(w => w.kind === 'single')).toBe(true)
+  })
+})
+
+describe('4b. Offline-aware target selection & session ownership', () => {
+  const ubuntu = DeviceId('dev-ubuntu')
+  const mac = DeviceId('dev-mac')
+
+  const localPlatform = {
+    deviceId: LOCAL_DEVICE_ID,
+    deviceName: 'Local',
+    workspaceId: 'ws-local',
+    path: '/home/me/platform',
+    title: 'platform',
+    sessionIds: ['s-local'],
+    runningSessionCount: 0,
+    createdAt: '2026-10-01T00:00:00.000Z',
+    updatedAt: '2026-10-02T00:00:00.000Z',
+  }
+  const ubuntuPlatform = {
+    deviceId: ubuntu,
+    deviceName: 'ubuntu-dev',
+    workspaceId: 'ws-ubuntu',
+    path: '/srv/platform',
+    title: 'platform',
+    sessionIds: ['s-ubuntu'],
+    runningSessionCount: 1,
+    createdAt: '2026-10-01T00:00:00.000Z',
+    updatedAt: '2026-10-03T00:00:00.000Z',
+  }
+  const macPlatform = {
+    deviceId: mac,
+    deviceName: 'mac-mini',
+    workspaceId: 'ws-mac',
+    path: '/Users/mac/platform',
+    title: 'platform',
+    sessionIds: ['s-mac'],
+    runningSessionCount: 0,
+    createdAt: '2026-10-01T00:00:00.000Z',
+    updatedAt: '2026-10-04T00:00:00.000Z',
+  }
+  const preferredState = (deviceId: DeviceId): Partial<Record<string, DeviceId>> => ({
+    [encodeLogicalWorkspaceId('git', 'github.com/acme/platform')]: deviceId,
+  })
+
+  function deviceView(id: DeviceId, name: string, state: DeviceConnectionState): DeviceView {
+    return {
+      id,
+      name,
+      enabled: true,
+      state,
+      transportKind: 'ssh',
+      targetSummary: `ssh://${name}`,
+      keepNativeAlive: true,
+      protocolVersion: '0.2',
+      realtime: true,
+      reconnectAttempt: 0,
+      sessionCount: 1,
+      runningSessionCount: 0,
+      pendingApprovalCount: 0,
+      workspaceCount: 1,
+    }
+  }
+
+  function snapshotFixture(patch: Partial<MultiDeviceSnapshot> = {}): MultiDeviceSnapshot {
+    return {
+      revision: 1,
+      displayMode: 'aggregated',
+      hostStatus: { aggregatedGatewayActive: true, nativeProxyActive: true },
+      devices: [],
+      sshConfigHosts: [],
+      aggregationConfig: {
+        autoGitAggregate: true,
+        prefixUnmatchedWithDevice: false,
+        excludedMemberKeys: [],
+        preferredDeviceByLogicalId: {},
+        customTitleByLogicalId: {},
+        workspaceOrder: [],
+        manualRules: [],
+      },
+      logicalWorkspaces: [],
+      allPhysicalWorkspaces: [],
+      sessionOrigins: {},
+      gitMatch: createIdleGitMatch(),
+      ...patch,
+    }
+  }
+
+  it('keeps the preferred device while online and falls back to the local member while offline', () => {
+    const agg = new WorkspaceAggregator({
+      autoGitAggregate: true,
+      preferredDeviceByLogicalId: preferredState(ubuntu) as Record<string, DeviceId>,
+    })
+    agg.noteGitRemote(LOCAL_DEVICE_ID, localPlatform.path, 'git@github.com:acme/platform.git')
+    agg.noteGitRemote(ubuntu, ubuntuPlatform.path, 'git@github.com:acme/platform.git')
+
+    const online = agg.aggregate(
+      [localPlatform, ubuntuPlatform],
+      new Map(),
+      new Map<DeviceId, DeviceConnectionState>([[ubuntu, 'connected']]),
+    ).logicalWorkspaces.find(workspace => workspace.kind === 'git')!
+    expect(online.targetDeviceId).toBe(ubuntu)
+    expect(online.effectiveTargetDeviceId).toBe(ubuntu)
+    expect(online.effectiveTargetPath).toBe('/srv/platform')
+    expect(online.effectiveTargetOnline).toBe(true)
+
+    const offline = agg.aggregate(
+      [localPlatform, ubuntuPlatform],
+      new Map(),
+      new Map<DeviceId, DeviceConnectionState>([[ubuntu, 'error']]),
+    ).logicalWorkspaces.find(workspace => workspace.kind === 'git')!
+    expect(offline.targetDeviceId).toBe(ubuntu)
+    expect(offline.targetPath).toBe('/srv/platform')
+    expect(offline.effectiveTargetDeviceId).toBe(LOCAL_DEVICE_ID)
+    expect(offline.effectiveTargetPath).toBe(localPlatform.path)
+    expect(offline.effectiveTargetOnline).toBe(true)
+  })
+
+  it('falls back to another reachable member and reports an all-offline workspace', () => {
+    const agg = new WorkspaceAggregator({ autoGitAggregate: true, ...preferredState(mac) })
+    agg.setPreferredDevice(encodeLogicalWorkspaceId('git', 'github.com/acme/platform'), mac)
+    agg.noteGitRemote(ubuntu, ubuntuPlatform.path, 'git@github.com:acme/platform.git')
+    agg.noteGitRemote(mac, macPlatform.path, 'git@github.com:acme/platform.git')
+
+    const fallback = agg.aggregate(
+      [ubuntuPlatform, macPlatform],
+      new Map(),
+      new Map<DeviceId, DeviceConnectionState>([[mac, 'error'], [ubuntu, 'connected']]),
+    ).logicalWorkspaces.find(workspace => workspace.kind === 'git')!
+    expect(fallback.targetDeviceId).toBe(mac)
+    expect(fallback.effectiveTargetDeviceId).toBe(ubuntu)
+    expect(fallback.effectiveTargetOnline).toBe(true)
+
+    const allOffline = agg.aggregate(
+      [ubuntuPlatform, macPlatform],
+      new Map(),
+      new Map<DeviceId, DeviceConnectionState>([[mac, 'error'], [ubuntu, 'disabled']]),
+    ).logicalWorkspaces.find(workspace => workspace.kind === 'git')!
+    expect(allOffline.effectiveTargetDeviceId).toBe(mac)
+    expect(allOffline.effectiveTargetOnline).toBe(false)
+  })
+
+  it('treats an unmerged single workspace as online only while its device is reachable', () => {
+    const agg = new WorkspaceAggregator({ autoGitAggregate: false })
+    const online = agg.aggregate(
+      [ubuntuPlatform],
+      new Map(),
+      new Map<DeviceId, DeviceConnectionState>([[ubuntu, 'connected']]),
+    ).logicalWorkspaces[0]!
+    expect(online.kind).toBe('single')
+    expect(online.effectiveTargetOnline).toBe(true)
+
+    const offline = agg.aggregate(
+      [ubuntuPlatform],
+      new Map(),
+      new Map<DeviceId, DeviceConnectionState>([[ubuntu, 'error']]),
+    ).logicalWorkspaces[0]!
+    expect(offline.effectiveTargetOnline).toBe(false)
+  })
+
+  it('resolves Session ownership and logical workspace for local and remote conversations', () => {
+    const lws = {
+      logicalWorkspaceId: encodeLogicalWorkspaceId('git', 'github.com/acme/platform'),
+      title: 'platform',
+      kind: 'git' as const,
+      gitRemote: 'github.com/acme/platform',
+      targetDeviceId: ubuntu,
+      targetPath: '/srv/platform',
+      effectiveTargetDeviceId: ubuntu,
+      effectiveTargetPath: '/srv/platform',
+      effectiveTargetOnline: true,
+      members: [
+        {
+          deviceId: LOCAL_DEVICE_ID,
+          deviceName: 'Local',
+          remoteWorkspaceId: 'ws-local',
+          path: '/home/me/platform',
+          title: 'platform',
+          sessionCount: 1,
+          runningSessionCount: 0,
+        },
+        {
+          deviceId: ubuntu,
+          deviceName: 'ubuntu-dev',
+          remoteWorkspaceId: 'ws-ubuntu',
+          path: '/srv/platform',
+          title: 'platform',
+          sessionCount: 1,
+          runningSessionCount: 0,
+        },
+      ],
+      sessionIds: [encodeRemoteSessionId(ubuntu, 's-ubuntu'), 's-local'],
+      createdAt: '2026-10-01T00:00:00.000Z',
+      updatedAt: '2026-10-04T00:00:00.000Z',
+    }
+    const remoteId = encodeRemoteSessionId(ubuntu, 's-ubuntu')
+    const snapshot = snapshotFixture({
+      devices: [deviceView(ubuntu, 'ubuntu-dev', 'error')],
+      logicalWorkspaces: [lws],
+      allPhysicalWorkspaces: lws.members,
+      sessionOrigins: {
+        [remoteId]: {
+          namespacedSessionId: remoteId,
+          rawSessionId: 's-ubuntu',
+          deviceId: ubuntu,
+          deviceName: 'ubuntu-dev',
+          deviceState: 'error',
+          cwd: '/srv/platform',
+          running: false,
+        },
+      },
+    })
+
+    const local = resolveSessionDevice(snapshot, 's-local', '本机')
+    expect(local.isLocal).toBe(true)
+    expect(local.name).toBe('本机')
+    expect(local.state).toBe('connected')
+
+    const remote = resolveSessionDevice(snapshot, remoteId, '本机')
+    expect(remote.isLocal).toBe(false)
+    expect(remote.name).toBe('ubuntu-dev')
+    expect(remote.state).toBe('error')
+
+    // Unknown remote device ids still render instead of throwing.
+    const gone = resolveSessionDevice(snapshot, encodeRemoteSessionId(DeviceId('dev-gone'), 's-x'), '本机')
+    expect(gone.name).toBe('dev-gone')
+    expect(gone.state).toBe('disabled')
+
+    expect(resolveSessionLogicalWorkspace(snapshot, remoteId)?.logicalWorkspaceId)
+      .toBe(lws.logicalWorkspaceId)
+    expect(resolveSessionLogicalWorkspace(snapshot, 's-local')?.logicalWorkspaceId)
+      .toBe(lws.logicalWorkspaceId)
+    // cwd fallback covers the moment right after create, before list frames land.
+    expect(resolveSessionLogicalWorkspace(snapshot, 'md~never-seen', '/srv/platform')?.logicalWorkspaceId)
+      .toBe(lws.logicalWorkspaceId)
+
+    const targets = deviceTargetsForWorkspace(snapshot, lws, '本机')
+    expect(targets.map(target => target.name)).toEqual(['本机', 'ubuntu-dev'])
+    expect(targets.find(target => target.isLocal)?.online).toBe(true)
+    expect(targets.find(target => !target.isLocal)?.online).toBe(false)
+    expect(targets.find(target => target.deviceId === ubuntu)?.preferred).toBe(true)
+    expect(effectiveTargetOf(snapshot, lws)?.deviceId).toBe(ubuntu)
+  })
+
+  it('describes which devices can host a new Session in a merged workspace', () => {
+    const lws = {
+      logicalWorkspaceId: encodeLogicalWorkspaceId('manual', 'rule-1'),
+      title: 'platform',
+      kind: 'manual' as const,
+      targetDeviceId: LOCAL_DEVICE_ID,
+      targetPath: '/home/me/platform',
+      effectiveTargetDeviceId: LOCAL_DEVICE_ID,
+      effectiveTargetPath: '/home/me/platform',
+      effectiveTargetOnline: true,
+      members: [
+        {
+          deviceId: LOCAL_DEVICE_ID,
+          deviceName: 'Local',
+          remoteWorkspaceId: 'ws-local',
+          path: '/home/me/platform',
+          title: 'platform',
+          sessionCount: 0,
+          runningSessionCount: 0,
+        },
+        {
+          deviceId: ubuntu,
+          deviceName: 'ubuntu-dev',
+          remoteWorkspaceId: 'ws-ubuntu',
+          path: '/srv/platform',
+          title: 'platform',
+          sessionCount: 0,
+          runningSessionCount: 0,
+        },
+      ],
+      sessionIds: [],
+      createdAt: '2026-10-01T00:00:00.000Z',
+      updatedAt: '2026-10-04T00:00:00.000Z',
+    }
+    const snapshot = snapshotFixture({
+      devices: [deviceView(ubuntu, 'ubuntu-dev', 'reconnecting')],
+      logicalWorkspaces: [lws],
+      allPhysicalWorkspaces: lws.members,
+    })
+    const targets = deviceTargetsForWorkspace(snapshot, lws, '本机')
+    expect(targets).toHaveLength(2)
+    expect(targets[1]?.state).toBe('reconnecting')
+    expect(targets[1]?.online).toBe(false)
+    expect(targets[0]?.preferred).toBe(true)
   })
 })
 

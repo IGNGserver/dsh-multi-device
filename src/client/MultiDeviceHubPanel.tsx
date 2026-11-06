@@ -49,6 +49,7 @@ import {
   type UpsertDeviceInput,
 } from '../contract.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
+import { deviceTargetsForWorkspace } from './sessionDevice.ts'
 import {
   clientStore,
   deviceStateToDotState,
@@ -856,15 +857,23 @@ export function MultiDeviceHubPanel({
             </div>
             <div className="dsh-md-merged-repos-list">
               {mergedWorkspaces.map((lws) => {
-                const selectOptions = lws.members.map((m) => {
-                  const devView = snapshot.devices.find(d => d.id === m.deviceId)
-                  return {
-                    value: m.deviceId,
-                    label: m.deviceId === LOCAL_DEVICE_ID ? 'Local' : m.deviceName,
-                    description: m.path,
-                    dotState: m.deviceId === LOCAL_DEVICE_ID ? ('done' as const) : deviceStateToDotState(devView?.state ?? 'connected'),
-                  }
-                })
+                const targets = deviceTargetsForWorkspace(snapshot, lws, t('nativeLocalTab'))
+                const selectOptions = targets.map((target) => ({
+                  value: target.deviceId,
+                  label: target.name,
+                  description: target.online ? target.path : `${target.path} · ${t('deviceOfflineShort')}`,
+                  dotState: deviceStateToDotState(target.state),
+                  disabled: !target.online,
+                }))
+                const effective = targets.find(
+                  target => target.deviceId === lws.effectiveTargetDeviceId,
+                )
+                const fallbackHint =
+                  lws.effectiveTargetDeviceId !== lws.targetDeviceId && effective !== undefined
+                    ? t('targetFallbackHint').replace('{device}', effective.name)
+                    : lws.effectiveTargetOnline
+                      ? undefined
+                      : t('targetAllOfflineHint')
 
                 return (
                   <div key={lws.logicalWorkspaceId} className="dsh-md-merged-repo-card">
@@ -875,6 +884,11 @@ export function MultiDeviceHubPanel({
                       {lws.gitRemote && (
                         <span className="dsh-md-merged-repo-remote" title={lws.gitRemote}>
                           {lws.gitRemote}
+                        </span>
+                      )}
+                      {fallbackHint !== undefined && (
+                        <span className="dsh-md-merged-repo-hint" role="status">
+                          {fallbackHint}
                         </span>
                       )}
                     </div>

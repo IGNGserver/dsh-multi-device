@@ -12,8 +12,9 @@
  *    (本机 + remote devices) and Keep-Alive remote viewports.
  * 4. `conversation.input.right`, `conversation.session.header.utilities`, and
  *    `sidebar.session.row.hover`: report the active Session to the Host, show
- *    its owning device on the opened conversation header, and keep hover
- *    metadata. These are labels/scope hints, never device navigation entries.
+ *    its owning device (本机 included) as a chip on the conversation page with a
+ *    details popover, and keep hover metadata. These are labels/scope hints,
+ *    never device navigation entries.
  *
  * @module dsh-multi-device/client
  */
@@ -21,13 +22,18 @@ import React from 'react'
 import { decodeSessionId, LOCAL_DEVICE_ID } from '../contract.ts'
 import { LOCALE_NS, en, zh, type MultiDeviceLocaleKey } from './locales.ts'
 import {
+  bindClientServices,
+  type SessionsServiceLike as BoundSessionsService,
+  type UiWorkspaceServiceLike as BoundUiWorkspaceService,
+} from './clientServices.ts'
+import {
   ActiveSessionReporter,
   ModeSwitcherOverlay,
-  SessionHeaderDeviceBadge,
   SessionRowHoverDeviceSection,
 } from './ModeSwitcherOverlay.tsx'
 import { MultiDeviceHubPanel } from './MultiDeviceHubPanel.tsx'
 import { installProjectDeviceBadges } from './projectBadges.ts'
+import { SessionDeviceChip } from './SessionDeviceChip.tsx'
 import { clientStore } from './state.ts'
 import { adoptMultiDeviceStyles } from './styles.ts'
 
@@ -265,11 +271,19 @@ export function apply(ctx: ClientContextLike): void {
 
   // 1. Native Mode owns the local DSH store transitions. The Host filters the
   //    data; this refreshes the local Session catalog and leaves a remote
-  //    conversation when the 本机 tab becomes active.
+  //    conversation when the 本机 tab becomes active. The same injected context
+  //    publishes `sessions` / `uiWorkspace` to the device chip components.
   ctx.inject(['sessions', 'uiWorkspace'], (modeCtx) => {
     modeCtx.effect(
       () => installModeSideEffects(modeCtx),
       'dsh-multi-device: native local surface',
+    )
+    modeCtx.effect(
+      () => bindClientServices({
+        sessions: modeCtx.sessions as unknown as BoundSessionsService,
+        uiWorkspace: modeCtx.uiWorkspace as unknown as BoundUiWorkspaceService,
+      }),
+      'dsh-multi-device: client service handles',
     )
   })
 
@@ -342,7 +356,8 @@ export function apply(ctx: ClientContextLike): void {
     ),
   )
 
-  // 6b. Show the owning device on the right side of an opened remote Session.
+  // 6b. Owning-device chip on the conversation page. Local Sessions show 本机,
+  //     remote Sessions show their device, and both open a details popover.
   ctx.slots.inject('conversation.session.header.utilities', () =>
     ctx.slots.register(
       {
@@ -352,7 +367,11 @@ export function apply(ctx: ClientContextLike): void {
         locale: LOCALE_NS,
       },
       (props: { sessionId: string; t?: (k: MultiDeviceLocaleKey) => string }) => (
-        <SessionHeaderDeviceBadge sessionId={props.sessionId} t={props.t ?? getTranslate()} />
+        <SessionDeviceChip
+          sessionId={props.sessionId}
+          t={props.t ?? getTranslate()}
+          onOpenSettings={handleOpenSettings}
+        />
       ),
     ),
   )

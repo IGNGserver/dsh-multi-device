@@ -40,8 +40,10 @@ export declare const zh: {
     readonly projectDeviceCount: "{count}个设备";
     readonly projectDeviceNone: "仅本机";
     readonly targetDeviceHeading: "跨设备仓库的新建会话默认设备";
-    readonly targetDeviceSubDesc: "在聚合模式下向指向同一 Git 远端的仓库发起新会话时，由所选设备执行。";
+    readonly targetDeviceSubDesc: "在聚合模式下向指向同一 Git 远端的仓库发起新会话时，由所选设备执行；该设备离线时自动回退到在线成员。";
     readonly selectDevicePlaceholder: "选择承接设备…";
+    readonly targetFallbackHint: "首选设备离线，将使用 {device}";
+    readonly targetAllOfflineHint: "该仓库的所有设备当前离线，暂时无法新建会话";
     readonly devicesHeading: "远端设备";
     readonly addDevice: "添加设备";
     readonly editDevice: "编辑设备";
@@ -98,6 +100,14 @@ export declare const zh: {
     readonly noDevicesDesc: "点击上方“添加设备”，通过 SSH 连接你的其他开发机或服务器。";
     readonly hoverDeviceLabel: "所属设备";
     readonly hoverGitRepoLabel: "Git 仓库";
+    readonly deviceChipAria: "会话所属设备";
+    readonly deviceOfflineShort: "离线";
+    readonly deviceChipState: "连接状态";
+    readonly deviceChipWorkspace: "工作区";
+    readonly deviceChipCwd: "会话路径";
+    readonly deviceChipOpenSettings: "多设备设置";
+    readonly deviceChipOfflineHint: "该设备当前不可达；展示的是上次同步的数据。";
+    readonly deviceChipSwitchHint: "可在下方重新连接，或切换到在线设备新建会话。";
     readonly gatewayDegradedNotice: "聚合网关当前处于降级状态，原生模式仍可正常使用";
     readonly savedNotice: "设置已保存";
     readonly actionFailed: "操作失败";
