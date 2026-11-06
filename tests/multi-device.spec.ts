@@ -3490,4 +3490,88 @@ describe('11. Bridge runtime loader capture', () => {
 
     expect(() => socket.emit('message', { data: JSON.stringify({ type: 'set-embedded', enabled: true }) })).not.toThrow()
   })
+
+  it('keeps the sidebar grid item while embedding so the conversation track survives', () => {
+    class FakeSocket {
+      static instances: FakeSocket[] = []
+      readyState = 1
+      private readonly listeners = new Map<string, ((event: unknown) => void)[]>()
+      constructor(_url: string) {
+        FakeSocket.instances.push(this)
+      }
+      addEventListener(type: string, listener: (event: unknown) => void): void {
+        const list = this.listeners.get(type) ?? []
+        list.push(listener)
+        this.listeners.set(type, list)
+      }
+      send(): void {}
+      close(): void {
+        this.readyState = 3
+      }
+      emit(type: string, event: unknown): void {
+        for (const listener of this.listeners.get(type) ?? []) listener(event)
+      }
+    }
+
+    const sidebarStyle = { display: 'block', visibility: '', pointerEvents: '' }
+    const frameStyle = { gridTemplateColumns: '280px 1200px 0px' }
+    const attributes = new Map<string, string>()
+    const frame = {
+      style: frameStyle,
+      getAttribute: (name: string): string | null => attributes.get(name) ?? null,
+      setAttribute: (name: string, value: string): void => { attributes.set(name, value) },
+      removeAttribute: (name: string): void => { attributes.delete(name) },
+    }
+    const sidebar = { parentElement: frame, style: sidebarStyle }
+
+    const sandbox = {
+      window: {} as Record<string, unknown>,
+      document: {
+        currentScript: { src: 'http://127.0.0.1:1/__md/bridge.js?device=dev-x' },
+        documentElement: {},
+        querySelector: (selector: string) => selector.includes('>') ? sidebar : null,
+      },
+      location: { protocol: 'http:', host: '127.0.0.1:1' },
+      WebSocket: FakeSocket,
+      MutationObserver: class { observe(): void {} disconnect(): void {} },
+      URL,
+      URLSearchParams,
+      JSON,
+      Object,
+      Array,
+      Promise,
+      console,
+      setTimeout: () => 0,
+      clearTimeout: () => {},
+      setInterval: () => 0,
+      clearInterval: () => {},
+      requestAnimationFrame: () => 0,
+      cancelAnimationFrame: () => {},
+      getComputedStyle: (element: unknown) => element === frame
+        ? { gridTemplateColumns: '280px 1200px 0px' }
+        : { display: sidebarStyle.display },
+    }
+    sandbox.window = sandbox as unknown as Record<string, unknown>
+
+    runInNewContext(NATIVE_BRIDGE_SCRIPT, sandbox, { timeout: 2_000 })
+
+    const socket = FakeSocket.instances[0]!
+    socket.emit('message', { data: JSON.stringify({ type: 'set-embedded', enabled: true }) })
+
+    // The first grid track is collapsed, but the sidebar must remain a grid
+    // item; `display:none` would shift the centre conversation into 0px.
+    expect(frameStyle.gridTemplateColumns).toBe('0px 1200px 0px')
+    expect(sidebarStyle.display).toBe('block')
+    expect(sidebarStyle.visibility).toBe('hidden')
+    expect(sidebarStyle.pointerEvents).toBe('none')
+    expect(attributes.get('data-dsh-md-native-pane')).toBe('1')
+
+    socket.emit('message', { data: JSON.stringify({ type: 'set-embedded', enabled: false }) })
+
+    expect(frameStyle.gridTemplateColumns).toBe('280px 1200px 0px')
+    expect(sidebarStyle.display).toBe('block')
+    expect(sidebarStyle.visibility).toBe('')
+    expect(sidebarStyle.pointerEvents).toBe('')
+    expect(attributes.has('data-dsh-md-native-pane')).toBe(false)
+  })
 })
