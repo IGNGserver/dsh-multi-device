@@ -59,6 +59,8 @@ declare class MultiDeviceClientStore {
     private reportedSessionId;
     /** Monotonic control-plane sequence so an older HTTP request cannot win. */
     private activeSessionSeq;
+    /** Sessions for which this client already asked the Host to clear unread. */
+    private readonly unreadClearInFlight;
     constructor();
     getSnapshot: () => MultiDeviceClientState;
     subscribe: (listener: () => void) => (() => void);
@@ -66,6 +68,14 @@ declare class MultiDeviceClientStore {
     start(): () => void;
     private connectSse;
     private applyIncomingSnapshot;
+    /**
+     * A completion can arrive while its conversation is already the main view.
+     * The Host has no reliable cross-client presence signal, so every viewing
+     * client clears the marker as soon as it sees it. The next snapshot removes
+     * the dot everywhere; the round-trip is short enough to avoid a lingering
+     * reminder and keeps the "main view is read" rule identical to DSH's.
+     */
+    private clearUnreadForActiveSession;
     private activateNativeDevice;
     /**
      * Mount (and keep alive) one device frame for the aggregated Native Pane
@@ -103,6 +113,8 @@ declare class MultiDeviceClientStore {
     setActiveSession(sessionId: string | undefined): Promise<void>;
     /** Clear the scope only when the unmounting Session is still the reported one. */
     clearActiveSession(sessionId: string): void;
+    /** Ask the Host to clear one Session's unread marker. */
+    markSessionRead(sessionId: string): Promise<boolean>;
     callControlPlane<T = unknown>(request: ControlPlaneRequest): Promise<{
         ok: true;
         value: T;

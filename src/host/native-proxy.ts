@@ -35,10 +35,11 @@ import { WebSocket, WebSocketServer } from 'ws'
 import type { DeviceConfig, DeviceId, NativePaneState } from '../contract.ts'
 import { DeviceAuthManager, resolveRemoteAuthority } from './auth.ts'
 import {
+  buildNativeBridgeScript,
   injectNativeBridge,
   isNativeBridgeScriptPath,
   isNativeBridgeSocketPath,
-  NATIVE_BRIDGE_SCRIPT,
+  sanitizeGroupState,
 } from './native-bridge.ts'
 
 const PROXY_TOKEN_QUERY = 'md_token'
@@ -96,17 +97,31 @@ export function buildForwardHeaders(
   return out
 }
 
+/** Structural equality for a bounded workspace fold map. */
+function sameGroupState(
+  left: Readonly<Record<string, boolean>>,
+  right: Readonly<Record<string, boolean>>,
+): boolean {
+  const leftKeys = Object.keys(left)
+  if (leftKeys.length !== Object.keys(right).length) return false
+  return leftKeys.every(key => left[key] === right[key])
+}
+
 /** Messages the framed page's bridge can send to the proxy. */
 type NativeBridgeInbound =
   | { readonly type: 'ready'; readonly deviceId?: string }
   | { readonly type: 'failed'; readonly error?: string }
   | { readonly type: 'selection'; readonly sessionId?: string | null }
+  | { readonly type: 'group-expansion'; readonly groups?: unknown }
+  | { readonly type: 'read'; readonly sessionId?: string }
 
 /** Commands the proxy sends into the framed page's bridge. */
 type NativeBridgeOutbound =
   | { readonly type: 'open-session'; readonly sessionId: string }
   | { readonly type: 'refresh' }
   | { readonly type: 'set-embedded'; readonly enabled: boolean }
+  | { readonly type: 'group-expansion'; readonly groups: Record<string, boolean> }
+  | { readonly type: 'read-state'; readonly unreadSessionIds: readonly string[] }
 
 export interface NativeProxyHooks {
   /** Report the credential state observed while proxying a device. */
@@ -123,6 +138,14 @@ export interface NativeProxyHooks {
   ) => void
   /** Report the raw remote Session the framed page currently shows. */
   readonly onBridgeSelection?: (deviceId: DeviceId, sessionId: string | undefined) => void
+  /** Last Host-owned workspace fold state for the bridge's first render. */
+  readonly getGroupState?: (deviceId: DeviceId) => Readonly<Record<string, boolean>> | undefined
+  /** The framed page reported a fold change the Host should persist. */
+  readonly onGroupState?: (deviceId: DeviceId, groups: Record<string, boolean>) => void
+  /** Raw remote Session IDs whose completion is unread on the Host. */
+  readonly getUnreadState?: (deviceId: DeviceId) => readonly string[] | undefined
+  /** The framed page opened a Session and considers its unread marker read. */
+  readonly onBridgeRead?: (deviceId: DeviceId, sessionId: string) => void
 }
 
 /** Backwards-compatible alias for callers that only cared about auth hooks. */
@@ -150,6 +173,10 @@ export class NativeDeviceProxy {
   private pendingOpenSession: string | undefined
   /** Pane mode hides the remote sidebar; native full mode restores it. */
   private bridgeEmbedded = false
+  /** Host-owned workspace fold state, applied before the remote page's first render. */
+  private groupState: Record<string, boolean> = {}
+  /** Host-owned raw Session IDs whose completion is unread. */
+  private unreadState: readonly string[] = []
 
   constructor(
     private device: DeviceConfig,
@@ -157,10 +184,18 @@ export class NativeDeviceProxy {
     private readonly authManager: DeviceAuthManager,
     private readonly localOrigin?: () => string | undefined,
     private readonly hooks: NativeProxyHooks = {},
-  ) {}
+  ) {
+    this.refreshHostState(device)
+  }
 
   updateDevice(device: DeviceConfig): void {
     this.device = device
+    this.refreshHostState(device)
+  }
+
+  private refreshHostState(device: DeviceConfig): void {
+    this.groupState = sanitizeGroupState(this.hooks.getGroupState?.(device.id))
+    this.unreadState = this.hooks.getUnreadState?.(device.id) ?? []
   }
 
   proxyUrl(): string | undefined {
@@ -257,6 +292,27 @@ export class NativeDeviceProxy {
     this.sendToBridge({ type: 'set-embedded', enabled })
   }
 
+  /** Apply Host-owned fold state to the framed page and every open client. */
+  setGroupState(groups: Readonly<Record<string, boolean>>): void {
+    const next = sanitizeGroupState(groups)
+    if (sameGroupState(this.groupState, next)) return
+    this.groupState = next
+    this.sendToBridge({ type: 'group-expansion', groups: next })
+  }
+
+  /** Apply Host-owned unread state to the framed page. */
+  setUnreadState(unreadSessionIds: readonly string[]): void {
+    const next = [...unreadSessionIds]
+    if (
+      next.length === this.unreadState.length &&
+      next.every((id, index) => id === this.unreadState[index])
+    ) {
+      return
+    }
+    this.unreadState = next
+    this.sendToBridge({ type: 'read-state', unreadSessionIds: next })
+  }
+
   /** Reset the cached bridge command target (device switched away). */
   clearPendingSession(): void {
     this.pendingOpenSession = undefined
@@ -350,7 +406,10 @@ export class NativeDeviceProxy {
         'cache-control': 'no-store',
         'x-content-type-options': 'nosniff',
       })
-      res.end(NATIVE_BRIDGE_SCRIPT)
+      res.end(buildNativeBridgeScript({
+        groups: this.groupState,
+        unread: this.unreadState,
+      }))
       return
     }
 
@@ -630,6 +689,11 @@ export class NativeDeviceProxy {
         this.clearBridgeTimer()
         this.setBridgeState('ready')
         this.sendToBridge({ type: 'set-embedded', enabled: this.bridgeEmbedded })
+        this.sendToBridge({ type: 'group-expansion', groups: this.groupState })
+        this.sendToBridge({
+          type: 'read-state',
+          unreadSessionIds: this.hooks.getUnreadState?.(this.device.id) ?? this.unreadState,
+        })
         if (this.pendingOpenSession !== undefined) {
           this.sendToBridge({ type: 'open-session', sessionId: this.pendingOpenSession })
         }
@@ -647,6 +711,20 @@ export class NativeDeviceProxy {
         if (sessionId === this.bridgeSessionId) return
         this.bridgeSessionId = sessionId
         this.hooks.onBridgeSelection?.(this.device.id, sessionId)
+        return
+      }
+      if (message.type === 'group-expansion') {
+        const groups = sanitizeGroupState(message.groups)
+        if (this.hooks.onGroupState !== undefined) {
+          this.hooks.onGroupState(this.device.id, groups)
+        } else {
+          this.setGroupState(groups)
+        }
+        return
+      }
+      if (message.type === 'read') {
+        const sessionId = typeof message.sessionId === 'string' ? message.sessionId : ''
+        if (sessionId !== '') this.hooks.onBridgeRead?.(this.device.id, sessionId)
       }
     })
 
@@ -865,6 +943,16 @@ export class NativeProxyManager {
   /** Toggle the remote sidebar for pane vs full native rendering. */
   setEmbedded(deviceId: DeviceId, enabled: boolean): void {
     this.proxies.get(deviceId)?.setEmbedded(enabled)
+  }
+
+  /** Push Host-owned fold state to the device's framed page(s). */
+  setGroupState(deviceId: DeviceId, groups: Readonly<Record<string, boolean>>): void {
+    this.proxies.get(deviceId)?.setGroupState(groups)
+  }
+
+  /** Push Host-owned unread Session IDs to the device's framed page(s). */
+  setUnreadState(deviceId: DeviceId, unreadSessionIds: readonly string[]): void {
+    this.proxies.get(deviceId)?.setUnreadState(unreadSessionIds)
   }
 
   removeProxy(deviceId: DeviceId): void {

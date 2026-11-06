@@ -459,6 +459,13 @@ export interface MultiDeviceUiPreferences {
    * start (older remote, CSP, future client internals).
    */
   readonly nativePane: boolean
+  /**
+   * Publish read/unread state into each SSH device's DSH home so separate DSH
+   * Hosts can converge. Off by default: it writes a small, non-secret file on
+   * the remote device and is only needed when several Hosts own the same
+   * remote Sessions.
+   */
+  readonly crossHostReadState: boolean
 }
 
 /** Complete Hub snapshot returned to the Client UI. */
@@ -481,6 +488,12 @@ export interface MultiDeviceSnapshot {
   readonly logicalWorkspaces: readonly LogicalWorkspaceView[]
   readonly allPhysicalWorkspaces: readonly WorkspaceMemberRef[]
   readonly sessionOrigins: Readonly<Record<string, SessionOriginMetadata>>
+  /**
+   * Sessions whose completion has not been read since. Local Session IDs are
+   * plain; remote ones are namespaced. The Host owns the set so every browser
+   * client and both UI modes agree on read state.
+   */
+  readonly unreadSessionIds: readonly string[]
   /** Manual Git match progress and last outcome (never triggered automatically). */
   readonly gitMatch: GitMatchRun
   /** Persisted display preferences; optional so older Hosts still parse. */

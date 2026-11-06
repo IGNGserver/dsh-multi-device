@@ -11,6 +11,7 @@
  *    - `NativeDeviceProxy` authenticated HTTP + WebSocket reverse proxy (header rewriting, X-Frame-Options stripping).
  *    - `AggregatedGateway` + `MultiDeviceControlPlane` mode independence & fallback verification.
  */
+import { execSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -91,13 +92,26 @@ import {
   resolveSessionLogicalWorkspace,
 } from '../src/client/sessionDevice.ts'
 import {
+  buildNativeBridgeScript,
   injectNativeBridge,
   NATIVE_BRIDGE_SCRIPT,
   NATIVE_BRIDGE_SCRIPT_PATH,
+  sanitizeGroupState,
 } from '../src/host/native-bridge.ts'
 import { requestRemote } from '../src/host/http-request.ts'
 import { NativeDeviceProxy } from '../src/host/native-proxy.ts'
+import { ReadStateTracker } from '../src/host/read-state.ts'
+import {
+  buildReadSharedStateCommand,
+  buildSharedReadDocument,
+  buildWriteSharedStateCommand,
+  isPosixRemoteHome,
+  mergeSharedReadEntries,
+  parseSharedReadDocument,
+  sharedReadStatePath,
+} from '../src/host/shared-state.ts'
 import { describeProbeFailure, DeviceRegistry } from '../src/host/registry.ts'
+import { installReadStateOverlay, mergeSessionStatus } from '../src/client/readState.ts'
 import {
   listLocalSshKeys,
   parseSshConfigText,
@@ -161,6 +175,232 @@ describe('0. Mode/chrome regressions', () => {
     expect(supportsWorkspaceReplaceFrames('0.2.1')).toBe(true)
     expect(supportsWorkspaceReplaceFrames('0.2.2-rc.1')).toBe(true)
     expect(supportsWorkspaceReplaceFrames('v0.3.0')).toBe(true)
+  })
+})
+
+describe('0b. Host-owned read state and native page state', () => {
+  it('marks only a real running-to-finished transition unread', () => {
+    const tracker = new ReadStateTracker()
+    tracker.observeRunning('s1', false)
+    expect(tracker.isUnread('s1')).toBe(false)
+
+    tracker.observeRunning('s1', true)
+    expect(tracker.observeRunning('s1', false)).toBe(true)
+    expect(tracker.isUnread('s1')).toBe(true)
+
+    expect(tracker.observeRunning('s1', true)).toBe(true)
+    expect(tracker.isUnread('s1')).toBe(false)
+  })
+
+  it('merges peer Host entries by timestamp and lets read win an equal one', () => {
+    const tracker = new ReadStateTracker()
+    tracker.markUnread('s1', 100)
+    expect(tracker.mergeEntry('s1', { unread: false, at: 90 })).toBe(false)
+    expect(tracker.isUnread('s1')).toBe(true)
+    expect(tracker.mergeEntry('s1', { unread: false, at: 100 })).toBe(true)
+    expect(tracker.isUnread('s1')).toBe(false)
+    tracker.markUnread('s2', 200)
+    expect(tracker.mergeEntry('s2', { unread: true, at: 200 })).toBe(false)
+    expect(tracker.isUnread('s2')).toBe(true)
+  })
+
+  it('clears one Session without touching another and survives hydration', () => {
+    const tracker = new ReadStateTracker()
+    tracker.observeRunning('a', true)
+    tracker.observeRunning('a', false)
+    tracker.observeRunning('b', true)
+    tracker.observeRunning('b', false)
+    expect(tracker.unreadIds()).toEqual(['a', 'b'])
+
+    expect(tracker.markRead('a')).toBe(true)
+    expect(tracker.unreadIds()).toEqual(['b'])
+    expect(tracker.markRead('a')).toBe(false)
+
+    const restored = new ReadStateTracker()
+    restored.hydrate(tracker.entriesSnapshot())
+    expect(restored.unreadIds()).toEqual(['b'])
+    expect(restored.isUnread('a')).toBe(false)
+  })
+
+  it('overlays every Host-owned Session ID and keeps a stable snapshot identity', () => {
+    const remoteId = encodeRemoteSessionId(DeviceId('dev-a'), 'r1')
+    const base = new Map([
+      [remoteId, { running: false, completionUnread: false }],
+      ['local-1', { running: false, completionUnread: true }],
+    ])
+    expect(mergeSessionStatus(base, undefined, () => true).get('local-1')).toBe(base.get('local-1'))
+    const unread = new Set([remoteId, 'local-1'])
+    const merged = mergeSessionStatus(base, unread, () => true)
+    expect(merged.get(remoteId)?.completionUnread).toBe(true)
+    expect(merged.get('local-1')?.completionUnread).toBe(true)
+
+    const listeners = new Set<() => void>()
+    let unreadNow = new Set<string>()
+    const source = {
+      getSnapshot: () => base,
+      subscribe: (listener: () => void) => {
+        listeners.add(listener)
+        return () => { listeners.delete(listener) }
+      },
+    }
+    const dispose = installReadStateOverlay({
+      source,
+      getUnread: () => unreadNow,
+      subscribeReadState: (listener) => {
+        listeners.add(listener)
+        return () => { listeners.delete(listener) }
+      },
+      shouldOverride: () => true,
+    })
+    try {
+      const first = source.getSnapshot()
+      expect(first.get(remoteId)?.completionUnread).toBe(false)
+      expect(first.get('local-1')?.completionUnread).toBe(false)
+      expect(source.getSnapshot()).toBe(first)
+
+      unreadNow = new Set([remoteId, 'local-1'])
+      for (const listener of listeners) listener()
+      const second = source.getSnapshot()
+      expect(second.get(remoteId)?.completionUnread).toBe(true)
+      expect(second.get('local-1')?.completionUnread).toBe(true)
+    } finally {
+      dispose()
+    }
+  })
+
+  it('builds the bridge prefix with bounded fold and unread state', () => {
+    expect(sanitizeGroupState({ a: true, b: 'yes', c: false })).toEqual({ a: true, c: false })
+    const script = buildNativeBridgeScript({
+      groups: { 'ws-1': true, 'ws-2': false },
+      unread: ['s-1', 's-2'],
+    })
+    expect(script).toContain('window.__DSH_MD_GROUPS__')
+    expect(script).toContain('"ws-1":true')
+    expect(script).toContain('"ws-2":false')
+    expect(script).toContain('window.__DSH_MD_UNREAD__')
+    expect(script.indexOf('window.__DSH_MD_GROUPS__')).toBeLessThan(script.indexOf('(function ()'))
+  })
+
+  it('restores Host fold/unread state from the registry document and clears it again', async () => {
+    const dir = makeTempDir('dsh-md-read-')
+    const dataFile = join(dir, 'devices.json')
+    const secretsFile = join(dir, 'secrets.json')
+    const remoteId = encodeRemoteSessionId(DeviceId('dev-a'), 's1')
+    const remoteId2 = encodeRemoteSessionId(DeviceId('dev-a'), 's2')
+    writeFileSync(dataFile, JSON.stringify({
+      version: 1,
+      devices: [{
+        id: 'dev-a',
+        name: 'A',
+        enabled: false,
+        transport: { kind: 'direct', baseUrl: 'http://127.0.0.1:9' },
+        auth: { mode: 'none' },
+      }],
+      aggregation: { autoGitAggregate: true },
+      nativeGroups: { 'dev-a': { 'ws-1': true, 'ws-2': false } },
+      readState: {
+        entries: {
+          [remoteId]: { unread: true, at: 100 },
+          [remoteId2]: { unread: true, at: 101 },
+        },
+      },
+    }))
+    const registry = new DeviceRegistry(
+      dataFile,
+      secretsFile,
+      { localPort: () => 3080, localWorkspaces: () => [], localSessionUpdatedAt: () => new Map() },
+      { allowDirectTransport: true, enableNativeProxy: false },
+    )
+    try {
+      expect(registry.snapshot().unreadSessionIds).toEqual([remoteId, remoteId2])
+      expect(registry.nativeGroupState(DeviceId('dev-a'))).toEqual({ 'ws-1': true, 'ws-2': false })
+      // Opening a remote Session through the aggregated page clears exactly it.
+      registry.setActiveSession(remoteId, 1)
+      expect(registry.snapshot().unreadSessionIds).toEqual([remoteId2])
+      const plane = new MultiDeviceControlPlane(registry, () => true)
+      const cleared = await plane.dispatch({
+        action: 'markSessionRead',
+        payload: { sessionId: remoteId2 },
+      })
+      expect(cleared.ok).toBe(true)
+      expect(registry.snapshot().unreadSessionIds).toEqual([])
+
+      // Local Sessions share the same Host-owned set.
+      registry.observeLocalSessionStatus('local-1', true)
+      registry.observeLocalSessionStatus('local-1', false)
+      expect(registry.snapshot().unreadSessionIds).toEqual(['local-1'])
+      registry.setActiveSession('local-1', 2)
+      expect(registry.snapshot().unreadSessionIds).toEqual([])
+    } finally {
+      registry.dispose()
+    }
+    const saved = JSON.parse(readFileSync(dataFile, 'utf8')) as {
+      readState?: { entries?: Record<string, { unread?: boolean }> }
+    }
+    expect(saved.readState?.entries?.[remoteId]?.unread).toBe(false)
+  })
+})
+
+describe('0c. Optional cross-Host read state file', () => {
+  it('merges Host sections by newest timestamp and lets a tie read win', () => {
+    const local = {
+      s1: { unread: true, at: 10 },
+      s2: { unread: true, at: 20 },
+    }
+    const doc = parseSharedReadDocument(JSON.stringify({
+      version: 1,
+      hosts: {
+        a: { updatedAt: 1, sessions: { s1: { unread: false, at: 11 } } },
+        b: { updatedAt: 2, sessions: { s2: { unread: false, at: 20 } } },
+      },
+    }))!
+    const merged = mergeSharedReadEntries(local, doc)
+    expect(merged.s1).toEqual({ unread: false, at: 11 })
+    expect(merged.s2).toEqual({ unread: false, at: 20 })
+  })
+
+  it('replaces only this Host section and bounds the written entries', () => {
+    const existing = parseSharedReadDocument(JSON.stringify({
+      version: 1,
+      hosts: { other: { updatedAt: 5, sessions: { keep: { unread: true, at: 5 } } } },
+    }))!
+    const sessions = Object.fromEntries(
+      Array.from({ length: 350 }, (_, index) => [`s-${String(index)}`, { unread: index % 2 === 0, at: index }]),
+    )
+    const doc = buildSharedReadDocument(existing, 'me', sessions, 999)
+    expect(doc.hosts.other?.sessions.keep).toEqual({ unread: true, at: 5 })
+    expect(doc.hosts.me?.updatedAt).toBe(999)
+    expect(Object.keys(doc.hosts.me?.sessions ?? {})).toHaveLength(300)
+    expect(doc.hosts.me?.sessions['s-349']).toEqual({ unread: false, at: 349 })
+    expect(doc.hosts.me?.sessions['s-0']).toBeUndefined()
+  })
+
+  it('rejects malformed files and only targets POSIX DSH homes', () => {
+    expect(parseSharedReadDocument('')).toBeUndefined()
+    expect(parseSharedReadDocument('{')).toBeUndefined()
+    expect(parseSharedReadDocument(JSON.stringify({ version: 2, hosts: {} }))).toBeUndefined()
+    expect(isPosixRemoteHome('/home/me/.dsh')).toBe(true)
+    expect(isPosixRemoteHome('C:\\Users\\me\\.dsh')).toBe(false)
+    expect(isPosixRemoteHome('\\\\server\\share')).toBe(false)
+    expect(isPosixRemoteHome(undefined)).toBe(false)
+    expect(sharedReadStatePath('/home/me/.dsh/')).toBe('/home/me/.dsh/plugins/dsh-multi-device/read-state.json')
+  })
+
+  it('writes and reads a bounded state file with the generated shell command', () => {
+    const dir = makeTempDir('dsh-md-shared-')
+    const path = join(dir, 'nested', 'read-state.json')
+    const write = buildWriteSharedStateCommand(path, {
+      version: 1,
+      hosts: { me: { updatedAt: 1, sessions: { s1: { unread: true, at: 2 } } } },
+    })
+    expect(write).toContain('umask 077')
+    expect(write).toContain('mkdir -p')
+    expect(write).toContain('base64 -d')
+    expect(write).toContain('base64 -D')
+    expect(write).toContain('mv -f')
+    execSync(write, { stdio: 'pipe' })
+    const read = execSync(buildReadSharedStateCommand(path), { encoding: 'utf8' })
+    expect(parseSharedReadDocument(read)?.hosts.me?.sessions.s1).toEqual({ unread: true, at: 2 })
   })
 })
 
@@ -621,6 +861,7 @@ describe('4b. Offline-aware target selection & session ownership', () => {
       logicalWorkspaces: [],
       allPhysicalWorkspaces: [],
       sessionOrigins: {},
+      unreadSessionIds: [],
       gitMatch: createIdleGitMatch(),
       ...patch,
     }
@@ -1071,6 +1312,12 @@ describe('4e. Display preferences for session rows', () => {
     expect(registry.ui().sessionRowDeviceDot).toBe(true)
     expect((toggled as { value: { ui?: { sessionRowDeviceDot: boolean } } }).value.ui?.sessionRowDeviceDot)
       .toBe(true)
+    const crossHost = await plane.dispatch({
+      action: 'setUiPreferences',
+      payload: { crossHostReadState: true },
+    })
+    expect(crossHost.ok).toBe(true)
+    expect(registry.ui().crossHostReadState).toBe(true)
     registry.dispose()
 
     const second = new DeviceRegistry(dataFile, secretsFile, localHost, options)
@@ -3167,6 +3414,8 @@ describe('10. Native Pane bridge, injection and view decisions', () => {
 
     const states: string[] = []
     const selections: (string | undefined)[] = []
+    const groupReports: Record<string, boolean>[] = []
+    const readReports: string[] = []
     const proxy = new NativeDeviceProxy(
       {
         id: DeviceId('dev-bridge'),
@@ -3181,6 +3430,10 @@ describe('10. Native Pane bridge, injection and view decisions', () => {
       {
         onBridgeState: (_id, state) => { states.push(state) },
         onBridgeSelection: (_id, sessionId) => { selections.push(sessionId) },
+        getGroupState: () => ({ 'ws-1': true }),
+        getUnreadState: () => ['rsess-9'],
+        onGroupState: (_id, groups) => { groupReports.push(groups) },
+        onBridgeRead: (_id, sessionId) => { readReports.push(sessionId) },
       },
     )
     let ws: WebSocket | undefined
@@ -3208,9 +3461,12 @@ describe('10. Native Pane bridge, injection and view decisions', () => {
       })
       expect(script.status).toBe(200)
       expect(script.headers.get('content-type')).toContain('application/javascript')
-      expect(await script.text()).toContain('__ModuleLoader__')
+      const scriptText = await script.text()
+      expect(scriptText).toContain('__ModuleLoader__')
+      expect(scriptText).toContain('"ws-1":true')
+      expect(scriptText).toContain('"rsess-9"')
 
-      const messages: { type?: string; sessionId?: string; enabled?: boolean }[] = []
+      const messages: { type?: string; sessionId?: string; enabled?: boolean; unreadSessionIds?: string[]; groups?: Record<string, boolean> }[] = []
       ws = new WebSocket(`${origin.replace(/^http/, 'ws')}/__md/bridge?device=dev-bridge`, {
         headers: { cookie: cookie! },
       })
@@ -3222,6 +3478,21 @@ describe('10. Native Pane bridge, injection and view decisions', () => {
       ws.send(JSON.stringify({ type: 'ready' }))
       await waitForCondition(() => states.includes('ready'))
       await waitForCondition(() => messages.some(message => message.type === 'set-embedded' && message.enabled === false))
+      await waitForCondition(() => messages.some(
+        message => message.type === 'read-state' && message.unreadSessionIds?.includes('rsess-9') === true,
+      ))
+      ws.send(JSON.stringify({ type: 'group-expansion', groups: { 'ws-2': true } }))
+      await waitForCondition(() => groupReports.some(groups => groups['ws-2'] === true))
+      ws.send(JSON.stringify({ type: 'read', sessionId: 'rsess-9' }))
+      await waitForCondition(() => readReports.includes('rsess-9'))
+      proxy.setGroupState({ 'ws-2': true })
+      await waitForCondition(() => messages.some(
+        message => message.type === 'group-expansion' && message.groups?.['ws-2'] === true,
+      ))
+      proxy.setUnreadState(['rsess-10'])
+      await waitForCondition(() => messages.some(
+        message => message.type === 'read-state' && message.unreadSessionIds?.includes('rsess-10') === true,
+      ))
       proxy.setEmbedded(true)
       await waitForCondition(() => messages.some(message => message.type === 'set-embedded' && message.enabled === true))
       ws.send(JSON.stringify({ type: 'selection', sessionId: 'rsess-1' }))
@@ -3265,7 +3536,7 @@ describe('10. Native Pane bridge, injection and view decisions', () => {
       const cookie = bootstrap.headers.get('set-cookie')?.split(';')[0]
       expect(cookie).toBeTruthy()
 
-      const messages: { type?: string; sessionId?: string; enabled?: boolean }[] = []
+      const messages: { type?: string; sessionId?: string; enabled?: boolean; groups?: Record<string, boolean> }[] = []
       ws = new WebSocket(`${origin.replace(/^http/, 'ws')}/__md/bridge?device=dev-pane`, {
         headers: { cookie: cookie! },
       })
@@ -3291,10 +3562,18 @@ describe('10. Native Pane bridge, injection and view decisions', () => {
       await waitForCondition(
         () => registry.snapshot().devices.find(device => device.id === deviceId)?.nativePaneSessionId === 'rsess-1',
       )
+      ws.send(JSON.stringify({ type: 'group-expansion', groups: { 'ws-1': true, 'ws-2': false } }))
+      await waitForCondition(
+        () => messages.some(message => message.type === 'group-expansion' && message.groups?.['ws-1'] === true),
+      )
     } finally {
       ws?.close()
       registry.dispose()
     }
+    const saved = JSON.parse(readFileSync(join(dir, 'devices.json'), 'utf8')) as {
+      nativeGroups?: Record<string, Record<string, boolean>>
+    }
+    expect(saved.nativeGroups?.['dev-pane']).toEqual({ 'ws-1': true, 'ws-2': false })
   })
 
   it('persists the nativePane preference with a true default', async () => {
@@ -3389,6 +3668,19 @@ describe('11. Bridge runtime loader capture', () => {
     }
 
     const opened: string[] = []
+    const groupCalls: { key: string; expanded: boolean }[] = []
+    const statusListeners = new Set<() => void>()
+    const statusSource = {
+      getSnapshot: () => new Map([
+        ['rsess-1', { running: false, completionUnread: false }],
+        ['rsess-2', { running: false, completionUnread: false }],
+        ['local-1', { running: false, completionUnread: true }],
+      ]),
+      subscribe: (listener: () => void) => {
+        statusListeners.add(listener)
+        return () => { statusListeners.delete(listener) }
+      },
+    }
     const selection = {
       getSnapshot: () => ({ sessionId: 'rsess-1' }),
       subscribe: () => () => {},
@@ -3400,11 +3692,17 @@ describe('11. Bridge runtime loader capture', () => {
       },
       refresh: () => Promise.resolve(),
     }
+    const view = {
+      setGroupExpanded: (key: string, expanded: boolean) => { groupCalls.push({ key, expanded }) },
+      retainAccountKeys: () => {},
+    }
     const context = {
       uiWorkspace: {
         selection,
+        view,
         openSession: (sessionId: string) => { opened.push(sessionId) },
       },
+      uiSession: { sessionStatus: statusSource },
       sessions,
     }
 
@@ -3423,6 +3721,7 @@ describe('11. Bridge runtime loader capture', () => {
       JSON,
       Object,
       Array,
+      Map,
       Promise,
       console,
       setTimeout: () => 0,
@@ -3435,7 +3734,10 @@ describe('11. Bridge runtime loader capture', () => {
     }
     sandbox.window = sandbox as unknown as Record<string, unknown>
 
-    runInNewContext(NATIVE_BRIDGE_SCRIPT, sandbox, { timeout: 2_000 })
+    runInNewContext(buildNativeBridgeScript({
+      groups: { 'ws-1': true },
+      unread: ['rsess-2'],
+    }), sandbox, { timeout: 2_000 })
 
     const live: { factory: (require: unknown) => { apply: (ctx: unknown) => void } }[] = []
     const pending: { factory: (require: unknown) => { apply: (ctx: unknown) => void } }[] = []
@@ -3480,13 +3782,28 @@ describe('11. Bridge runtime loader capture', () => {
     await new Promise<void>(resolve => setTimeout(resolve, 0))
 
     const socket = FakeSocket.instances[0]!
-    const messages = socket.sent.map(raw => JSON.parse(raw) as { type?: string; sessionId?: string; enabled?: boolean })
-    expect(messages.some(message => message.type === 'ready')).toBe(true)
-    expect(messages.some(message => message.type === 'selection' && message.sessionId === 'rsess-1')).toBe(true)
+    const sentMessages = (): { type?: string; sessionId?: string; enabled?: boolean }[] =>
+      socket.sent.map(raw => JSON.parse(raw) as { type?: string; sessionId?: string; enabled?: boolean })
+    expect(sentMessages().some(message => message.type === 'ready')).toBe(true)
+    expect(sentMessages().some(message => message.type === 'selection' && message.sessionId === 'rsess-1')).toBe(true)
+    expect(groupCalls).toContainEqual({ key: 'ws-1', expanded: true })
+    expect(statusSource.getSnapshot().get('rsess-2')?.completionUnread).toBe(true)
+    // A native page only contains the owning device's Sessions, so the Host
+    // set is authoritative for every row in that page.
+    expect(statusSource.getSnapshot().get('local-1')?.completionUnread).toBe(false)
 
     socket.emit('message', { data: JSON.stringify({ type: 'open-session', sessionId: 'rsess-2' }) })
     await new Promise<void>(resolve => setTimeout(resolve, 0))
     expect(opened).toContain('rsess-2')
+
+    socket.emit('message', { data: JSON.stringify({ type: 'read-state', unreadSessionIds: ['rsess-1'] }) })
+    await new Promise<void>(resolve => setTimeout(resolve, 0))
+    expect(sentMessages().some(message => message.type === 'read' && message.sessionId === 'rsess-1')).toBe(true)
+    expect(statusSource.getSnapshot().get('rsess-1')?.completionUnread).toBe(false)
+
+    groupCalls.length = 0
+    socket.emit('message', { data: JSON.stringify({ type: 'group-expansion', groups: { 'ws-2': true } }) })
+    expect(groupCalls).toContainEqual({ key: 'ws-2', expanded: true })
 
     expect(() => socket.emit('message', { data: JSON.stringify({ type: 'set-embedded', enabled: true }) })).not.toThrow()
   })
