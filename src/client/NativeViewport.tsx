@@ -7,6 +7,9 @@
  *   the same strip.
  * - The rightmost action switches back to Aggregated Mode, so the two surfaces
  *   stay one click apart without opening Settings. The Host still owns the mode.
+ * - Each tab carries its owner's unread completion count (本机 included), so a
+ *   finished conversation on another device stays visible without switching.
+ *   Archived and subagent Sessions never get a standalone row and are excluded.
  *
  * Keep-Alive:
  * - Every device in `keepAliveDeviceIds` stays mounted in the DOM.
@@ -32,13 +35,15 @@ import {
   Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { DeviceId, DeviceView } from '../contract.ts'
+import { LOCAL_DEVICE_ID, type DeviceId, type DeviceView } from '../contract.ts'
 import { AuthRequiredPanel } from './AuthPanel.tsx'
+import { UnreadCountBadge } from './UnreadCountBadge.tsx'
 import { useSessionSummary } from './clientServices.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
 import { SessionDeviceChip } from './SessionDeviceChip.tsx'
 import { nativePaneTarget, resolveSameSiteProxyUrl, shouldShowNativePane } from './nativePane.ts'
 import { clientStore, deviceStateToDotState, useMultiDeviceState } from './state.ts'
+import { countableUnreadIds, unreadCountForDevice } from './unreadCounts.ts'
 
 interface DesktopBrowserBridgeLike {
   acquire(workspace: string): Promise<{ lease: string; partition: string }>
@@ -204,6 +209,15 @@ export function NativeTabBar({
   const failureSeq = useRef(0)
   if (state.displayMode !== 'native') return null
 
+  // Count only unread Sessions that DSH can actually show as rows: archived
+  // completions and subagent children never appear in the sidebar.
+  const unread = countableUnreadIds(
+    state.snapshot.unreadSessionIds,
+    state.snapshot.archivedSessionIds,
+    state.snapshot.subagentSessionIds,
+  )
+  const localUnread = unreadCountForDevice(unread, LOCAL_DEVICE_ID)
+
   const activeDevice = devices.find(device => device.id === state.activeNativeDeviceId)
   const localActive = activeDevice === undefined
 
@@ -237,6 +251,7 @@ export function NativeTabBar({
             <span className="dsh-md-pill-inner">
               <IconGlobeOutlineRegular size={13} />
               <span>{t('nativeLocalTab')}</span>
+              <UnreadCountBadge count={localUnread} t={t} />
             </span>
           </Pill>
         </div>
@@ -255,6 +270,7 @@ export function NativeTabBar({
                 <span className="dsh-md-pill-inner">
                   <StateDot state={deviceStateToDotState(dev.state)} size={8} />
                   <span>{dev.name}</span>
+                  <UnreadCountBadge count={unreadCountForDevice(unread, dev.id)} t={t} />
                   {dev.runningSessionCount > 0 && (
                     <span className="dsh-md-muted">
                       {t('runningCount').replace('{count}', String(dev.runningSessionCount))}

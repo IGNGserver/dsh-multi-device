@@ -102,6 +102,8 @@ export declare const zh: {
     readonly statusDisabled: "已停用";
     readonly runningCount: "{count} 运行中";
     readonly pendingCount: "{count} 待确认";
+    readonly unreadCount: "{count} 未读";
+    readonly unreadTooltip: "{count} 个未读会话";
     readonly noDevicesTitle: "尚未添加远端设备";
     readonly noDevicesDesc: "点击上方“添加设备”，通过 SSH 连接你的其他开发机或服务器。";
     readonly hoverDeviceLabel: "所属设备";

@@ -1,16 +1,20 @@
 /**
- * Device badge for sidebar project rows.
+ * Device badge and unread counter for sidebar project rows.
  *
  * DSH's sidebar exposes session-row slots only; the project (workspace) row has
  * no extension point, and its title is the single visible label. To show a
  * Codex-style connection dot plus a device label we decorate the row in the
  * DOM: a dot (green / amber / grey) followed by the device name when the
- * project lives on exactly one device, or `N个设备` when it spans several.
+ * project lives on exactly one device, or `N个设备` when it spans several. The
+ * same decoration carries the workspace's unread count, rolled up through
+ * nested workspaces, because a collapsed parent row would otherwise hide its
+ * children's unread completions.
  *
  * The decoration is additive and reversible: rows are matched by their stable
- * `data-row-key="workspace:<id>"` attribute, the badge is a marker-tagged span,
- * and the observer re-applies it after React re-renders. If DSH changes its row
- * markup the function simply finds nothing and leaves the sidebar untouched.
+ * `data-row-key="workspace:<id>"` attribute, both badges are marker-tagged
+ * spans, and the observer re-applies them after React re-renders. If DSH
+ * changes its row markup the function simply finds nothing and leaves the
+ * sidebar untouched.
  *
  * @module dsh-multi-device/client/projectBadges
  */
@@ -22,10 +26,12 @@ import {
 } from '../contract.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
 import { clientStore, deviceStateToDotState } from './state.ts'
+import { countableUnreadIds, workspaceUnreadCounts } from './unreadCounts.ts'
 
 const BADGE_ATTR = 'data-dsh-md-device-badge'
 const DOT_ATTR = 'data-dsh-md-device-dot'
 const LABEL_ATTR = 'data-dsh-md-device-label'
+const UNREAD_ATTR = 'data-dsh-md-project-unread'
 
 type DotTone = 'ok' | 'pending' | 'offline'
 
@@ -106,6 +112,22 @@ function mountBadge(row: Element): HTMLSpanElement {
   return badge
 }
 
+/** Unread counter sits between the title and the device badge. */
+function createUnreadBadge(): HTMLSpanElement {
+  const unread = document.createElement('span')
+  unread.className = 'dsh-md-unread-count'
+  unread.setAttribute(UNREAD_ATTR, '')
+  return unread
+}
+
+function mountUnreadBadge(row: Element, badge: HTMLSpanElement): HTMLSpanElement {
+  const existing = row.querySelector<HTMLSpanElement>(`:scope > [${UNREAD_ATTR}]`)
+  if (existing !== null) return existing
+  const unread = createUnreadBadge()
+  row.insertBefore(unread, badge)
+  return unread
+}
+
 /** Reconcile every project row against the current snapshot. */
 function syncRows(t: Translate): void {
   const state = clientStore.getSnapshot()
@@ -114,23 +136,45 @@ function syncRows(t: Translate): void {
     // also erase badges when the snapshot flips to `native` while rows stay
     // mounted (mode switching keeps the local page alive).
     for (const badge of document.querySelectorAll(`[${BADGE_ATTR}]`)) badge.remove()
+    for (const unread of document.querySelectorAll(`[${UNREAD_ATTR}]`)) unread.remove()
     return
   }
   const snapshot = state.snapshot
   const byId = new Map(snapshot.logicalWorkspaces.map(workspace => [workspace.logicalWorkspaceId, workspace]))
+  // DSH renders archived rows only in the archived view and nests subagent
+  // children under their parent, so both stay out of a row's visible count.
+  const unread = countableUnreadIds(
+    snapshot.unreadSessionIds,
+    snapshot.archivedSessionIds,
+    snapshot.subagentSessionIds,
+  )
+  const unreadByWorkspace = workspaceUnreadCounts(snapshot.logicalWorkspaces, unread)
 
   for (const row of document.querySelectorAll('[data-row-key^="workspace:"]')) {
     const key = row.getAttribute('data-row-key') ?? ''
     const workspaceId = key.slice('workspace:'.length)
     const workspace = byId.get(workspaceId)
     const badge = row.querySelector<HTMLSpanElement>(`:scope > [${BADGE_ATTR}]`)
+    const unreadBadge = row.querySelector<HTMLSpanElement>(`:scope > [${UNREAD_ATTR}]`)
 
     if (workspace === undefined || workspace.members.length === 0) {
       badge?.remove()
+      unreadBadge?.remove()
       continue
     }
 
+    const count = unreadByWorkspace.get(workspaceId) ?? 0
     const target = mountBadge(row)
+    if (count > 0) {
+      const counter = mountUnreadBadge(row, target)
+      const text = t('unreadCount').replace('{count}', String(count))
+      if (counter.textContent !== text) counter.textContent = text
+      const tooltip = t('unreadTooltip').replace('{count}', String(count))
+      if (counter.title !== tooltip) counter.title = tooltip
+    } else {
+      unreadBadge?.remove()
+    }
+
     const dot = target.querySelector<HTMLSpanElement>(`[${DOT_ATTR}]`)
     const label = target.querySelector<HTMLSpanElement>(`[${LABEL_ATTR}]`)
     if (dot !== null) dot.dataset.state = dotTone(snapshot, workspace)
@@ -174,5 +218,6 @@ export function installProjectDeviceBadges(t: Translate): () => void {
     unsubscribe()
     if (frame !== 0) cancelAnimationFrame(frame)
     for (const badge of document.querySelectorAll(`[${BADGE_ATTR}]`)) badge.remove()
+    for (const unread of document.querySelectorAll(`[${UNREAD_ATTR}]`)) unread.remove()
   }
 }

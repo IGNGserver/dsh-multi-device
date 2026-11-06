@@ -119,6 +119,33 @@ const CSS_TEXT = `
   display: none;
 }
 
+/* Unread counter: Native tabs, sidebar project rows, and Settings device rows.
+   Green matches DSH's "completed" status dot, so the badge reads as a finished
+   result waiting to be opened rather than an error. */
+.dsh-md-unread-count {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--dsw-alias-state-success-tertiary, rgba(34, 197, 94, 0.14));
+  color: var(--dsw-alias-state-success-primary, #22c55e);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 14px;
+  white-space: nowrap;
+}
+
+/* The project row has no flex gap, unlike the pill and Settings row groups. */
+[data-row-key^='workspace:'] > .dsh-md-unread-count {
+  margin-left: 4px;
+}
+
+[data-row-key^='workspace:']:hover > .dsh-md-unread-count,
+[data-row-key^='workspace:'][class*='menuOpen'] > .dsh-md-unread-count {
+  display: none;
+}
+
 .dsh-md-project-device-label {
   overflow: hidden;
   text-overflow: ellipsis;

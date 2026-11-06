@@ -49,7 +49,9 @@ import {
   type UpsertDeviceInput,
 } from '../contract.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
+import { UnreadCountBadge } from './UnreadCountBadge.tsx'
 import { deviceTargetsForWorkspace } from './sessionDevice.ts'
+import { countableUnreadIds, unreadCountForDevice } from './unreadCounts.ts'
 import {
   clientStore,
   deviceStateToDotState,
@@ -640,6 +642,13 @@ export function MultiDeviceHubPanel({
 }): React.ReactElement {
   const state = useMultiDeviceState()
   const { snapshot } = state
+  // Same visibility rules as the sidebar: archived rows and subagent children
+  // have no standalone row, so they must not inflate a device's reminder count.
+  const unread = countableUnreadIds(
+    snapshot.unreadSessionIds,
+    snapshot.archivedSessionIds,
+    snapshot.subagentSessionIds,
+  )
   const modeSegId = useId()
 
   const [addingNew, setAddingNew] = useState(false)
@@ -1061,6 +1070,10 @@ export function MultiDeviceHubPanel({
                     <div className="dsh-md-row-identity">
                       <StateDot state={deviceStateToDotState(dev.state)} size={8} />
                       <span className="dsh-md-row-name">{dev.name}</span>
+                      <UnreadCountBadge
+                        count={unreadCountForDevice(unread, dev.id)}
+                        t={t}
+                      />
                       <span className="dsh-md-device-endpoint" title={formatCompactDeviceTarget(dev)}>
                         {formatCompactDeviceTarget(dev)}
                       </span>

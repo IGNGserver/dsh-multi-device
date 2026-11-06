@@ -186,6 +186,17 @@ export interface LocalHostProvider {
   readonly localWorkspaces: () => PhysicalWorkspaceInput[]
   /** Read current local session summaries. */
   readonly localSessionUpdatedAt: () => Map<string, number>
+  /**
+   * Local archived Session IDs (`ctx.workspaceRegistry.archivedSessionIds`).
+   * Optional so registries built by older callers and tests keep working;
+   * a missing provider simply means "no local Session is archived".
+   */
+  readonly localArchivedSessionIds?: () => readonly string[]
+  /**
+   * Local subagent-origin Session IDs (`session.header.origin === 'subagent'`).
+   * DSH renders these under their parent, never as standalone sidebar rows.
+   */
+  readonly localSubagentSessionIds?: () => readonly string[]
 }
 
 /**
@@ -1341,17 +1352,44 @@ export class DeviceRegistry {
     return scanRemoteGitRepos(config.transport, roots)
   }
 
+  /**
+   * Local archived Session IDs. A missing provider (older callers, tests that
+   * do not care) or a stale controller simply means "nothing archived", so a
+   * read failure must never break the whole snapshot.
+   */
+  private localArchivedIds(): string[] {
+    try {
+      return (this.localHost.localArchivedSessionIds?.() ?? []).map(String)
+    } catch {
+      return []
+    }
+  }
+
+  /** Local subagent-origin Session IDs; same failure policy as {@link localArchivedIds}. */
+  private localSubagentIds(): string[] {
+    try {
+      return (this.localHost.localSubagentSessionIds?.() ?? []).map(String)
+    } catch {
+      return []
+    }
+  }
+
   /** Build the complete snapshot for the Client UI and Aggregated Gateway. */
   snapshot(): MultiDeviceSnapshot {
     const physicalInputs: PhysicalWorkspaceInput[] = [...this.localHost.localWorkspaces()]
     const updatedAtMap = this.localHost.localSessionUpdatedAt()
     const sessionOrigins: Record<string, SessionOriginMetadata> = Object.create(null)
+    const archivedSessionIds = new Set<string>(this.localArchivedIds())
+    const subagentSessionIds = new Set<string>(this.localSubagentIds())
 
     for (const client of this.clients.values()) {
       const view = client.toView()
       const summaries = client.sessionSummaries()
       const runningBySession = new Map<string, boolean>()
       const archived = new Set(client.archivedIds())
+      for (const archivedId of archived) {
+        archivedSessionIds.add(encodeRemoteSessionId(client.id, archivedId))
+      }
       const attached = new Set(
         client.workspaceItems().flatMap(ws => [...ws.sessionIds]),
       )
@@ -1377,6 +1415,7 @@ export class DeviceRegistry {
         const namespacedId = client.namespaceSummary(s).sessionId
         updatedAtMap.set(namespacedId, s.updatedAt)
         runningBySession.set(s.sessionId, s.running)
+        if (s.origin === 'subagent') subagentSessionIds.add(namespacedId)
         const pending = client.pendingInteractionList().find(p => p.rawSessionId === s.sessionId)
         sessionOrigins[namespacedId] = {
           namespacedSessionId: namespacedId,
@@ -1453,6 +1492,8 @@ export class DeviceRegistry {
       allPhysicalWorkspaces,
       sessionOrigins,
       unreadSessionIds: this.readTracker.unreadIds(),
+      archivedSessionIds: [...archivedSessionIds].sort(),
+      subagentSessionIds: [...subagentSessionIds].sort(),
       gitMatch: this.gitMatchRun,
       ui: this.uiPreferences,
     }

@@ -38,6 +38,7 @@ import {
   isNamespacedSessionId,
   isNamespacedWorkspaceId,
   LOCAL_DEVICE_ID,
+  type LogicalWorkspaceView,
   type MultiDeviceSnapshot,
   normalizeGitRemote,
   normalizeWorkspacePath,
@@ -88,6 +89,12 @@ import {
 } from '../src/host/gateway.ts'
 import { nativePaneTarget, resolveSameSiteProxyUrl, shouldShowNativePane } from '../src/client/nativePane.ts'
 import { shouldDecorateProjectRows } from '../src/client/projectBadges.ts'
+import {
+  countableUnreadIds,
+  unreadCountForDevice,
+  unreadCountInSessions,
+  workspaceUnreadCounts,
+} from '../src/client/unreadCounts.ts'
 import {
   deviceTargetsForWorkspace,
   effectiveTargetOf,
@@ -4247,3 +4254,185 @@ describe('12. Audit regressions: multi-device loop prevention, userQuestions rou
   })
 })
 
+
+describe('0d. Unread counters for Native tabs and Aggregated rows', () => {
+  /** Minimal logical workspace fixture; nesting only depends on path + sessionIds. */
+  function logicalWorkspace(
+    id: string,
+    path: string,
+    sessionIds: readonly string[],
+  ): LogicalWorkspaceView {
+    return {
+      logicalWorkspaceId: id,
+      title: id,
+      kind: 'single',
+      targetDeviceId: DeviceId('dev-a'),
+      targetPath: path,
+      effectiveTargetDeviceId: DeviceId('dev-a'),
+      effectiveTargetPath: path,
+      effectiveTargetOnline: true,
+      members: [],
+      sessionIds,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    }
+  }
+
+  it('drops archived and subagent completions from the countable unread set', () => {
+    const remoteArchived = encodeRemoteSessionId(DeviceId('dev-a'), 's-archived')
+    const remoteSubagent = encodeRemoteSessionId(DeviceId('dev-a'), 's-sub')
+    const unread = countableUnreadIds(
+      ['local-1', 'local-2', remoteArchived, remoteSubagent],
+      ['local-1', remoteArchived],
+      [remoteSubagent],
+    )
+    expect([...unread]).toEqual(['local-2'])
+
+    // A Host that predates the visibility fields hides nothing.
+    expect([...countableUnreadIds(['local-1', 'local-2'])]).toEqual(['local-1', 'local-2'])
+
+    // Duplicate IDs cannot inflate a count.
+    expect([...countableUnreadIds(['local-1', 'local-1'])]).toEqual(['local-1'])
+  })
+
+  it('attributes unread Sessions to the owning device, local IDs included', () => {
+    const spacedDevice = encodeRemoteSessionId(DeviceId('dev a~b'), 's-1')
+    const unread = new Set([
+      'local-1',
+      'local-2',
+      encodeRemoteSessionId(DeviceId('dev-a'), 's-1'),
+      spacedDevice,
+    ])
+    expect(unreadCountForDevice(unread, LOCAL_DEVICE_ID)).toBe(2)
+    expect(unreadCountForDevice(unread, DeviceId('dev-a'))).toBe(1)
+    expect(unreadCountForDevice(unread, DeviceId('dev a~b'))).toBe(1)
+    expect(unreadCountForDevice(unread, DeviceId('dev-b'))).toBe(0)
+    expect(unreadCountForDevice(new Set(), LOCAL_DEVICE_ID)).toBe(0)
+  })
+
+  it('counts only Session IDs that belong to a workspace', () => {
+    const unread = new Set(['s-1', 's-2', 's-9'])
+    expect(unreadCountInSessions(unread, ['s-1', 's-3'])).toBe(1)
+    expect(unreadCountInSessions(unread, [])).toBe(0)
+    expect(unreadCountInSessions(new Set(), ['s-1'])).toBe(0)
+  })
+
+  it('rolls unread counts up through nested workspaces', () => {
+    const workspaces = [
+      logicalWorkspace('ws-parent', '/srv/repo', ['s-parent']),
+      logicalWorkspace('ws-child', '/srv/repo/packages/app', ['s-child']),
+      logicalWorkspace('ws-grandchild', '/srv/repo/packages/app/tests', ['s-grandchild']),
+      logicalWorkspace('ws-lookalike', '/srv/repo-2', ['s-lookalike']),
+    ]
+    const unread = new Set(['s-child', 's-grandchild', 's-lookalike'])
+    const counts = workspaceUnreadCounts(workspaces, unread)
+    expect(counts.get('ws-parent')).toBe(2)
+    expect(counts.get('ws-child')).toBe(2)
+    expect(counts.get('ws-grandchild')).toBe(1)
+    // `/srv/repo-2` is a sibling directory, not a descendant of `/srv/repo`.
+    expect(counts.get('ws-lookalike')).toBe(1)
+  })
+
+  it('matches DSH folder semantics for trailing separators and Windows paths', () => {
+    const workspaces = [
+      logicalWorkspace('ws-root', 'C:\\work\\repo\\', ['s-root']),
+      logicalWorkspace('ws-app', 'C:/work/repo/app', ['s-app']),
+      logicalWorkspace('ws-posix', '/home/dev/repo/', ['s-posix']),
+      logicalWorkspace('ws-posix-app', '/home/dev/repo/app', ['s-posix-app']),
+    ]
+    const counts = workspaceUnreadCounts(workspaces, new Set(['s-app', 's-posix', 's-posix-app']))
+    expect(counts.get('ws-root')).toBe(1)
+    expect(counts.get('ws-app')).toBe(1)
+    expect(counts.get('ws-posix')).toBe(2)
+    expect(counts.get('ws-posix-app')).toBe(1)
+  })
+
+  it('returns an empty rollup when nothing is unread', () => {
+    const workspaces = [logicalWorkspace('ws-1', '/srv/repo', ['s-1'])]
+    expect(workspaceUnreadCounts(workspaces, new Set()).size).toBe(0)
+    expect(workspaceUnreadCounts([], new Set(['s-1'])).size).toBe(0)
+  })
+})
+
+describe('0e. Snapshot visibility inputs for unread counters', () => {
+  it('publishes archived and subagent Session IDs with local and remote namespaces', () => {
+    const dir = makeTempDir('dsh-md-visibility-')
+    const dataFile = join(dir, 'devices.json')
+    const secretsFile = join(dir, 'secrets.json')
+    writeFileSync(dataFile, JSON.stringify({
+      version: 1,
+      devices: [{
+        id: 'dev-a',
+        name: 'A',
+        enabled: false,
+        transport: { kind: 'direct', baseUrl: 'http://127.0.0.1:9' },
+        auth: { mode: 'none' },
+      }],
+      aggregation: { autoGitAggregate: true },
+      catalogs: {
+        'dev-a': {
+          deviceId: 'dev-a',
+          syncedAt: 100,
+          protocolVersion: '0.2',
+          sessions: [
+            { sessionId: 's-archived', updatedAt: 1, agentAvailable: true, running: false, blank: false },
+            { sessionId: 's-sub', updatedAt: 2, agentAvailable: true, running: false, blank: false, origin: 'subagent' },
+            { sessionId: 's-normal', updatedAt: 3, agentAvailable: true, running: false, blank: false },
+          ],
+          workspaces: [],
+          archivedSessionIds: ['s-archived'],
+          pinnedSessionIds: [],
+        },
+      },
+    }))
+
+    const registry = new DeviceRegistry(
+      dataFile,
+      secretsFile,
+      {
+        localPort: () => 3080,
+        localWorkspaces: () => [],
+        localSessionUpdatedAt: () => new Map(),
+        localArchivedSessionIds: () => ['local-archived'],
+        localSubagentSessionIds: () => ['local-sub'],
+      },
+      { allowDirectTransport: true, enableNativeProxy: false },
+    )
+    registry.startAll()
+    try {
+      const snapshot = registry.snapshot()
+      expect(snapshot.archivedSessionIds).toEqual([
+        encodeRemoteSessionId(DeviceId('dev-a'), 's-archived'),
+        'local-archived',
+      ].sort())
+      expect(snapshot.subagentSessionIds).toEqual([
+        encodeRemoteSessionId(DeviceId('dev-a'), 's-sub'),
+        'local-sub',
+      ].sort())
+    } finally {
+      registry.dispose()
+    }
+  })
+
+  it('treats a failing local visibility provider as "nothing hidden"', () => {
+    const dir = makeTempDir('dsh-md-visibility-bad-')
+    const registry = new DeviceRegistry(
+      join(dir, 'devices.json'),
+      join(dir, 'secrets.json'),
+      {
+        localPort: () => 3080,
+        localWorkspaces: () => [],
+        localSessionUpdatedAt: () => new Map(),
+        localArchivedSessionIds: () => { throw new Error('archived unavailable') },
+        localSubagentSessionIds: () => { throw new Error('sessions unavailable') },
+      },
+      { allowDirectTransport: true, enableNativeProxy: false },
+    )
+    try {
+      expect(registry.snapshot().archivedSessionIds).toEqual([])
+      expect(registry.snapshot().subagentSessionIds).toEqual([])
+    } finally {
+      registry.dispose()
+    }
+  })
+})

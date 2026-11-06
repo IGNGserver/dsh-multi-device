@@ -137,9 +137,19 @@ export function apply(ctx: Context, config?: Config): void {
     }
   }
 
-  const getLocalSessions = (): { list?: () => readonly { id: string; header?: { createdAt?: number } }[] } | undefined => {
+  const getLocalSessions = (): {
+    list?: () => readonly {
+      id: string
+      header?: { createdAt?: number; origin?: 'subagent' }
+    }[]
+  } | undefined => {
     try {
-      return (ctx as unknown as { get?: (k: string) => unknown }).get?.('sessions') as { list?: () => readonly { id: string; header?: { createdAt?: number } }[] } | undefined
+      return (ctx as unknown as { get?: (k: string) => unknown }).get?.('sessions') as {
+        list?: () => readonly {
+          id: string
+          header?: { createdAt?: number; origin?: 'subagent' }
+        }[]
+      } | undefined
     } catch {
       return undefined
     }
@@ -188,6 +198,25 @@ export function apply(ctx: Context, config?: Config): void {
           // Ignore
         }
         return map
+      },
+      // Archived Sessions have no default sidebar row, so the unread counters
+      // must know about them to avoid reporting reminders that cannot be seen.
+      localArchivedSessionIds: () => {
+        try {
+          return (getWorkspaceRegistry()?.archivedSessionIds ?? []).map(String)
+        } catch {
+          return []
+        }
+      },
+      // Subagent children render under their parent Session, never as rows.
+      localSubagentSessionIds: () => {
+        try {
+          return (getLocalSessions()?.list?.() ?? [])
+            .filter(s => s.header?.origin === 'subagent')
+            .map(s => String(s.id))
+        } catch {
+          return []
+        }
       },
     },
     {
