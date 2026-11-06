@@ -160,7 +160,22 @@ declare class MultiDeviceClientStore {
         error?: string;
     }>;
     cancelGitMatch(): Promise<boolean>;
-    setPreferredDevice(logicalWorkspaceId: string, deviceId: DeviceId): Promise<void>;
+    setPreferredDevice(logicalWorkspaceId: string, deviceId: DeviceId): Promise<{
+        ok: boolean;
+        error?: string;
+    }>;
+    /**
+     * Point a logical workspace at another device and restart the New Session on
+     * it. The blank conversation is re-created on the target device by the Host;
+     * the previous device keeps its blank session (DSH reuses it later), so an
+     * unsent draft is never copied or destroyed here.
+     */
+    switchNewSessionDevice(uiWorkspace: {
+        startSession?: (workspaceId?: string) => void;
+    } | undefined, logicalWorkspaceId: string, deviceId: DeviceId): Promise<{
+        ok: boolean;
+        error?: string;
+    }>;
 }
 export declare const clientStore: MultiDeviceClientStore;
 export declare function useMultiDeviceState(): MultiDeviceClientState;

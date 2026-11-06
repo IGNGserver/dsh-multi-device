@@ -34,7 +34,7 @@ import {
 import { MultiDeviceHubPanel } from './MultiDeviceHubPanel.tsx'
 import { installProjectDeviceBadges } from './projectBadges.ts'
 import { SessionDeviceChip } from './SessionDeviceChip.tsx'
-import { clientStore } from './state.ts'
+import { clientStore, useMultiDeviceState } from './state.ts'
 import { adoptMultiDeviceStyles } from './styles.ts'
 
 export const SETTINGS_SECTION_ID = 'multi-device'
@@ -373,6 +373,41 @@ export function apply(ctx: ClientContextLike): void {
           onOpenSettings={handleOpenSettings}
         />
       ),
+    ),
+  )
+
+  // 6c. New Session row: choose which device hosts the conversation when the
+  //     logical workspace spans several machines. The chip keeps showing the
+  //     owner for single-device workspaces instead of advertising a no-op menu.
+  const NewSessionDeviceChip = (props: {
+    sessionId?: string
+    t?: (k: MultiDeviceLocaleKey) => string
+  }): React.ReactElement | null => {
+    // The hero row is Session-scoped, but keep a fallback to the reported
+    // active Session so an older shell that omits the prop still renders the
+    // picker instead of silently dropping it.
+    const state = useMultiDeviceState()
+    const sessionId = props.sessionId ?? state.activeSessionId
+    if (sessionId === undefined || sessionId === '') return null
+    return (
+      <SessionDeviceChip
+        sessionId={sessionId}
+        variant="hero"
+        t={props.t ?? getTranslate()}
+        onOpenSettings={handleOpenSettings}
+      />
+    )
+  }
+
+  ctx.slots.inject('conversation.hero.options', () =>
+    ctx.slots.register(
+      {
+        name: 'conversation.hero.options',
+        id: 'multi-device-new-session-device',
+        order: 10,
+        locale: LOCALE_NS,
+      },
+      NewSessionDeviceChip,
     ),
   )
 

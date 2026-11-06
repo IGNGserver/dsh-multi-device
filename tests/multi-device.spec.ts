@@ -817,6 +817,52 @@ describe('4b. Offline-aware target selection & session ownership', () => {
   })
 })
 
+describe('4c. New Session device switching', () => {
+  it('persists the chosen target device and restarts the New Session on it', async () => {
+    const { clientStore } = await import('../src/client/state.ts')
+    const calls: Array<string | undefined> = []
+    const ui = { startSession: (workspaceId?: string): void => { calls.push(workspaceId) } }
+    const originalFetch = globalThis.fetch
+    const snapshot = clientStore.getSnapshot().snapshot
+    const requested: unknown[] = []
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requested.push(init?.body === undefined ? undefined : JSON.parse(String(init.body)))
+      return new Response(JSON.stringify({ ok: true, value: snapshot }), { status: 200 })
+    }) as typeof fetch
+    try {
+      const logicalId = encodeLogicalWorkspaceId('git', 'github.com/acme/platform')
+      const result = await clientStore.switchNewSessionDevice(ui, logicalId, DeviceId('dev-ubuntu'))
+      expect(result.ok).toBe(true)
+      expect(calls).toEqual([logicalId])
+      expect(requested).toContainEqual({
+        action: 'setPreferredDevice',
+        payload: { logicalWorkspaceId: logicalId, deviceId: 'dev-ubuntu' },
+      })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('reports an unavailable startSession instead of pretending the switch happened', async () => {
+    const { clientStore } = await import('../src/client/state.ts')
+    const originalFetch = globalThis.fetch
+    const snapshot = clientStore.getSnapshot().snapshot
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ ok: true, value: snapshot }), { status: 200 })) as typeof fetch
+    try {
+      const result = await clientStore.switchNewSessionDevice(
+        undefined,
+        encodeLogicalWorkspaceId('git', 'github.com/acme/other'),
+        DeviceId('dev-mac'),
+      )
+      expect(result.ok).toBe(false)
+      expect(result.error).toBe('startSession-unavailable')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+})
+
 describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, & Native Proxy', () => {
   it('connects to a simulated remote DSH 0.2 server, aggregates sessions & workspaces, routes prompts/approvals, and serves Native Mode via reverse proxy', async () => {
     const dir = makeTempDir('dsh-md-e2e-')

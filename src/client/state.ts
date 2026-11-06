@@ -646,12 +646,39 @@ class MultiDeviceClientStore {
     return res.ok ? res.value.cancelled : false
   }
 
-  async setPreferredDevice(logicalWorkspaceId: string, deviceId: DeviceId): Promise<void> {
+  async setPreferredDevice(
+    logicalWorkspaceId: string,
+    deviceId: DeviceId,
+  ): Promise<{ ok: boolean; error?: string }> {
     const res = await this.callControlPlane<MultiDeviceSnapshot>({
       action: 'setPreferredDevice',
       payload: { logicalWorkspaceId, deviceId },
     })
-    if (res.ok) this.applyIncomingSnapshot(res.value)
+    if (res.ok) {
+      this.applyIncomingSnapshot(res.value)
+      return { ok: true }
+    }
+    return { ok: false, error: res.error }
+  }
+
+  /**
+   * Point a logical workspace at another device and restart the New Session on
+   * it. The blank conversation is re-created on the target device by the Host;
+   * the previous device keeps its blank session (DSH reuses it later), so an
+   * unsent draft is never copied or destroyed here.
+   */
+  async switchNewSessionDevice(
+    uiWorkspace: { startSession?: (workspaceId?: string) => void } | undefined,
+    logicalWorkspaceId: string,
+    deviceId: DeviceId,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const saved = await this.setPreferredDevice(logicalWorkspaceId, deviceId)
+    if (!saved.ok) return saved
+    if (typeof uiWorkspace?.startSession !== 'function') {
+      return { ok: false, error: 'startSession-unavailable' }
+    }
+    uiWorkspace.startSession(logicalWorkspaceId)
+    return { ok: true }
   }
 }
 

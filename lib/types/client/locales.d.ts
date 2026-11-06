@@ -108,6 +108,15 @@ export declare const zh: {
     readonly deviceChipOpenSettings: "多设备设置";
     readonly deviceChipOfflineHint: "该设备当前不可达；展示的是上次同步的数据。";
     readonly deviceChipSwitchHint: "可在下方重新连接，或切换到在线设备新建会话。";
+    readonly deviceHeroChipLabel: "新建于";
+    readonly deviceTargetTitle: "选择新建会话的设备";
+    readonly deviceTargetSubtitle: "只列出拥有该工作区的设备；离线设备需先重新连接。";
+    readonly deviceTargetNeedsWorkspace: "先在左侧选择一个工作区，再选择承接设备。";
+    readonly deviceTargetSingleDevice: "该工作区只存在于一台设备上，无法切换。";
+    readonly deviceSwitchKeepsBlank: "切换后原设备会保留空白会话，不会迁移或丢失草稿。";
+    readonly deviceSwitchPending: "切换中…";
+    readonly deviceSwitchUnavailable: "当前 DSH 版本不支持在此切换设备，请到多设备设置中调整。";
+    readonly deviceReconnectOffline: "重连离线设备";
     readonly gatewayDegradedNotice: "聚合网关当前处于降级状态，原生模式仍可正常使用";
     readonly savedNotice: "设置已保存";
     readonly actionFailed: "操作失败";
