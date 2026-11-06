@@ -16,6 +16,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { runInNewContext } from 'node:vm'
+import { gzipSync } from 'node:zlib'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { WebSocket, WebSocketServer } from 'ws'
 import {
@@ -72,12 +74,15 @@ import {
   deviceOfflineError,
   installAggregatedGateway02,
   isSameDeviceChildSession,
+  reusableSessionIdFor,
+  shouldEndFollowStream,
   supportsWorkspaceReplaceFrames,
   unavailableRemoteCatalog,
   type SessionControllerLike,
   type TypertGatewayLike,
   type WorkspaceControllerLike,
 } from '../src/host/gateway.ts'
+import { nativePaneTarget, shouldShowNativePane } from '../src/client/nativePane.ts'
 import { shouldDecorateProjectRows } from '../src/client/projectBadges.ts'
 import {
   deviceTargetsForWorkspace,
@@ -85,6 +90,11 @@ import {
   resolveSessionDevice,
   resolveSessionLogicalWorkspace,
 } from '../src/client/sessionDevice.ts'
+import {
+  injectNativeBridge,
+  NATIVE_BRIDGE_SCRIPT,
+  NATIVE_BRIDGE_SCRIPT_PATH,
+} from '../src/host/native-bridge.ts'
 import { requestRemote } from '../src/host/http-request.ts'
 import { NativeDeviceProxy } from '../src/host/native-proxy.ts'
 import { describeProbeFailure, DeviceRegistry } from '../src/host/registry.ts'
@@ -915,6 +925,9 @@ describe('4d. Offline catalog cache & reconnect waiting', () => {
     client.hydrateCatalog(cachedCatalog)
 
     expect(client.sessionSummaries().map(session => session.sessionId)).toEqual(['s-1', 's-2'])
+    // A persisted running flag is not a live claim: the stale view must stop
+    // the spinner until a real baseline arrives.
+    expect(client.sessionSummaries().find(session => session.sessionId === 's-2')?.running).toBe(false)
     expect(client.workspaceItems().map(workspace => workspace.workspaceId)).toEqual(['ws-1'])
     expect(client.archivedIds()).toEqual(['s-old'])
     expect(client.pinnedIds()).toEqual(['s-1'])
@@ -978,6 +991,38 @@ describe('4d. Offline catalog cache & reconnect waiting', () => {
     expect(snapshot.sessionOrigins[encodeRemoteSessionId(DeviceId('dev-cache'), 's-1')]?.deviceState)
       .not.toBe('connected')
     second.dispose()
+  })
+
+  it('stops stale spinners when a running device goes offline', () => {
+    const events: Record<string, unknown>[] = []
+    const callbacks = silentCallbacks()
+    callbacks.onRemoteEventFrame = (_id, frame) => {
+      events.push(frame as unknown as Record<string, unknown>)
+    }
+    const client = new RemoteDeviceClient(
+      { ...directConfig('dev-offline'), enabled: true },
+      new DeviceAuthManager(join(makeTempDir('dsh-md-offline-'), 'secrets.json')),
+      callbacks,
+    )
+    client.hydrateCatalog({
+      ...cachedCatalog,
+      deviceId: DeviceId('dev-offline'),
+      sessions: [
+        { sessionId: 's-running', updatedAt: 10, agentAvailable: true, running: true, blank: false },
+      ],
+    })
+    expect(client.toView().runningSessionCount).toBe(0)
+    client.stop()
+    const status = events.find(frame =>
+      frame.type === 'emit' &&
+      frame.event === 'api-session/status' &&
+      Array.isArray(frame.args) &&
+      frame.args[1] === false,
+    )
+    expect(status).toBeDefined()
+    expect(client.sessionSummaries().find(summary => summary.sessionId === 's-running')?.running).toBe(false)
+    expect(client.toView().runningSessionCount).toBe(0)
+    expect(client.toView().catalogStale).toBe(true)
   })
 
   it('builds a wire-compatible offline failure and refuses to wait on an unconfigured device', async () => {
@@ -3002,5 +3047,442 @@ describe('9. Manual Git match: scan, register, and never run on its own', () => 
     } finally {
       setSshSpawn(null)
     }
+  })
+})
+
+describe('10. Native Pane bridge, injection and view decisions', () => {
+  it('injects the bridge as the first head child and is idempotent', () => {
+    const html = '<!doctype html><html><head><title>t</title></head><body></body></html>'
+    const once = injectNativeBridge(html, { deviceId: 'dev-1' })
+    expect(once).toContain('data-dsh-md-native-bridge="1"')
+    expect(once).toContain(`${NATIVE_BRIDGE_SCRIPT_PATH}?device=dev-1`)
+    expect(once.indexOf('data-dsh-md-native-bridge')).toBeLessThan(once.indexOf('<title>'))
+    expect(injectNativeBridge(once, { deviceId: 'dev-1' })).toBe(once)
+    expect(NATIVE_BRIDGE_SCRIPT).toContain('__ModuleLoader__')
+    expect(NATIVE_BRIDGE_SCRIPT).toContain('open-session')
+    expect(NATIVE_BRIDGE_SCRIPT).toContain('selection')
+  })
+
+  it('decides pane visibility conservatively and never covers a local session', () => {
+    const base = {
+      id: DeviceId('dev-a'),
+      name: 'device A',
+      enabled: true,
+      state: 'connected',
+      transportKind: 'ssh',
+      targetSummary: 'ssh://a',
+      keepNativeAlive: true,
+      protocolVersion: '0.2',
+      realtime: true,
+      reconnectAttempt: 0,
+      sessionCount: 1,
+      runningSessionCount: 0,
+      pendingApprovalCount: 0,
+      workspaceCount: 1,
+    } as DeviceView
+    const target = nativePaneTarget('aggregated', encodeRemoteSessionId(DeviceId('dev-a'), 'rsess-1'))
+    expect(target).toEqual({ deviceId: 'dev-a', rawSessionId: 'rsess-1' })
+    expect(nativePaneTarget('native', encodeRemoteSessionId(DeviceId('dev-a'), 'rsess-1'))).toBeUndefined()
+    expect(nativePaneTarget('aggregated', 'lsess-1')).toBeUndefined()
+
+    const ready = { ...base, nativePaneState: 'ready', nativePaneSessionId: 'rsess-1' } as DeviceView
+    expect(shouldShowNativePane({ enabled: true, target, device: ready, geometryReady: true })).toBe(true)
+    expect(shouldShowNativePane({ enabled: false, target, device: ready, geometryReady: true })).toBe(false)
+    expect(shouldShowNativePane({ enabled: true, target, device: ready, geometryReady: false })).toBe(false)
+    expect(shouldShowNativePane({
+      enabled: true,
+      target,
+      device: { ...ready, nativePaneSessionId: 'other' },
+      geometryReady: true,
+    })).toBe(false)
+    expect(shouldShowNativePane({
+      enabled: true,
+      target,
+      device: { ...ready, state: 'error', nativePaneState: 'failed' },
+      geometryReady: true,
+    })).toBe(true)
+    expect(shouldShowNativePane({
+      enabled: true,
+      target,
+      device: { ...base, state: 'error' },
+      geometryReady: true,
+    })).toBe(true)
+    expect(shouldShowNativePane({
+      enabled: true,
+      target,
+      device: { ...ready, state: 'connected', nativePaneState: 'failed' },
+      geometryReady: true,
+    })).toBe(false)
+    expect(shouldShowNativePane({
+      enabled: true,
+      target,
+      device: { ...ready, authState: 'required', nativePaneState: 'idle' },
+      geometryReady: true,
+    })).toBe(true)
+  })
+
+  it('ends a follow stream normally only after the opening frame', () => {
+    expect(shouldEndFollowStream(new Error('closed'), false, false)).toBe(false)
+    expect(shouldEndFollowStream(new Error('closed'), true, false)).toBe(true)
+    expect(shouldEndFollowStream(
+      Object.assign(new Error('cancelled'), { code: 'gateway/cancelled' }),
+      true,
+      true,
+    )).toBe(true)
+    expect(shouldEndFollowStream(
+      Object.assign(new Error('not found'), { code: 'session/not-found' }),
+      true,
+      true,
+    )).toBe(false)
+  })
+
+  it('reuses a blank only on the device that owns it', () => {
+    const devA = DeviceId('dev-a')
+    const devB = DeviceId('dev-b')
+    expect(reusableSessionIdFor(encodeRemoteSessionId(devA, 'rsess-1'), devA)).toBe('rsess-1')
+    expect(reusableSessionIdFor(encodeRemoteSessionId(devA, 'rsess-1'), devB)).toBeUndefined()
+    expect(reusableSessionIdFor('lsess-1', LOCAL_DEVICE_ID)).toBe('lsess-1')
+    expect(reusableSessionIdFor(undefined, devA)).toBeUndefined()
+  })
+
+  it('injects HTML through the proxy, serves the bridge script and routes bridge commands', async () => {
+    const upstream = createServer((_req, res) => {
+      res.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'content-encoding': 'gzip',
+        'x-frame-options': 'DENY',
+      })
+      res.end(gzipSync(Buffer.from(
+        '<!doctype html><html><head><title>remote</title></head><body>remote body</body></html>',
+      )))
+    })
+    await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
+    const address = upstream.address()
+    const port = typeof address === 'object' && address !== null ? address.port : 0
+
+    const states: string[] = []
+    const selections: (string | undefined)[] = []
+    const proxy = new NativeDeviceProxy(
+      {
+        id: DeviceId('dev-bridge'),
+        name: 'bridge-device',
+        enabled: true,
+        transport: { kind: 'direct', baseUrl: `http://127.0.0.1:${String(port)}` },
+        auth: { mode: 'none' },
+      },
+      () => `http://127.0.0.1:${String(port)}`,
+      new DeviceAuthManager(),
+      undefined,
+      {
+        onBridgeState: (_id, state) => { states.push(state) },
+        onBridgeSelection: (_id, sessionId) => { selections.push(sessionId) },
+      },
+    )
+    let ws: WebSocket | undefined
+    try {
+      await proxy.start()
+      const url = proxy.proxyUrl()!
+      const origin = new URL(url).origin
+      const bootstrap = await fetch(url, { redirect: 'manual' })
+      const cookie = bootstrap.headers.get('set-cookie')?.split(';')[0]
+      expect(cookie).toBeTruthy()
+
+      const page = await fetch(`${origin}/`, {
+        headers: { cookie: cookie!, 'sec-fetch-dest': 'document', 'accept': 'text/html' },
+      })
+      expect(page.status).toBe(200)
+      expect(page.headers.get('content-encoding')).toBeNull()
+      const html = await page.text()
+      expect(html).toContain('data-dsh-md-native-bridge="1"')
+      expect(html).toContain('/__md/bridge.js?device=dev-bridge')
+      expect(html).toContain('<title>remote</title>')
+      expect(states).toContain('loading')
+
+      const script = await fetch(`${origin}${NATIVE_BRIDGE_SCRIPT_PATH}`, {
+        headers: { cookie: cookie! },
+      })
+      expect(script.status).toBe(200)
+      expect(script.headers.get('content-type')).toContain('application/javascript')
+      expect(await script.text()).toContain('__ModuleLoader__')
+
+      const messages: { type?: string; sessionId?: string; enabled?: boolean }[] = []
+      ws = new WebSocket(`${origin.replace(/^http/, 'ws')}/__md/bridge?device=dev-bridge`, {
+        headers: { cookie: cookie! },
+      })
+      mockBridgeMessages(ws, messages)
+      await new Promise<void>((resolve, reject) => {
+        ws!.once('open', resolve)
+        ws!.once('error', reject)
+      })
+      ws.send(JSON.stringify({ type: 'ready' }))
+      await waitForCondition(() => states.includes('ready'))
+      await waitForCondition(() => messages.some(message => message.type === 'set-embedded' && message.enabled === false))
+      proxy.setEmbedded(true)
+      await waitForCondition(() => messages.some(message => message.type === 'set-embedded' && message.enabled === true))
+      ws.send(JSON.stringify({ type: 'selection', sessionId: 'rsess-1' }))
+      await waitForCondition(() => selections.at(-1) === 'rsess-1')
+
+      proxy.openSession('rsess-2')
+      await waitForCondition(() => messages.some(message => message.type === 'open-session' && message.sessionId === 'rsess-2'))
+    } finally {
+      ws?.close()
+      proxy.stop()
+      await new Promise<void>(resolve => upstream.close(() => resolve()))
+    }
+  })
+
+  it('wires bridge readiness, selection and open commands into the Host snapshot', async () => {
+    const dir = makeTempDir('dsh-md-pane-')
+    const registry = new DeviceRegistry(
+      join(dir, 'devices.json'),
+      join(dir, 'secrets.json'),
+      {
+        localPort: () => 3080,
+        localWorkspaces: () => [],
+        localSessionUpdatedAt: () => new Map(),
+      },
+      { allowDirectTransport: true },
+    )
+    const deviceId = DeviceId('dev-pane')
+    let ws: WebSocket | undefined
+    try {
+      const added = await registry.upsertDevice({
+        id: 'dev-pane',
+        name: 'pane-device',
+        transport: { kind: 'direct', baseUrl: 'http://127.0.0.1:1' },
+        auth: { mode: 'none' },
+      })
+      expect(added.ok).toBe(true)
+      const proxyUrl = registry.nativeProxyManager.proxyUrl(deviceId)
+      expect(proxyUrl).toBeDefined()
+      const origin = new URL(proxyUrl!).origin
+      const bootstrap = await fetch(proxyUrl!, { redirect: 'manual' })
+      const cookie = bootstrap.headers.get('set-cookie')?.split(';')[0]
+      expect(cookie).toBeTruthy()
+
+      const messages: { type?: string; sessionId?: string; enabled?: boolean }[] = []
+      ws = new WebSocket(`${origin.replace(/^http/, 'ws')}/__md/bridge?device=dev-pane`, {
+        headers: { cookie: cookie! },
+      })
+      mockBridgeMessages(ws, messages)
+      await new Promise<void>((resolve, reject) => {
+        ws!.once('open', resolve)
+        ws!.once('error', reject)
+      })
+      ws.send(JSON.stringify({ type: 'ready' }))
+      await waitForCondition(
+        () => registry.snapshot().devices.find(device => device.id === deviceId)?.nativePaneState === 'ready',
+      )
+
+      const namespaced = encodeRemoteSessionId(deviceId, 'rsess-1')
+      registry.setActiveSession(namespaced, 1)
+      await waitForCondition(
+        () => messages.some(message => message.type === 'open-session' && message.sessionId === 'rsess-1'),
+      )
+      await waitForCondition(
+        () => messages.some(message => message.type === 'set-embedded' && message.enabled === true),
+      )
+      ws.send(JSON.stringify({ type: 'selection', sessionId: 'rsess-1' }))
+      await waitForCondition(
+        () => registry.snapshot().devices.find(device => device.id === deviceId)?.nativePaneSessionId === 'rsess-1',
+      )
+    } finally {
+      ws?.close()
+      registry.dispose()
+    }
+  })
+
+  it('persists the nativePane preference with a true default', async () => {
+    const dir = makeTempDir('dsh-md-pane-pref-')
+    const dataFile = join(dir, 'devices.json')
+    const first = new DeviceRegistry(
+      dataFile,
+      join(dir, 'secrets.json'),
+      {
+        localPort: () => 3080,
+        localWorkspaces: () => [],
+        localSessionUpdatedAt: () => new Map(),
+      },
+      { allowDirectTransport: true },
+    )
+    expect(first.ui().nativePane).toBe(true)
+    const plane = new MultiDeviceControlPlane(first)
+    const toggled = await plane.dispatch({
+      action: 'setUiPreferences',
+      payload: { nativePane: false },
+    })
+    expect(toggled.ok).toBe(true)
+    expect((toggled as { value: MultiDeviceSnapshot }).value.ui?.nativePane).toBe(false)
+    first.dispose()
+
+    const second = new DeviceRegistry(
+      dataFile,
+      join(dir, 'secrets.json'),
+      {
+        localPort: () => 3080,
+        localWorkspaces: () => [],
+        localSessionUpdatedAt: () => new Map(),
+      },
+      { allowDirectTransport: true },
+    )
+    try {
+      expect(second.ui().nativePane).toBe(false)
+    } finally {
+      second.dispose()
+    }
+  })
+})
+
+/** Capture parsed bridge commands on a test WebSocket. */
+function mockBridgeMessages(
+  ws: WebSocket,
+  target: { type?: string; sessionId?: string; enabled?: boolean }[],
+): void {
+  ws.on('message', (raw) => {
+    try {
+      target.push(JSON.parse(raw.toString()) as { type?: string; sessionId?: string; enabled?: boolean })
+    } catch {
+      // Ignore non-JSON test frames.
+    }
+  })
+}
+
+async function waitForCondition(predicate: () => boolean, timeoutMs = 3_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (predicate()) return
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  throw new Error('condition was not met before the test deadline')
+}
+
+describe('11. Bridge runtime loader capture', () => {
+  it('rewrites pending and post-create workspace registrations and drives the remote UI', async () => {
+    class FakeSocket {
+      static instances: FakeSocket[] = []
+      readyState = 1
+      readonly sent: string[] = []
+      private readonly listeners = new Map<string, ((event: unknown) => void)[]>()
+      constructor(_url: string) {
+        FakeSocket.instances.push(this)
+      }
+      addEventListener(type: string, listener: (event: unknown) => void): void {
+        const list = this.listeners.get(type) ?? []
+        list.push(listener)
+        this.listeners.set(type, list)
+      }
+      send(data: string): void {
+        this.sent.push(data)
+      }
+      close(): void {
+        this.readyState = 3
+        this.emit('close', {})
+      }
+      emit(type: string, event: unknown): void {
+        for (const listener of this.listeners.get(type) ?? []) listener(event)
+      }
+    }
+
+    const opened: string[] = []
+    const selection = {
+      getSnapshot: () => ({ sessionId: 'rsess-1' }),
+      subscribe: () => () => {},
+    }
+    const sessions = {
+      list: {
+        getSnapshot: () => ({ byId: {} }),
+        subscribe: () => () => {},
+      },
+      refresh: () => Promise.resolve(),
+    }
+    const context = {
+      uiWorkspace: {
+        selection,
+        openSession: (sessionId: string) => { opened.push(sessionId) },
+      },
+      sessions,
+    }
+
+    const sandbox = {
+      window: {} as Record<string, unknown>,
+      document: {
+        currentScript: { src: 'http://127.0.0.1:1/__md/bridge.js?device=dev-x' },
+        documentElement: {},
+        querySelector: () => null,
+      },
+      location: { protocol: 'http:', host: '127.0.0.1:1' },
+      WebSocket: FakeSocket,
+      MutationObserver: class { observe(): void {} disconnect(): void {} },
+      URL,
+      URLSearchParams,
+      JSON,
+      Object,
+      Array,
+      Promise,
+      console,
+      setTimeout: () => 0,
+      clearTimeout: () => {},
+      setInterval: () => 0,
+      clearInterval: () => {},
+      requestAnimationFrame: () => 0,
+      cancelAnimationFrame: () => {},
+      getComputedStyle: () => ({ gridTemplateColumns: '' }),
+    }
+    sandbox.window = sandbox as unknown as Record<string, unknown>
+
+    runInNewContext(NATIVE_BRIDGE_SCRIPT, sandbox, { timeout: 2_000 })
+
+    const live: { factory: (require: unknown) => { apply: (ctx: unknown) => void } }[] = []
+    const pending: { factory: (require: unknown) => { apply: (ctx: unknown) => void } }[] = []
+    const queue = {
+      mode: 'queue',
+      pendingQueue: pending,
+      load(registration: { factory: (require: unknown) => { apply: (ctx: unknown) => void } }) {
+        pending.push(registration)
+      },
+      create() {
+        const queued = pending.splice(0)
+        this.mode = 'live'
+        this.load = (registration: { factory: (require: unknown) => { apply: (ctx: unknown) => void } }) => {
+          live.push(registration)
+        }
+        for (const registration of queued) this.load(registration)
+        return { live: true }
+      },
+    }
+    sandbox.window.__ModuleLoader__ = queue
+
+    const makeRecord = () => {
+      const exports = { apply: (ctx: unknown) => { void ctx } }
+      const factory = () => exports
+      return { id: '@deepseek-ai/dsh-client-ui-workspace', factory, exports }
+    }
+    const first = makeRecord()
+    queue.load(first)
+    queue.create()
+    const second = makeRecord()
+    queue.load(second)
+
+    expect(live).toHaveLength(2)
+    expect(live[0]!.factory).not.toBe(first.factory)
+    expect(live[1]!.factory).not.toBe(second.factory)
+
+    // Materialize the first rewritten factory and apply it: the bridge should
+    // capture the context, report ready and the persisted selection.
+    const materialized = live[0]!.factory(() => { throw new Error('no externals') })
+    expect(typeof materialized.apply).toBe('function')
+    materialized.apply(context)
+    await new Promise<void>(resolve => setTimeout(resolve, 0))
+
+    const socket = FakeSocket.instances[0]!
+    const messages = socket.sent.map(raw => JSON.parse(raw) as { type?: string; sessionId?: string; enabled?: boolean })
+    expect(messages.some(message => message.type === 'ready')).toBe(true)
+    expect(messages.some(message => message.type === 'selection' && message.sessionId === 'rsess-1')).toBe(true)
+
+    socket.emit('message', { data: JSON.stringify({ type: 'open-session', sessionId: 'rsess-2' }) })
+    await new Promise<void>(resolve => setTimeout(resolve, 0))
+    expect(opened).toContain('rsess-2')
+
+    expect(() => socket.emit('message', { data: JSON.stringify({ type: 'set-embedded', enabled: true }) })).not.toThrow()
   })
 })

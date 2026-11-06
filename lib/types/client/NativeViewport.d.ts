@@ -9,9 +9,14 @@ export declare function NativeTabBar({ t, onOpenSettings, }: {
     onOpenSettings: () => void;
 }): React.ReactElement | null;
 /**
- * Keep-Alive remote viewports below the tab bar. The local DSH page is never
- * rendered here: when 本机 is active this stage is hidden and the host frame
- * underneath remains visible and interactive.
+ * Remote viewports for both modes:
+ * - Native Mode: full frame below the tab bar.
+ * - Aggregated Mode: a pane covering only the local conversation column while
+ *   a remote Session is selected; the aggregated sidebar stays interactive.
+ *
+ * The pane is visible only after the injected bridge reports the selected raw
+ * Session (see `shouldShowNativePane`). Until then the local mirror remains
+ * visible, so a slow bridge or a version mismatch never shows a blank pane.
  */
 export declare function NativeViewport({ t, onOpenSettings, }: {
     t: (key: MultiDeviceLocaleKey) => string;

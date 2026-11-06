@@ -68,6 +68,12 @@ declare class MultiDeviceClientStore {
     private applyIncomingSnapshot;
     private activateNativeDevice;
     /**
+     * Mount (and keep alive) one device frame for the aggregated Native Pane
+     * without entering Native Mode. Idempotent; unknown/disabled devices are
+     * ignored so a cached Session row cannot create a frame for a removed device.
+     */
+    ensureKeepAliveDevice(deviceId: DeviceId): void;
+    /**
      * Switch modes through the Host. The Host persists the mode and immediately
      * stops/starts merging remote rows into the local surface; the resulting
      * snapshot is applied here. `targetDeviceId` selects a remote tab; omitting

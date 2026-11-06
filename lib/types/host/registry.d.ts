@@ -48,6 +48,9 @@ export declare class DeviceRegistry {
     private activeSessionClientId;
     private activeSessionIsRemote;
     private activeSessionDeviceId;
+    private activeSessionId;
+    /** The one framed device currently rendered as the aggregated pane. */
+    private paneEmbeddedDeviceId;
     private revision;
     private displayMode;
     private gitMatchRunner;
@@ -59,6 +62,10 @@ export declare class DeviceRegistry {
     private readonly authStates;
     /** Durable mirror of each device catalog (see {@link DeviceCatalogCache}). */
     private readonly catalogs;
+    /** Injected Native Pane bridge lifecycle and last page selection per device. */
+    private readonly nativePanes;
+    /** Previous connection state per device, so workspace rows are recomputed on a real transition. */
+    private readonly lastDeviceStates;
     private uiPreferences;
     private catalogPersistTimer;
     constructor(dataFilePath: string, secretsFilePath: string, localHost: LocalHostProvider, options?: {
@@ -102,6 +109,21 @@ export declare class DeviceRegistry {
      * the scope back to a previously selected Session.
      */
     setActiveSession(sessionId: string | undefined, requestSeq?: number, clientId?: string): boolean;
+    /**
+     * Keep exactly one device frame in embedded mode (remote sidebar hidden) and
+     * restore every other frame's sidebar for full native rendering.
+     */
+    private syncNativePaneEmbedding;
+    /**
+     * Ask the framed page of the active remote device to show the selected
+     * Session. Called on every selection and when a bridge becomes ready; the
+     * proxy queues the command until then, so an iframe that is still loading
+     * still lands on the right conversation.
+     */
+    private publishNativePaneSession;
+    private setNativePaneState;
+    private setNativePaneSelection;
+    private withNativePane;
     /** Scope `session/modelCatalog` to the Session currently shown on the right. */
     activeSessionScope(): ActiveSessionScope;
     private notifyModelCatalogChanged;

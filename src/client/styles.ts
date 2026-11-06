@@ -879,6 +879,85 @@ html[data-platform='darwin'] .dsh-md-native-bar {
   pointer-events: none;
 }
 
+/*
+ * Aggregated Native Pane. Geometry is written inline from the measured local
+ * conversation column; the pane keeps its iframe mounted (visibility, not
+ * display) while the bridge is loading, so it can report readiness without a
+ * second navigation.
+ */
+.dsh-md-native-stage[data-scope='pane'] {
+  border-left: 0.5px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-base);
+}
+
+.dsh-md-native-stage[data-scope='pane'][data-visible='false'] {
+  display: flex;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.dsh-md-native-stage-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.dsh-md-pane-bar {
+  flex: none;
+  height: 32px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 10px;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-specific-sidebar-fill, var(--dsw-alias-bg-layer-1));
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  -webkit-app-region: no-drag;
+}
+
+.dsh-md-pane-identity {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.dsh-md-pane-identity .dsh-md-device-chip-wrap,
+.dsh-md-pane-identity .dsh-md-device-chip {
+  min-width: 0;
+  max-width: 230px;
+}
+
+.dsh-md-pane-name {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-primary);
+  font-weight: 500;
+}
+
+.dsh-md-pane-mode {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.dsh-md-pane-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
 .dsh-md-native-frame-wrap {
   position: absolute;
   inset: 0;

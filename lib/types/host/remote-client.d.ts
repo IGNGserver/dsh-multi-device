@@ -132,6 +132,18 @@ export declare class RemoteDeviceClient {
     pendingInteractionList(): readonly RemotePendingInteraction[];
     start(): void;
     stop(): void;
+    /**
+     * A transport generation ended. The last catalog remains visible, but a
+     * Session that was running cannot still be running on an unreachable Host:
+     * report the transition so the sidebar spinner stops and completion becomes
+     * detectable. Pending waterfalls are cancelled in the local UI but kept so a
+     * reconnect can replay them (the remote may still be waiting for an answer).
+     */
+    private markDisconnected;
+    /** Drop every pending waterfall and close its local card (device removed/disabled). */
+    private clearPendingInteractions;
+    /** Re-deliver still-pending waterfalls after the `$events` stream comes back. */
+    private replayPendingInteractions;
     updateConfig(next: DeviceConfig): void;
     reconnectNow(): void;
     /**

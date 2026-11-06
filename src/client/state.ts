@@ -12,6 +12,7 @@
 import type { StateDotState } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useSyncExternalStore } from 'react'
 import {
+  decodeSessionId,
   type DeviceConnectionState,
   type DeviceId,
   type DisplayMode,
@@ -173,7 +174,7 @@ const EMPTY_SNAPSHOT: MultiDeviceSnapshot = {
   logicalWorkspaces: [],
   allPhysicalWorkspaces: [],
   sessionOrigins: {},
-  ui: { sessionRowDeviceDot: false },
+  ui: { sessionRowDeviceDot: false, nativePane: true },
   gitMatch: {
     status: 'idle',
     totalDevices: 0,
@@ -319,6 +320,27 @@ class MultiDeviceClientStore {
       keepAlive.push(activeNative)
       while (keepAlive.length > MAX_KEEP_ALIVE_PAGES) keepAlive.shift()
     }
+    // The aggregated pane keeps the selected remote device's frame mounted so
+    // switching between remote Sessions and local Sessions never reloads it.
+    const paneSession = this.state.activeSessionId
+    const paneDevice = paneSession !== undefined ? decodeSessionId(paneSession) : undefined
+    if (
+      nextDisplayMode === 'aggregated' &&
+      paneDevice?.isRemote === true &&
+      alive.has(paneDevice.deviceId) &&
+      !keepAlive.includes(paneDevice.deviceId)
+    ) {
+      keepAlive.push(paneDevice.deviceId)
+      while (keepAlive.length > MAX_KEEP_ALIVE_PAGES) keepAlive.shift()
+    }
+    if (
+      nextDisplayMode === 'aggregated' &&
+      (snap.ui?.nativePane === false || snap.hostStatus.nativeProxyActive === false)
+    ) {
+      // Do not keep a hidden pane frame alive when the feature is off.
+      const index = keepAlive.indexOf(paneDevice?.deviceId as DeviceId)
+      if (index !== -1) keepAlive.splice(index, 1)
+    }
     this.setState({
       snapshot: snap,
       loading: false,
@@ -340,6 +362,22 @@ class MultiDeviceClientStore {
     keepAlive.push(deviceId)
     while (keepAlive.length > MAX_KEEP_ALIVE_PAGES) keepAlive.shift()
     this.setState({ activeNativeDeviceId: deviceId, keepAliveDeviceIds: keepAlive })
+  }
+
+  /**
+   * Mount (and keep alive) one device frame for the aggregated Native Pane
+   * without entering Native Mode. Idempotent; unknown/disabled devices are
+   * ignored so a cached Session row cannot create a frame for a removed device.
+   */
+  ensureKeepAliveDevice(deviceId: DeviceId): void {
+    if (this.state.snapshot.ui?.nativePane === false) return
+    if (!this.state.snapshot.hostStatus.nativeProxyActive) return
+    const device = this.state.snapshot.devices.find(candidate => candidate.id === deviceId)
+    if (device === undefined || device.keepNativeAlive === false) return
+    if (this.state.keepAliveDeviceIds.includes(deviceId)) return
+    const keepAlive = [...this.state.keepAliveDeviceIds, deviceId]
+    while (keepAlive.length > MAX_KEEP_ALIVE_PAGES) keepAlive.shift()
+    this.setState({ keepAliveDeviceIds: keepAlive })
   }
 
   // ==========================================================================
@@ -429,6 +467,10 @@ class MultiDeviceClientStore {
     this.setState({
       ...(next !== undefined ? { activeSessionId: next } : { activeSessionId: undefined }),
     })
+    if (next !== undefined) {
+      const decoded = decodeSessionId(next)
+      if (decoded.isRemote) this.ensureKeepAliveDevice(decoded.deviceId)
+    }
     const requestSeq = ++this.activeSessionSeq
     return this.callControlPlane<{ accepted: true }>({
       action: 'setActiveSession',

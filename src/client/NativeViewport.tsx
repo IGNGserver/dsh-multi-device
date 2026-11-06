@@ -28,10 +28,13 @@ import {
   StateDot,
   Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { DeviceId, DeviceView } from '../contract.ts'
 import { AuthRequiredPanel } from './AuthPanel.tsx'
+import { useSessionSummary } from './clientServices.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
+import { SessionDeviceChip } from './SessionDeviceChip.tsx'
+import { nativePaneTarget, shouldShowNativePane } from './nativePane.ts'
 import { clientStore, deviceStateToDotState, useMultiDeviceState } from './state.ts'
 
 interface DesktopBrowserBridgeLike {
@@ -301,9 +304,154 @@ export function NativeTabBar({
 }
 
 /**
- * Keep-Alive remote viewports below the tab bar. The local DSH page is never
- * rendered here: when 本机 is active this stage is hidden and the host frame
- * underneath remains visible and interactive.
+ * Measure the local conversation column (centre + right track) so the
+ * aggregated pane covers exactly the local conversation, never the aggregated
+ * sidebar. Re-measured on frame resize, sidebar drag, right-panel toggle and
+ * layout mutations; a zero/invalid box hides the pane instead of covering the
+ * whole window.
+ */
+const useBrowserLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect
+
+function usePaneGeometry(
+  stageRef: React.RefObject<HTMLDivElement | null>,
+  enabled: boolean,
+): React.CSSProperties | undefined {
+  const [style, setStyle] = useState<React.CSSProperties | undefined>(undefined)
+
+  useBrowserLayoutEffect(() => {
+    if (!enabled) {
+      setStyle(undefined)
+      return
+    }
+    const stage = stageRef.current
+    const frame = stage?.closest('[data-shell-overlay]')?.parentElement
+    if (!(frame instanceof HTMLElement)) {
+      setStyle(undefined)
+      return
+    }
+
+    let frameId = 0
+    const measure = (): void => {
+      frameId = 0
+      const center = frame.querySelector('[class*="_centerCol"]')
+      if (!(center instanceof HTMLElement)) {
+        setStyle(undefined)
+        return
+      }
+      const frameRect = frame.getBoundingClientRect()
+      const centerRect = center.getBoundingClientRect()
+      const left = Math.max(0, Math.round(centerRect.left - frameRect.left))
+      const top = Math.max(0, Math.round(centerRect.top - frameRect.top))
+      const width = Math.max(0, Math.round(frameRect.right - centerRect.left))
+      // Stop at the conversation column's bottom edge so the local shell's
+      // bottom status row (if any) stays visible; the right track is covered
+      // horizontally because it lives in the same grid row.
+      const height = Math.max(0, Math.round(centerRect.height))
+      if (width < 160 || height < 120) {
+        setStyle(undefined)
+        return
+      }
+      setStyle({ left, top, width, height, right: 'auto', bottom: 'auto' })
+    }
+    const schedule = (): void => {
+      if (frameId !== 0 || typeof requestAnimationFrame !== 'function') return
+      frameId = requestAnimationFrame(measure)
+    }
+
+    measure()
+    const ResizeObserverCtor = (globalThis as { ResizeObserver?: typeof ResizeObserver }).ResizeObserver
+    const resizeObserver = ResizeObserverCtor === undefined ? undefined : new ResizeObserverCtor(schedule)
+    resizeObserver?.observe(frame)
+    const center = frame.querySelector('[class*="_centerCol"]')
+    if (center instanceof HTMLElement) resizeObserver?.observe(center)
+    const mutationObserver = typeof MutationObserver === 'undefined'
+      ? undefined
+      : new MutationObserver(schedule)
+    mutationObserver?.observe(frame, {
+      attributes: true,
+      attributeFilter: ['style', 'class', 'data-sidebar-collapsed'],
+    })
+    window.addEventListener('resize', schedule)
+
+    return () => {
+      if (frameId !== 0) cancelAnimationFrame(frameId)
+      resizeObserver?.disconnect()
+      mutationObserver?.disconnect()
+      window.removeEventListener('resize', schedule)
+    }
+  }, [enabled, stageRef])
+
+  return style
+}
+
+/** Slim local strip above the framed page: device identity + full-UI handoff. */
+function NativePaneBar({
+  device,
+  sessionId,
+  t,
+  onOpenSettings,
+}: {
+  device: DeviceView
+  sessionId: string
+  t: (key: MultiDeviceLocaleKey) => string
+  onOpenSettings: () => void
+}): React.ReactElement {
+  // A blank remote conversation uses the same device picker as the local hero,
+  // so "start on another device" survives the native pane covering the hero.
+  const summary = useSessionSummary(sessionId)
+  const blank = summary?.blank === true
+  return (
+    <div className="dsh-md-pane-bar" data-state={device.state}>
+      <span className="dsh-md-pane-identity">
+        <SessionDeviceChip
+          sessionId={sessionId}
+          variant={blank ? 'hero' : 'header'}
+          t={t}
+          onOpenSettings={onOpenSettings}
+        />
+        <span className="dsh-md-pane-mode">{t('nativePaneLabel')}</span>
+      </span>
+      <span className="dsh-md-pane-actions">
+        {device.state !== 'connected' && device.state !== 'disabled' && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => { void clientStore.reconnectDevice(device.id) }}
+          >
+            {t('reconnect')}
+          </Button>
+        )}
+        <Tooltip label={t('reloadPage')} side="bottom">
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label={t('reloadPage')}
+            onClick={() => clientStore.reloadNativeDevice(device.id)}
+          >
+            <IconRefreshOutlineRegular size={14} />
+          </Button>
+        </Tooltip>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => { void clientStore.selectNativeDevice(device.id) }}
+        >
+          {t('nativePaneOpenFull')}
+        </Button>
+      </span>
+    </div>
+  )
+}
+
+/**
+ * Remote viewports for both modes:
+ * - Native Mode: full frame below the tab bar.
+ * - Aggregated Mode: a pane covering only the local conversation column while
+ *   a remote Session is selected; the aggregated sidebar stays interactive.
+ *
+ * The pane is visible only after the injected bridge reports the selected raw
+ * Session (see `shouldShowNativePane`). Until then the local mirror remains
+ * visible, so a slow bridge or a version mismatch never shows a blank pane.
  */
 export function NativeViewport({
   t,
@@ -316,29 +464,116 @@ export function NativeViewport({
   const { devices } = state.snapshot
   const isNative = state.displayMode === 'native'
   const activeDevice = devices.find(device => device.id === state.activeNativeDeviceId)
+  const paneEnabled = state.snapshot.ui?.nativePane !== false && state.snapshot.hostStatus.nativeProxyActive
+  const target = paneEnabled
+    ? nativePaneTarget(state.displayMode, state.activeSessionId)
+    : undefined
+  const paneDevice = target === undefined
+    ? undefined
+    : devices.find(device => device.id === target.deviceId)
+  const stageRef = useRef<HTMLDivElement | null>(null)
+  // Measure whenever a pane target exists or a kept-alive frame is mounted, so
+  // the hidden frame keeps a realistic width and does not reflow when shown.
+  const measureStage = !isNative && (target !== undefined || state.keepAliveDeviceIds.length > 0)
+  const geometry = usePaneGeometry(stageRef, measureStage)
+  const paneVisible = shouldShowNativePane({
+    enabled: paneEnabled,
+    target,
+    device: paneDevice,
+    geometryReady: geometry !== undefined,
+  })
 
-  // Keep all keep-alive devices plus the currently selected device mounted.
+  // The framed page visually covers the local conversation, but the local DOM
+  // would still be tabbable underneath. Make the covered columns inert so a
+  // keyboard user cannot operate the hidden mirror through the pane.
+  useEffect(() => {
+    if (isNative) return
+    const stage = stageRef.current
+    const frame = stage?.closest('[data-shell-overlay]')?.parentElement
+    if (!(frame instanceof HTMLElement)) return
+    const targets: HTMLElement[] = []
+    for (const selector of ['[class*="_centerCol"]', '[class*="_rightbarCol"]']) {
+      const element = frame.querySelector(selector)
+      if (element instanceof HTMLElement) targets.push(element)
+    }
+    for (const element of targets) {
+      if (paneVisible) element.setAttribute('inert', '')
+      else element.removeAttribute('inert')
+    }
+    return () => {
+      for (const element of targets) element.removeAttribute('inert')
+    }
+  }, [isNative, paneVisible])
+
+  useEffect(() => {
+    if (target !== undefined) clientStore.ensureKeepAliveDevice(target.deviceId)
+  }, [target?.deviceId])
+
+  // A framed status page cannot recover on its own when the tunnel returns.
+  // Reload exactly once on the same device's non-connected -> connected edge.
+  const previousDevice = useRef<{ id?: DeviceId; state?: DeviceView['state'] }>({
+    ...(paneDevice?.id !== undefined ? { id: paneDevice.id } : {}),
+    ...(paneDevice?.state !== undefined ? { state: paneDevice.state } : {}),
+  })
+  useEffect(() => {
+    const previous = previousDevice.current
+    previousDevice.current = {
+      ...(paneDevice?.id !== undefined ? { id: paneDevice.id } : {}),
+      ...(paneDevice?.state !== undefined ? { state: paneDevice.state } : {}),
+    }
+    if (paneDevice === undefined) return
+    if (
+      previous.id === paneDevice.id &&
+      previous.state !== undefined &&
+      previous.state !== 'connected' &&
+      paneDevice.state === 'connected' &&
+      (paneDevice.nativePaneState === 'idle' || paneDevice.nativePaneState === 'failed')
+    ) {
+      clientStore.reloadNativeDevice(paneDevice.id)
+    }
+  }, [paneDevice])
+
+  // Keep every keep-alive device, the native tab and the pane's device mounted.
   const mountedDeviceIds = new Set<DeviceId>(state.keepAliveDeviceIds)
   if (activeDevice !== undefined) mountedDeviceIds.add(activeDevice.id)
+  if (paneDevice !== undefined) mountedDeviceIds.add(paneDevice.id)
   const mountedDevices = devices.filter(device => mountedDeviceIds.has(device.id))
-  const visible = isNative && activeDevice !== undefined
+
+  const stageVisible = isNative ? activeDevice !== undefined : paneVisible
+  const paneStyle = isNative
+    ? undefined
+    : (geometry ?? { left: 0, top: 0, width: 0, height: 0, right: 'auto', bottom: 'auto' })
 
   return (
     <div
+      ref={stageRef}
       className="dsh-md-native-stage"
-      data-visible={visible ? 'true' : 'false'}
-      aria-hidden={!visible}
+      data-scope={isNative ? 'full' : 'pane'}
+      data-visible={stageVisible ? 'true' : 'false'}
+      data-bridge={paneDevice?.nativePaneState ?? 'idle'}
+      style={paneStyle}
+      aria-hidden={!stageVisible}
     >
-      {mountedDevices.map((device) => (
-        <KeepAliveDeviceFrame
-          key={device.id}
-          device={device}
-          active={visible && device.id === activeDevice?.id}
-          reloadCount={state.reloadCounters[device.id] ?? 0}
+      {!isNative && paneDevice !== undefined && paneVisible && state.activeSessionId !== undefined && (
+        <NativePaneBar
+          device={paneDevice}
+          sessionId={state.activeSessionId}
           t={t}
           onOpenSettings={onOpenSettings}
         />
-      ))}
+      )}
+      <div className="dsh-md-native-stage-body">
+        {mountedDevices.map((device) => (
+          <KeepAliveDeviceFrame
+            key={device.id}
+            device={device}
+            active={isNative ? stageVisible && device.id === activeDevice?.id : device.id === paneDevice?.id}
+            reloadCount={state.reloadCounters[device.id] ?? 0}
+            t={t}
+            onOpenSettings={onOpenSettings}
+          />
+        ))}
+      </div>
     </div>
   )
 }
