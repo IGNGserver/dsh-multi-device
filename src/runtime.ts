@@ -14,6 +14,7 @@ import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:
 import type { Context } from '@deepseek-ai/cordis'
 import type {
   DeviceId,
+  DeviceView,
   ManualWorkspaceRule,
   MultiDeviceSnapshot,
   RemoteSessionCreateInput,
@@ -123,6 +124,7 @@ export function admitMultiDeviceRequest(ctx: Context, req: IncomingMessage): boo
 export interface ControlPlaneRequest {
   readonly action:
     | 'snapshot'
+    | 'diagnostics'
     | 'setDisplayMode'
     | 'upsertDevice'
     | 'removeDevice'
@@ -146,6 +148,142 @@ export interface ControlPlaneRequest {
   readonly payload?: Record<string, unknown>
 }
 
+/**
+ * Browser geometry the Client volunteers with a Diagnostics request. The Host
+ * cannot read the viewport, but a clipped Native Mode bar is a layout fact on
+ * the client side, so the report travels with the request and is echoed back.
+ */
+export interface DiagnosticsClientReport {
+  readonly innerWidth?: number
+  readonly innerHeight?: number
+  readonly devicePixelRatio?: number
+  /** Frame-relative left edge of the Native Mode tab bar. */
+  readonly barLeft?: number
+  /** Frame-relative width before clamping. */
+  readonly barWidth?: number
+  /** Width the bar actually occupies inside the viewport. */
+  readonly barClampedWidth?: number
+  readonly compact?: boolean
+  readonly userAgent?: string
+}
+
+/** One device row of the Diagnostics report. */
+export interface DiagnosticsDevice {
+  readonly id: string
+  readonly name: string
+  readonly enabled: boolean
+  readonly state: DeviceView['state']
+  readonly transportKind: DeviceView['transportKind']
+  readonly protocolVersion: DeviceView['protocolVersion']
+  readonly realtime: boolean
+  readonly remoteDshVersion?: string
+  readonly authState?: DeviceView['authState']
+  readonly sessionCount: number
+  readonly runningSessionCount: number
+  readonly workspaceCount: number
+  readonly pendingApprovalCount: number
+  readonly catalogStale: boolean
+  readonly lastSyncedAt?: number
+  readonly lastError?: string
+}
+
+/** Aggregated snapshot of everything a support report needs to explain a UI state. */
+export interface MultiDeviceDiagnostics {
+  readonly kind: 'dsh-multi-device/diagnostics'
+  readonly generatedAt: number
+  readonly hostId: string
+  readonly displayMode: MultiDeviceSnapshot['displayMode']
+  readonly hostStatus: MultiDeviceSnapshot['hostStatus']
+  readonly counts: {
+    readonly devices: number
+    readonly connectedDevices: number
+    readonly staleDevices: number
+    readonly logicalWorkspaces: number
+    readonly physicalWorkspaces: number
+    readonly runningSessions: number
+  }
+  readonly devices: readonly DiagnosticsDevice[]
+  readonly client?: DiagnosticsClientReport
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === 'string' && value !== '' ? value : undefined
+}
+
+/** Parse the Client's Diagnostics payload; unknown fields are dropped. */
+export function readDiagnosticsClientReport(raw: unknown): DiagnosticsClientReport | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const record = raw as Record<string, unknown>
+  const report: DiagnosticsClientReport = {
+    ...(optionalNumber(record.innerWidth) !== undefined ? { innerWidth: optionalNumber(record.innerWidth) } : {}),
+    ...(optionalNumber(record.innerHeight) !== undefined ? { innerHeight: optionalNumber(record.innerHeight) } : {}),
+    ...(optionalNumber(record.devicePixelRatio) !== undefined
+      ? { devicePixelRatio: optionalNumber(record.devicePixelRatio) }
+      : {}),
+    ...(optionalNumber(record.barLeft) !== undefined ? { barLeft: optionalNumber(record.barLeft) } : {}),
+    ...(optionalNumber(record.barWidth) !== undefined ? { barWidth: optionalNumber(record.barWidth) } : {}),
+    ...(optionalNumber(record.barClampedWidth) !== undefined
+      ? { barClampedWidth: optionalNumber(record.barClampedWidth) }
+      : {}),
+    ...(typeof record.compact === 'boolean' ? { compact: record.compact } : {}),
+    ...(optionalString(record.userAgent) !== undefined ? { userAgent: optionalString(record.userAgent) } : {}),
+  }
+  return Object.keys(report).length === 0 ? undefined : report
+}
+
+/**
+ * Build the Diagnostics report from one Host snapshot.
+ *
+ * The mode is the first field on purpose: a "missing conversations" report is
+ * almost always the Native/Aggregated distinction, and the per-device staging
+ * (`state`, `catalogStale`, counts) explains the rest.
+ */
+export function buildDiagnostics(
+  snapshot: MultiDeviceSnapshot,
+  client?: DiagnosticsClientReport,
+  now = Date.now(),
+): MultiDeviceDiagnostics {
+  const devices: DiagnosticsDevice[] = snapshot.devices.map(device => ({
+    id: String(device.id),
+    name: device.name,
+    enabled: device.enabled,
+    state: device.state,
+    transportKind: device.transportKind,
+    protocolVersion: device.protocolVersion,
+    realtime: device.realtime,
+    ...(device.remoteDshVersion !== undefined ? { remoteDshVersion: device.remoteDshVersion } : {}),
+    ...(device.authState !== undefined ? { authState: device.authState } : {}),
+    sessionCount: device.sessionCount,
+    runningSessionCount: device.runningSessionCount,
+    workspaceCount: device.workspaceCount,
+    pendingApprovalCount: device.pendingApprovalCount,
+    catalogStale: device.catalogStale === true,
+    ...(device.lastSyncedAt !== undefined ? { lastSyncedAt: device.lastSyncedAt } : {}),
+    ...(device.lastError !== undefined ? { lastError: device.lastError } : {}),
+  }))
+  return {
+    kind: 'dsh-multi-device/diagnostics',
+    generatedAt: now,
+    hostId: snapshot.hostId ?? 'unknown',
+    displayMode: snapshot.displayMode,
+    hostStatus: snapshot.hostStatus,
+    counts: {
+      devices: devices.length,
+      connectedDevices: devices.filter(device => device.state === 'connected').length,
+      staleDevices: devices.filter(device => device.catalogStale).length,
+      logicalWorkspaces: snapshot.logicalWorkspaces.length,
+      physicalWorkspaces: snapshot.allPhysicalWorkspaces.length,
+      runningSessions: devices.reduce((total, device) => total + device.runningSessionCount, 0),
+    },
+    devices,
+    ...(client !== undefined ? { client } : {}),
+  }
+}
+
 export class MultiDeviceControlPlane {
   constructor(
     private readonly registry: DeviceRegistry,
@@ -161,6 +299,15 @@ export class MultiDeviceControlPlane {
       switch (request.action) {
         case 'snapshot':
           return { ok: true, value: this.registry.snapshot() }
+
+        case 'diagnostics':
+          return {
+            ok: true,
+            value: buildDiagnostics(
+              this.registry.snapshot(),
+              readDiagnosticsClientReport(payload.client),
+            ),
+          }
 
         case 'setActiveSession': {
           const raw = payload.sessionId

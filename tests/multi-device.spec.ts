@@ -148,9 +148,17 @@ import { buildForwardHeaders } from '../src/host/native-proxy.ts'
 import {
   admitControlPlaneRequest,
   admitMultiDeviceRequest,
+  buildDiagnostics,
   connectionRequestRejection,
   MultiDeviceControlPlane,
+  readDiagnosticsClientReport,
+  type MultiDeviceDiagnostics,
 } from '../src/runtime.ts'
+import {
+  barIsClipped,
+  COMPACT_BAR_WIDTH,
+  measureNativeBar,
+} from '../src/client/barMetrics.ts'
 
 const tempDirs: string[] = []
 function makeTempDir(prefix: string): string {
@@ -4431,6 +4439,159 @@ describe('0e. Snapshot visibility inputs for unread counters', () => {
     try {
       expect(registry.snapshot().archivedSessionIds).toEqual([])
       expect(registry.snapshot().subagentSessionIds).toEqual([])
+    } finally {
+      registry.dispose()
+    }
+  })
+})
+
+describe('0c. Native bar geometry & diagnostics', () => {
+  it('clamps a Host frame that is wider than the viewport', () => {
+    const metrics = measureNativeBar({ innerWidth: 1240, innerHeight: 800, left: 0, width: 2000, now: 1 })
+    expect(metrics.barWidth).toBe(2000)
+    expect(metrics.clampedWidth).toBe(1240)
+    expect(metrics.compact).toBe(false)
+    expect(barIsClipped(metrics)).toBe(true)
+  })
+
+  it('switches to the compact layout below the switch-width threshold', () => {
+    const narrow = measureNativeBar({ innerWidth: 600, innerHeight: 700, left: 0, width: 600, now: 1 })
+    expect(narrow.compact).toBe(true)
+    const boundary = measureNativeBar({ innerWidth: COMPACT_BAR_WIDTH, innerHeight: 700, left: 0, width: COMPACT_BAR_WIDTH, now: 1 })
+    expect(boundary.compact).toBe(false)
+    expect(barIsClipped(boundary)).toBe(false)
+    const clipped = measureNativeBar({ innerWidth: COMPACT_BAR_WIDTH, innerHeight: 700, left: 0, width: 900, now: 1 })
+    expect(clipped.clampedWidth).toBe(COMPACT_BAR_WIDTH)
+    expect(barIsClipped(clipped)).toBe(true)
+  })
+
+  it('keeps the frame width when the viewport is unknown (headless render)', () => {
+    const metrics = measureNativeBar({ innerWidth: 0, innerHeight: 0, left: 0, width: 900, now: 1 })
+    expect(metrics.clampedWidth).toBe(900)
+    expect(metrics.compact).toBe(false)
+  })
+
+  it('parses only known client report fields', () => {
+    expect(readDiagnosticsClientReport(undefined)).toBeUndefined()
+    expect(readDiagnosticsClientReport('nope')).toBeUndefined()
+    expect(readDiagnosticsClientReport({})).toBeUndefined()
+    const report = readDiagnosticsClientReport({
+      innerWidth: 1240,
+      barWidth: 2000,
+      barClampedWidth: 1240,
+      compact: false,
+      userAgent: 'test',
+      secret: 'ignored',
+    })
+    expect(report).toEqual({
+      innerWidth: 1240,
+      barWidth: 2000,
+      barClampedWidth: 1240,
+      compact: false,
+      userAgent: 'test',
+    })
+  })
+
+  it('reports the authoritative mode and per-device staging', () => {
+    const devices = [
+      {
+        id: DeviceId('dev-a'),
+        name: 'ubuntu-dev',
+        enabled: true,
+        state: 'connected',
+        transportKind: 'ssh',
+        targetSummary: 'ssh://ubuntu-dev → 127.0.0.1:3080',
+        keepNativeAlive: true,
+        protocolVersion: '0.2',
+        realtime: true,
+        remoteDshVersion: '0.2.1-rc.5',
+        reconnectAttempt: 0,
+        sessionCount: 148,
+        runningSessionCount: 3,
+        pendingApprovalCount: 1,
+        workspaceCount: 10,
+      },
+      {
+        id: DeviceId('dev-b'),
+        name: 'macos-dev',
+        enabled: true,
+        state: 'error',
+        transportKind: 'ssh',
+        targetSummary: 'ssh://macos-dev → 127.0.0.1:3080',
+        keepNativeAlive: true,
+        protocolVersion: '0.2',
+        realtime: false,
+        reconnectAttempt: 2,
+        sessionCount: 22,
+        runningSessionCount: 0,
+        pendingApprovalCount: 0,
+        workspaceCount: 2,
+        catalogStale: true,
+        lastError: 'ssh: connect to host macos-dev port 22: Connection refused',
+      },
+    ] as unknown as DeviceView[]
+    const snapshot = {
+      revision: 7,
+      hostId: 'host-1',
+      displayMode: 'native',
+      hostStatus: {
+        aggregatedGatewayActive: false,
+        aggregatedGatewayError: 'api-workspace-controller missing',
+        nativeProxyActive: true,
+      },
+      devices,
+      logicalWorkspaces: [{}, {}],
+      allPhysicalWorkspaces: [{}, {}, {}],
+    } as unknown as MultiDeviceSnapshot
+    const diagnostics = buildDiagnostics(
+      snapshot,
+      { innerWidth: 1240, barWidth: 2000, barClampedWidth: 1240, compact: false },
+      42,
+    )
+    expect(diagnostics.kind).toBe('dsh-multi-device/diagnostics')
+    expect(diagnostics.generatedAt).toBe(42)
+    expect(diagnostics.displayMode).toBe('native')
+    expect(diagnostics.hostStatus.aggregatedGatewayActive).toBe(false)
+    expect(diagnostics.counts).toEqual({
+      devices: 2,
+      connectedDevices: 1,
+      staleDevices: 1,
+      logicalWorkspaces: 2,
+      physicalWorkspaces: 3,
+      runningSessions: 3,
+    })
+    expect(diagnostics.devices[1]?.lastError).toContain('Connection refused')
+    expect(diagnostics.devices[0]?.catalogStale).toBe(false)
+    expect(diagnostics.client?.barClampedWidth).toBe(1240)
+  })
+
+  it('echoes a diagnostics request through the control plane', async () => {
+    const dir = makeTempDir('dsh-md-diagnostics-')
+    const registry = new DeviceRegistry(
+      join(dir, 'devices.json'),
+      join(dir, 'secrets.json'),
+      {
+        localPort: () => 3080,
+        localWorkspaces: () => [],
+        localSessionUpdatedAt: () => new Map(),
+        localArchivedSessionIds: () => [],
+        localSubagentSessionIds: () => [],
+      },
+      { allowDirectTransport: true, enableNativeProxy: false },
+    )
+    try {
+      const plane = new MultiDeviceControlPlane(registry)
+      const result = await plane.dispatch({
+        action: 'diagnostics',
+        payload: { client: { innerWidth: 1240, compact: true } },
+      })
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+      const value = result.value as MultiDeviceDiagnostics
+      expect(value.kind).toBe('dsh-multi-device/diagnostics')
+      expect(value.displayMode).toBe(registry.snapshot().displayMode)
+      expect(value.client?.innerWidth).toBe(1240)
+      expect(value.client?.compact).toBe(true)
     } finally {
       registry.dispose()
     }

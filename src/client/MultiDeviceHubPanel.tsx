@@ -49,6 +49,7 @@ import {
   type UpsertDeviceInput,
 } from '../contract.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
+import type { MultiDeviceDiagnostics } from '../runtime.ts'
 import { UnreadCountBadge } from './UnreadCountBadge.tsx'
 import { deviceTargetsForWorkspace } from './sessionDevice.ts'
 import { countableUnreadIds, unreadCountForDevice } from './unreadCounts.ts'
@@ -659,6 +660,9 @@ export function MultiDeviceHubPanel({
   const [deleteTarget, setDeleteTarget] = useState<DeviceView | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [diagnostics, setDiagnostics] = useState<MultiDeviceDiagnostics | null>(null)
+  const [diagnosticsBusy, setDiagnosticsBusy] = useState(false)
+  const [diagnosticsCopied, setDiagnosticsCopied] = useState(false)
   const [toastNotice, setToastNotice] = useState<{
     seq: number
     text: string
@@ -713,6 +717,44 @@ export function MultiDeviceHubPanel({
     }
     setDeleteTarget(null)
     pushToast(t('savedNotice'), 'success')
+  }
+
+  /**
+   * Copy the report text. Clipboard access can be denied in an embedded frame,
+   * so the failure path tells the user to select the visible <pre> instead.
+   */
+  const copyDiagnosticsText = async (value: MultiDeviceDiagnostics): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(value, null, 2))
+      setDiagnosticsCopied(true)
+      pushToast(t('diagnosticsCopied'), 'success')
+    } catch {
+      pushToast(t('diagnosticsCopyFailed'), 'error')
+    }
+  }
+
+  /**
+   * Ask the Host for a support report. The browser adds the viewport and Native
+   * Mode bar geometry it alone can see, so a clipped mode switch shows up in the
+   * report rather than only in a screenshot.
+   */
+  const runDiagnostics = (): void => {
+    if (diagnosticsBusy) return
+    setDiagnosticsBusy(true)
+    setDiagnosticsCopied(false)
+    void clientStore
+      .fetchDiagnostics()
+      .then((res) => {
+        if (!res.ok) {
+          pushToast(`${t('actionFailed')}: ${res.error}`, 'error')
+          return
+        }
+        setDiagnostics(res.value)
+        void copyDiagnosticsText(res.value)
+      })
+      .finally(() => {
+        setDiagnosticsBusy(false)
+      })
   }
 
   return (
@@ -1189,6 +1231,43 @@ export function MultiDeviceHubPanel({
             })}
           </ul>
         ) : null}
+      </div>
+
+      {/* Support report: display mode, per-device staging, and the browser's
+          own viewport/tab-bar geometry in one copyable block. An "empty
+          workspace group" report is decided here instead of by guessing which
+          surface the user is looking at. */}
+      <div className="dsh-md-diagnostics">
+        <div className="dsh-md-pref-row">
+          <div>
+            <div className="dsh-md-pref-title">{t('diagnosticsTitle')}</div>
+            <div className="dsh-md-pref-desc">{t('diagnosticsDesc')}</div>
+          </div>
+          <div className="dsh-md-diagnostics-actions">
+            <Button variant="outline" size="sm" disabled={diagnosticsBusy} onClick={runDiagnostics}>
+              {diagnosticsBusy ? `${t('diagnosticsRun')}…` : t('diagnosticsRun')}
+            </Button>
+            {diagnostics !== null && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => { void copyDiagnosticsText(diagnostics) }}
+              >
+                {diagnosticsCopied ? t('diagnosticsCopied') : t('diagnosticsCopy')}
+              </Button>
+            )}
+          </div>
+        </div>
+        <p className="dsh-md-diagnostics-mode">
+          {t('diagnosticsModeLine')
+            .replace('{mode}', t(state.displayMode === 'native' ? 'modeNative' : 'modeAggregated'))
+            .replace('{devices}', String(snapshot.devices.length))
+            .replace('{connected}', String(snapshot.devices.filter(device => device.state === 'connected').length))
+            .replace('{workspaces}', String(snapshot.logicalWorkspaces.length))}
+        </p>
+        {diagnostics !== null && (
+          <pre className="dsh-md-diagnostics-output">{JSON.stringify(diagnostics, null, 2)}</pre>
+        )}
       </div>
 
       {/* Native Delete Confirmation Modal */}

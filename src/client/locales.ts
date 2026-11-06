@@ -162,6 +162,13 @@ export const zh = {
   authBackLocal: '返回本机',
   authOpenSettings: '打开多设备设置',
   authHint: '若远端 DSH 关闭了 Token 登录，请在远端重新启动 dsh web 后粘贴新的启动链接。',
+  diagnosticsTitle: '诊断信息',
+  diagnosticsDesc: '导出一份可复制的现场快照：当前显示模式、每台设备的连接与工作区/会话计数，以及浏览器视口和标签栏尺寸。侧栏“展开没有对话”一类问题通常能直接看出原因（例如实际处于原生模式、设备目录未同步）。',
+  diagnosticsRun: '生成诊断',
+  diagnosticsCopy: '复制',
+  diagnosticsCopied: '诊断信息已复制',
+  diagnosticsCopyFailed: '复制失败，请手动选择下方文本',
+  diagnosticsModeLine: '当前显示模式：{mode} · 设备 {devices} 台 · 已连接 {connected} 台 · 工作区 {workspaces} 个',
 } as const
 
 export type MultiDeviceLocaleKey = keyof typeof zh
@@ -320,4 +327,11 @@ export const en: Record<MultiDeviceLocaleKey, string> = {
   authBackLocal: 'Back to This Device',
   authOpenSettings: 'Open Multi-Device settings',
   authHint: 'If the remote DSH disabled token sign-in, restart dsh web there and paste the new launch URL.',
+  diagnosticsTitle: 'Diagnostics',
+  diagnosticsDesc: 'Export a copyable snapshot: the current display mode, every device’s connection and workspace/session counts, plus the browser viewport and tab-bar geometry. An empty workspace group is usually explained here (for example still in Native Mode, or a catalog that has not synced yet).',
+  diagnosticsRun: 'Generate diagnostics',
+  diagnosticsCopy: 'Copy',
+  diagnosticsCopied: 'Diagnostics copied',
+  diagnosticsCopyFailed: 'Copy failed; select the text below instead',
+  diagnosticsModeLine: 'Mode: {mode} · {devices} devices · {connected} connected · {workspaces} workspaces',
 }
