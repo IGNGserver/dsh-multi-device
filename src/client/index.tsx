@@ -32,6 +32,7 @@ import {
   SessionRowHoverDeviceSection,
 } from './ModeSwitcherOverlay.tsx'
 import { MultiDeviceHubPanel } from './MultiDeviceHubPanel.tsx'
+import { OfflineDeviceBanner } from './OfflineDeviceBanner.tsx'
 import { installProjectDeviceBadges } from './projectBadges.ts'
 import { SessionDeviceChip } from './SessionDeviceChip.tsx'
 import { clientStore, useMultiDeviceState } from './state.ts'
@@ -408,6 +409,37 @@ export function apply(ctx: ClientContextLike): void {
         locale: LOCALE_NS,
       },
       NewSessionDeviceChip,
+    ),
+  )
+
+  // 6d. Offline banner above the composer. The Host holds the history stream
+  //     open while the device reconnects, so the conversation shows its normal
+  //     skeleton plus this explanation instead of a raw transport error.
+  const SessionOfflineBanner = (props: {
+    sessionId?: string
+    t?: (k: MultiDeviceLocaleKey) => string
+  }): React.ReactElement | null => {
+    const state = useMultiDeviceState()
+    const sessionId = props.sessionId ?? state.activeSessionId
+    if (sessionId === undefined || sessionId === '') return null
+    return (
+      <OfflineDeviceBanner
+        sessionId={sessionId}
+        t={props.t ?? getTranslate()}
+        onOpenSettings={handleOpenSettings}
+      />
+    )
+  }
+
+  ctx.slots.inject('conversation.input.dock', () =>
+    ctx.slots.register(
+      {
+        name: 'conversation.input.dock',
+        id: 'multi-device-offline-banner',
+        order: 10,
+        locale: LOCALE_NS,
+      },
+      SessionOfflineBanner,
     ),
   )
 

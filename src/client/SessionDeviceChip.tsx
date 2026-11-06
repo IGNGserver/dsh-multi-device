@@ -298,6 +298,12 @@ export function SessionDeviceChip({
                     <dd title={device.origin.gitRemote}>{device.origin.gitRemote}</dd>
                   </>
                 )}
+                {device.lastSyncedAt !== undefined && (
+                  <>
+                    <dt>{t('deviceChipLastSynced')}</dt>
+                    <dd>{new Date(device.lastSyncedAt).toLocaleString()}</dd>
+                  </>
+                )}
               </dl>
 
               {offline && device.origin === undefined && (

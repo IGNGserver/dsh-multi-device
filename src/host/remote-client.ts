@@ -19,6 +19,7 @@
 import { randomUUID } from 'node:crypto'
 import WebSocket from 'ws'
 import {
+  type DeviceCatalogCache,
   type DeviceConfig,
   type DeviceConnectionState,
   type DeviceId,
@@ -103,6 +104,11 @@ export interface RemoteDeviceCallbacks {
   readonly onModelCatalogChanged: (deviceId: DeviceId) => void
 }
 
+/** Plain predicate keeps callers from narrowing a live lifecycle field. */
+function isConnectedState(state: DeviceConnectionState): boolean {
+  return state === 'connected'
+}
+
 const BACKOFF_BASE_MS = 600
 const BACKOFF_MAX_MS = 12_000
 
@@ -120,6 +126,10 @@ export class RemoteDeviceClient {
   private lastError: string | undefined
   private reconnectAttempt = 0
   private nativeProxyUrl: string | undefined
+  /** Epoch ms of the last successful catalog sync (live or hydrated from disk). */
+  private lastSyncedAt: number | undefined
+  /** True while the catalog rows predate a live baseline (hydrated cache). */
+  private catalogStale = false
 
   private summaries: RemoteSessionSummary[] = []
   private workspaces: RemoteWorkspaceItem[] = []
@@ -230,7 +240,100 @@ export class RemoteDeviceClient {
       runningSessionCount: runningCount,
       pendingApprovalCount: this.pendingInteractions.size,
       workspaceCount: this.workspaces.length,
+      ...(this.lastSyncedAt !== undefined ? { lastSyncedAt: this.lastSyncedAt } : {}),
+      ...(this.catalogStale ? { catalogStale: true } : {}),
     }
+  }
+
+  /** Current lifecycle state, read through a getter so callers never narrow a stale value. */
+  get connectionState(): DeviceConnectionState {
+    return this.state
+  }
+
+  /** True while this device has a live baseline and can answer RPCs. */
+  isConnected(): boolean {
+    return this.connectionState === 'connected'
+  }
+
+  /**
+   * Seed the in-memory catalog from the persisted cache before the first
+   * connection attempt, so an offline device keeps its sidebar rows after a
+   * Host restart. A later live baseline replaces everything.
+   */
+  hydrateCatalog(cache: DeviceCatalogCache | undefined): void {
+    if (cache === undefined) return
+    if (this.summaries.length > 0 || this.workspaces.length > 0) return
+    this.summaries = cache.sessions.map(session => ({
+      sessionId: session.sessionId,
+      updatedAt: session.updatedAt,
+      agentAvailable: session.agentAvailable,
+      running: session.running,
+      blank: session.blank,
+      ...(session.parentSessionId !== undefined ? { parentSessionId: session.parentSessionId } : {}),
+      ...(session.origin !== undefined ? { origin: session.origin } : {}),
+      ...(session.cwd !== undefined ? { cwd: session.cwd } : {}),
+    }))
+    this.workspaces = cache.workspaces.map(workspace => ({
+      workspaceId: workspace.workspaceId,
+      path: workspace.path,
+      title: workspace.title,
+      sessionIds: [...workspace.sessionIds],
+      createdAt: workspace.createdAt,
+      updatedAt: workspace.updatedAt,
+    }))
+    this.archivedSessionIds = [...cache.archivedSessionIds]
+    this.pinnedSessionIds = [...cache.pinnedSessionIds]
+    if (cache.protocolVersion !== 'unknown') this.protocolVersion = cache.protocolVersion
+    this.lastSyncedAt = cache.syncedAt
+    this.catalogStale = true
+  }
+
+  /** Durable mirror of the current catalog; projections and secrets stay out. */
+  catalogSnapshot(): DeviceCatalogCache {
+    return {
+      deviceId: this.config.id,
+      syncedAt: this.lastSyncedAt ?? 0,
+      protocolVersion: this.protocolVersion,
+      sessions: this.summaries.map(session => ({
+        sessionId: session.sessionId,
+        updatedAt: session.updatedAt,
+        agentAvailable: session.agentAvailable,
+        running: session.running,
+        blank: session.blank,
+        ...(session.parentSessionId !== undefined ? { parentSessionId: session.parentSessionId } : {}),
+        ...(session.origin !== undefined ? { origin: session.origin } : {}),
+        ...(session.cwd !== undefined ? { cwd: session.cwd } : {}),
+      })),
+      workspaces: this.workspaces.map(workspace => ({
+        workspaceId: workspace.workspaceId,
+        path: workspace.path,
+        title: workspace.title,
+        sessionIds: [...workspace.sessionIds],
+        createdAt: workspace.createdAt,
+        updatedAt: workspace.updatedAt,
+      })),
+      archivedSessionIds: [...this.archivedSessionIds],
+      pinnedSessionIds: [...this.pinnedSessionIds],
+    }
+  }
+
+  /**
+   * Wait until the device reaches `connected`, for a Session that is opened
+   * while the tunnel is still coming up. Polling keeps this free of extra
+   * listener lifecycles; the wait is bounded by the caller's timeout.
+   */
+  async waitForConnected(signal: AbortSignal, timeoutMs: number): Promise<boolean> {
+    if (isConnectedState(this.connectionState)) return true
+    if (this.connectionState === 'disabled' || timeoutMs <= 0) return false
+    const deadline = Date.now() + timeoutMs
+    while (!signal.aborted) {
+      if (isConnectedState(this.connectionState)) return true
+      if (!this.running) return false
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) break
+      await sleepWithSignal(Math.min(250, remaining), signal)
+    }
+    return isConnectedState(this.connectionState)
   }
 
   sessionSummaries(): readonly RemoteSessionSummary[] {
@@ -506,6 +609,8 @@ export class RemoteDeviceClient {
         this.connectedAt = Date.now()
         this.lastError = undefined
         this.reconnectAttempt = 0
+        this.lastSyncedAt = Date.now()
+        this.catalogStale = false
         this.callbacks.onStateChanged(this.id)
 
         // Step 4: Hold live streams until disconnection

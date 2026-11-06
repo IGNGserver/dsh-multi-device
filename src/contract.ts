@@ -193,6 +193,55 @@ export interface DeviceView {
   readonly runningSessionCount: number
   readonly pendingApprovalCount: number
   readonly workspaceCount: number
+  /**
+   * Epoch ms when the device catalog was last synced successfully. Present on
+   * cached rows too, so an offline device can say "last synced 12:30" instead
+   * of pretending the list is live.
+   */
+  readonly lastSyncedAt?: number
+  /** True while `sessions`/`workspaces` come from the persisted catalog cache (no live baseline yet). */
+  readonly catalogStale?: boolean
+}
+
+/** One cached remote Session summary; projections are never persisted. */
+export interface CachedSessionSummary {
+  readonly sessionId: string
+  readonly updatedAt: number
+  readonly agentAvailable: boolean
+  readonly running: boolean
+  readonly blank: boolean
+  readonly parentSessionId?: string
+  readonly origin?: 'subagent'
+  readonly cwd?: string
+}
+
+/** One cached remote workspace entry. */
+export interface CachedWorkspace {
+  readonly workspaceId: string
+  readonly path: string
+  readonly title: string
+  readonly sessionIds: readonly string[]
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
+/**
+ * Last-known catalog of one remote device, persisted in the plugin data file.
+ *
+ * The aggregated sidebar must keep an offline device's conversations visible
+ * after a Host restart; the live client keeps the same data in memory, and this
+ * type is the durable mirror. It never carries projections, pending
+ * interactions, or credentials.
+ */
+export interface DeviceCatalogCache {
+  readonly deviceId: DeviceId
+  /** Epoch ms of the last successful baseline. */
+  readonly syncedAt: number
+  readonly protocolVersion: RemoteProtocolVersion
+  readonly sessions: readonly CachedSessionSummary[]
+  readonly workspaces: readonly CachedWorkspace[]
+  readonly archivedSessionIds: readonly string[]
+  readonly pinnedSessionIds: readonly string[]
 }
 
 /** A local private key discovered under `~/.ssh` for the device form. */
