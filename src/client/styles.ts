@@ -1130,6 +1130,86 @@ html[data-platform='darwin'] .dsh-md-native-bar {
   background: var(--dsw-alias-interactive-bg-hover);
 }
 
+.dsh-md-device-chip-label {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+}
+
+.dsh-md-device-menu {
+  width: 340px;
+}
+
+.dsh-md-device-target-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.dsh-md-device-target {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0.5px solid transparent;
+  border-radius: var(--dsw-radius-md);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dsh-md-device-target:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.dsh-md-device-target[data-current='true'] {
+  border-color: var(--dsw-alias-border-l2);
+}
+
+.dsh-md-device-target:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.dsh-md-device-target-name {
+  flex: none;
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsh-md-device-target-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--ds-font-family-code);
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsh-md-device-target-meta {
+  flex: none;
+  font-size: 11px;
+  color: var(--dsw-alias-state-warn-label);
+}
+
+.dsh-md-device-target[data-online='true'] .dsh-md-device-target-meta {
+  color: var(--dsw-alias-state-success-primary);
+}
+
 .dsh-md-fallback-modal {
   width: min(740px, 100%);
 }
