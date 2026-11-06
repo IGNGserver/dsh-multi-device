@@ -32,6 +32,7 @@ import {
   IconRefreshOutlineRegular,
   IconRightUpOutlineRegular,
   IconSettingsOutlineRegular,
+  IconWarningOutlineRegular,
   Pill,
   StateDot,
   Toast,
@@ -85,9 +86,55 @@ function KeepAliveDeviceFrame({
   const targetUrl = resolveSameSiteProxyUrl(device.nativeProxyUrl)
   const authRequired = device.authState === 'required' || device.authState === 'error'
   const containerRef = useRef<HTMLDivElement | null>(null)
+  const frameRef = useRef<HTMLDivElement | null>(null)
+  const activeRef = useRef(active)
   const webviewLeaseRef = useRef<string | undefined>(undefined)
   const [webviewFailed, setWebviewFailed] = useState(false)
   const [reconnectError, setReconnectError] = useState<string | null>(null)
+
+  useEffect(() => {
+    activeRef.current = active
+  }, [active])
+
+  // The frame is cross-origin, so the shell tells it whether its tab/pane is
+  // currently displayed. The bridge uses this signal to gate unread clearing;
+  // IntersectionObserver remains the fallback for Electron guests.
+  useEffect(() => {
+    if (targetUrl === undefined) return
+    const postVisibility = (): void => {
+      const iframe = frameRef.current?.querySelector('iframe')
+      if (iframe === null || iframe === undefined) return
+      let origin = '*'
+      try { origin = new URL(targetUrl).origin } catch { /* keep wildcard */ }
+      try {
+        iframe.contentWindow?.postMessage({ __dshMdVisibility: true, visible: active }, origin)
+      } catch { /* frame may be navigating */ }
+    }
+    postVisibility()
+    const timer = window.setTimeout(postVisibility, 150)
+    return () => window.clearTimeout(timer)
+  }, [active, targetUrl])
+
+  // Switching a tab changes visibility, but does not move DOM focus. Without a
+  // deliberate handoff, keystrokes and Ctrl/Cmd+C can stay in the previous
+  // hidden frame. Focus the newly active page once it is rendered.
+  useEffect(() => {
+    if (!active) return
+    const focusFrame = (): void => {
+      const wrapper = frameRef.current
+      if (wrapper === null) return
+      const webview = wrapper.querySelector('webview') as HTMLElement | null
+      if (webview !== null) {
+        try { webview.focus() } catch { /* webview may not be attached yet */ }
+        return
+      }
+      const iframe = wrapper.querySelector('iframe')
+      try { iframe?.contentWindow?.focus() } catch { /* cross-origin focus is best-effort */ }
+    }
+    focusFrame()
+    const timer = window.setTimeout(focusFrame, 120)
+    return () => window.clearTimeout(timer)
+  }, [active])
 
   useEffect(() => {
     setWebviewFailed(false)
@@ -119,6 +166,9 @@ function KeepAliveDeviceFrame({
         webview.addEventListener(
           'dom-ready',
           () => {
+            try {
+              if (activeRef.current) webview.focus()
+            } catch { /* focus is best-effort */ }
             try {
               const wv = webview as unknown as { getURL?: () => string; loadURL?: (u: string) => Promise<void> }
               if (wv.getURL?.().startsWith('about:blank#')) {
@@ -154,6 +204,7 @@ function KeepAliveDeviceFrame({
 
   return (
     <div
+      ref={frameRef}
       className="dsh-md-native-frame-wrap"
       style={{
         display: active ? 'flex' : 'none',
@@ -192,7 +243,21 @@ function KeepAliveDeviceFrame({
           className="dsh-md-native-iframe"
           src={targetUrl}
           title={`DSH Native - ${device.name}`}
+          allow="clipboard-write; clipboard-read; fullscreen"
+          allowFullScreen
           referrerPolicy="no-referrer"
+          onLoad={(event) => {
+            if (targetUrl === undefined) return
+            let origin = '*'
+            try { origin = new URL(targetUrl).origin } catch { /* keep wildcard */ }
+            try {
+              event.currentTarget.contentWindow?.postMessage(
+                { __dshMdVisibility: true, visible: active },
+                origin,
+              )
+              if (active) event.currentTarget.contentWindow?.focus()
+            } catch { /* frame may be navigating */ }
+          }}
         />
       )}
     </div>
@@ -371,6 +436,16 @@ export function NativeTabBar({
                   {dev.runningSessionCount > 0 && (
                     <span className="dsh-md-muted">
                       {t('runningCount').replace('{count}', String(dev.runningSessionCount))}
+                    </span>
+                  )}
+                  {dev.pendingApprovalCount > 0 && (
+                    <span
+                      className="dsh-md-pending"
+                      title={t('pendingCount').replace('{count}', String(dev.pendingApprovalCount))}
+                      aria-label={t('pendingCount').replace('{count}', String(dev.pendingApprovalCount))}
+                    >
+                      <IconWarningOutlineRegular size={11} />
+                      <span>{dev.pendingApprovalCount}</span>
                     </span>
                   )}
                   {dev.latencyMs !== undefined && (
@@ -708,7 +783,12 @@ export function NativeViewport({
           <KeepAliveDeviceFrame
             key={device.id}
             device={device}
-            active={isNative ? stageVisible && device.id === activeDevice?.id : device.id === paneDevice?.id}
+            active={isNative
+              ? stageVisible && device.id === activeDevice?.id
+              // The aggregated pane can keep the frame mounted while its
+              // geometry is not ready or the bridge is still loading; the
+              // stage is hidden then, so the frame must not report visible.
+              : stageVisible && device.id === paneDevice?.id}
             reloadCount={state.reloadCounters[device.id] ?? 0}
             t={t}
             onOpenSettings={onOpenSettings}

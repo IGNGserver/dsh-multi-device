@@ -97,6 +97,17 @@ export function buildForwardHeaders(
   return out
 }
 
+/** Bound and normalize a remote page title before it enters local window chrome. */
+export function sanitizeBridgeTitle(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const text = value
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 300)
+  return text === '' ? undefined : text
+}
+
 /** Structural equality for a bounded workspace fold map. */
 function sameGroupState(
   left: Readonly<Record<string, boolean>>,
@@ -114,6 +125,8 @@ type NativeBridgeInbound =
   | { readonly type: 'selection'; readonly sessionId?: string | null }
   | { readonly type: 'group-expansion'; readonly groups?: unknown }
   | { readonly type: 'read'; readonly sessionId?: string }
+  | { readonly type: 'title'; readonly title?: string }
+  | { readonly type: 'visibility'; readonly visible?: boolean }
 
 /** Commands the proxy sends into the framed page's bridge. */
 type NativeBridgeOutbound =
@@ -138,6 +151,12 @@ export interface NativeProxyHooks {
   ) => void
   /** Report the raw remote Session the framed page currently shows. */
   readonly onBridgeSelection?: (deviceId: DeviceId, sessionId: string | undefined) => void
+  /** Report the framed page's own `document.title` (empty means no title). */
+  readonly onBridgeTitle?: (deviceId: DeviceId, title: string | undefined) => void
+  /** Report whether at least one framed page for this device is actually visible. */
+  readonly onBridgeVisibility?: (deviceId: DeviceId, visible: boolean) => void
+  /** Persist the port a proxy actually bound, so the next restart keeps the origin. */
+  readonly onPortAllocated?: (deviceId: DeviceId, port: number) => void
   /** Last Host-owned workspace fold state for the bridge's first render. */
   readonly getGroupState?: (deviceId: DeviceId) => Readonly<Record<string, boolean>> | undefined
   /** The framed page reported a fold change the Host should persist. */
@@ -170,6 +189,10 @@ export class NativeDeviceProxy {
   private bridgeState: NativePaneState = 'idle'
   private bridgeError: string | undefined
   private bridgeSessionId: string | undefined
+  private bridgeTitle: string | undefined
+  private bridgeVisible = false
+  /** Per-bridge page visibility; the device is visible if any bridge is. */
+  private readonly bridgeVisibility = new Map<WebSocket, boolean>()
   private bridgeReadyTimer: ReturnType<typeof setTimeout> | undefined
   private pendingOpenSession: string | undefined
   /** Pane mode hides the remote sidebar; native full mode restores it. */
@@ -250,7 +273,7 @@ export class NativeDeviceProxy {
     return this.localPort
   }
 
-  async start(): Promise<void> {
+  async start(preferredPort?: number): Promise<void> {
     if (this.server !== undefined || this.stopped) return
     const server = createServer((req, res) => {
       void this.handleHttp(req, res)
@@ -268,10 +291,40 @@ export class NativeDeviceProxy {
       socket.on('close', () => this.sockets.delete(socket))
     })
 
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject)
-      server.listen(0, '127.0.0.1', () => resolve())
-    })
+    const listenOn = (port: number): Promise<void> =>
+      new Promise<void>((resolve, reject) => {
+        const onError = (error: Error): void => {
+          server.off('listening', onListening)
+          reject(error)
+        }
+        const onListening = (): void => {
+          server.off('error', onError)
+          resolve()
+        }
+        server.once('error', onError)
+        server.once('listening', onListening)
+        server.listen(port, '127.0.0.1')
+      })
+
+    // A stable loopback port keeps the proxy origin stable, which preserves
+    // the remote DSH page's localStorage (current Session, theme, panel sizes)
+    // across Host restarts. Fall back to an ephemeral port only when the saved
+    // one is genuinely unavailable.
+    const preferred = typeof preferredPort === 'number' &&
+      Number.isInteger(preferredPort) &&
+      preferredPort > 0 &&
+      preferredPort <= 65_535
+      ? preferredPort
+      : undefined
+    if (preferred !== undefined) {
+      try {
+        await listenOn(preferred)
+      } catch {
+        await listenOn(0)
+      }
+    } else {
+      await listenOn(0)
+    }
 
     const addr = server.address()
     if (addr !== null && typeof addr === 'object') {
@@ -279,6 +332,14 @@ export class NativeDeviceProxy {
     }
     this.bridgeServer = new WebSocketServer({ noServer: true })
     this.server = server
+    if (this.localPort !== undefined) {
+      try {
+        this.hooks.onPortAllocated?.(this.device.id, this.localPort)
+      } catch {
+        // Persisting the preferred port is an optimization, never a reason to
+        // fail a working proxy.
+      }
+    }
   }
 
   stop(): void {
@@ -290,6 +351,15 @@ export class NativeDeviceProxy {
     this.bridgeClients.clear()
     this.bridgeServer?.close()
     this.bridgeServer = undefined
+    this.bridgeVisibility.clear()
+    if (this.bridgeVisible) {
+      this.bridgeVisible = false
+      this.hooks.onBridgeVisibility?.(this.device.id, false)
+    }
+    if (this.bridgeTitle !== undefined) {
+      this.bridgeTitle = undefined
+      this.hooks.onBridgeTitle?.(this.device.id, undefined)
+    }
     for (const socket of this.sockets) {
       try { socket.destroy() } catch { /* ignore */ }
     }
@@ -721,6 +791,7 @@ export class NativeDeviceProxy {
   /** Own one framed page's bridge socket, its readiness and its selection reports. */
   private attachBridge(ws: WebSocket): void {
     this.bridgeClients.add(ws)
+    this.bridgeVisibility.set(ws, false)
     this.resetBridgeSelection()
     this.setBridgeState('loading')
     this.armBridgeTimer()
@@ -774,12 +845,33 @@ export class NativeDeviceProxy {
       if (message.type === 'read') {
         const sessionId = typeof message.sessionId === 'string' ? message.sessionId : ''
         if (sessionId !== '') this.hooks.onBridgeRead?.(this.device.id, sessionId)
+        return
+      }
+      if (message.type === 'title') {
+        const title = sanitizeBridgeTitle(message.title)
+        if (title === this.bridgeTitle) return
+        this.bridgeTitle = title
+        this.hooks.onBridgeTitle?.(this.device.id, title)
+        return
+      }
+      if (message.type === 'visibility') {
+        this.updateBridgeVisibility(ws, message.visible === true)
       }
     })
 
     ws.on('close', () => {
       this.bridgeClients.delete(ws)
+      this.bridgeVisibility.delete(ws)
+      const aggregateVisible = this.anyBridgeVisible()
+      if (aggregateVisible !== this.bridgeVisible) {
+        this.bridgeVisible = aggregateVisible
+        this.hooks.onBridgeVisibility?.(this.device.id, aggregateVisible)
+      }
       if (this.bridgeClients.size > 0) return
+      if (this.bridgeTitle !== undefined) {
+        this.bridgeTitle = undefined
+        this.hooks.onBridgeTitle?.(this.device.id, undefined)
+      }
       this.clearBridgeTimer()
       this.resetBridgeSelection()
       if (this.bridgeState === 'ready' || this.bridgeState === 'loading') {
@@ -789,6 +881,22 @@ export class NativeDeviceProxy {
     ws.on('error', () => {
       try { ws.close() } catch { /* ignore */ }
     })
+  }
+
+  private anyBridgeVisible(): boolean {
+    for (const visible of this.bridgeVisibility.values()) {
+      if (visible) return true
+    }
+    return false
+  }
+
+  private updateBridgeVisibility(ws: WebSocket, visible: boolean): void {
+    if (this.bridgeVisibility.get(ws) === visible) return
+    this.bridgeVisibility.set(ws, visible)
+    const aggregateVisible = this.anyBridgeVisible()
+    if (aggregateVisible === this.bridgeVisible) return
+    this.bridgeVisible = aggregateVisible
+    this.hooks.onBridgeVisibility?.(this.device.id, aggregateVisible)
   }
 
   private resetBridgeSelection(): void {
@@ -970,7 +1078,7 @@ export class NativeProxyManager {
       )
       this.proxies.set(device.id, proxy)
       try {
-        await proxy.start()
+        await proxy.start(device.nativeProxyPort)
       } catch {
         this.proxies.delete(device.id)
         return undefined

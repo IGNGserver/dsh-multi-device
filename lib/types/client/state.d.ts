@@ -10,9 +10,11 @@
  * @module dsh-multi-device/client/state
  */
 import type { StateDotState } from '@deepseek-ai/dsh-client-ui-primitives';
-import { type DeviceConnectionState, type DeviceId, type DisplayMode, type ManualWorkspaceRule, type MultiDeviceSnapshot, type MultiDeviceUiPreferences, type RemoteSessionCreateInput, type RemoteWorkspaceCreateInput, type SshKeyEntry, type UpsertDeviceInput, type WorkspaceAggregationConfig } from '../contract.ts';
+import { type DeviceConnectionState, DeviceId, type DisplayMode, type ManualWorkspaceRule, type MultiDeviceSnapshot, type MultiDeviceUiPreferences, type RemoteSessionCreateInput, type RemoteWorkspaceCreateInput, type SshKeyEntry, type UpsertDeviceInput, type WorkspaceAggregationConfig } from '../contract.ts';
 import type { ControlPlaneRequest, DiagnosticsClientReport, MultiDeviceDiagnostics } from '../runtime.ts';
 export type HubTabId = 'native' | 'devices' | 'git';
+/** Decode the owning device of a remote Session, or undefined for local/empty. */
+export declare function remoteDeviceForSession(sessionId: string | undefined): DeviceId | undefined;
 /** Map device connection lifecycle states to official DSH `StateDot` states. */
 export declare function deviceStateToDotState(state: DeviceConnectionState): StateDotState;
 /**
@@ -46,6 +48,12 @@ export interface MultiDeviceClientState {
     readonly activeHubTab: HubTabId;
     /** Fallback settings modal open state when the host shell does not expose `sidebar.settings`. */
     readonly settingsModalOpen: boolean;
+    /**
+     * A remote Session to reopen after the next Aggregated Mode snapshot is
+     * applied. Set when leaving a Native device tab so the mode switch returns to
+     * the conversation the user was actually looking at.
+     */
+    readonly pendingAggregatedSessionId?: string;
 }
 declare class MultiDeviceClientStore {
     private state;
@@ -95,6 +103,8 @@ declare class MultiDeviceClientStore {
         ok: boolean;
         error?: string;
     }>;
+    /** Consume the remote Session captured when leaving Native Mode. */
+    takePendingAggregatedSession(): string | undefined;
     /** Switch to a remote device tab, entering Native Mode if necessary. */
     selectNativeDevice(deviceId: DeviceId): Promise<{
         ok: boolean;

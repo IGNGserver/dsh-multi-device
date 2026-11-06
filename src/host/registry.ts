@@ -51,7 +51,7 @@ import {
 import { scanLocalGitRepos, scanRemoteGitRepos, type ScannedRepository } from './git-scan.ts'
 import { requestRemote } from './http-request.ts'
 import { sanitizeGroupState } from './native-bridge.ts'
-import { NativeProxyManager } from './native-proxy.ts'
+import { NativeProxyManager, sanitizeBridgeTitle } from './native-proxy.ts'
 import { ReadStateTracker, type SessionReadState } from './read-state.ts'
 import {
   buildReadSharedStateCommand,
@@ -256,8 +256,14 @@ export class DeviceRegistry {
   private readonly authStates = new Map<DeviceId, { state: DeviceAuthState; error?: string }>()
   /** Durable mirror of each device catalog (see {@link DeviceCatalogCache}). */
   private readonly catalogs = new Map<DeviceId, DeviceCatalogCache>()
-  /** Injected Native Pane bridge lifecycle and last page selection per device. */
-  private readonly nativePanes = new Map<DeviceId, { state: NativePaneState; error?: string; sessionId?: string }>()
+  /** Injected Native Pane bridge lifecycle, last page selection/title, and visibility per device. */
+  private readonly nativePanes = new Map<DeviceId, {
+    state: NativePaneState
+    error?: string
+    sessionId?: string
+    title?: string
+    visible?: boolean
+  }>()
   /** Previous connection state per device, so workspace rows are recomputed on a real transition. */
   private readonly lastDeviceStates = new Map<DeviceId, DeviceConnectionState>()
   /** Host-owned fold state per device, restored into the framed page before its first render. */
@@ -303,6 +309,15 @@ export class DeviceRegistry {
         },
         onBridgeSelection: (deviceId, sessionId) => {
           this.setNativePaneSelection(deviceId, sessionId)
+        },
+        onBridgeTitle: (deviceId, title) => {
+          this.setNativePaneTitle(deviceId, title)
+        },
+        onBridgeVisibility: (deviceId, visible) => {
+          this.setNativePaneVisibility(deviceId, visible)
+        },
+        onPortAllocated: (deviceId, port) => {
+          this.persistNativeProxyPort(deviceId, port)
         },
         getGroupState: deviceId => this.nativeGroups.get(deviceId),
         onGroupState: (deviceId, groups) => {
@@ -471,9 +486,13 @@ export class DeviceRegistry {
     const decoded = decodeSessionId(sessionId)
     if (!decoded.isRemote) return false
     const pane = this.nativePanes.get(decoded.deviceId)
-    return pane?.state === 'ready' && pane.sessionId === decoded.rawSessionId && (
-      this.displayMode === 'native' || this.paneEmbeddedDeviceId === decoded.deviceId
-    )
+    if (pane?.state !== 'ready' || pane.sessionId !== decoded.rawSessionId) return false
+    // A hidden keep-alive page (another Native tab, or an unselected device)
+    // must not absorb a completion. The bridge reports visibility explicitly;
+    // the aggregated pane keeps its existing embedded fallback because that is
+    // the local main view even before the first visibility frame arrives.
+    if (pane.visible === true) return true
+    return this.displayMode === 'aggregated' && this.paneEmbeddedDeviceId === decoded.deviceId
   }
 
   private reconcileRunningForDevice(deviceId: DeviceId): void {
@@ -700,6 +719,16 @@ export class DeviceRegistry {
     this.nativeProxyManager.openSession(deviceId, decoded.rawSessionId)
   }
 
+  /** Ask the native frame on the active remote Session's device to open it. */
+  private openActiveRemoteSessionInNative(): void {
+    if (!this.activeSessionIsRemote || this.activeSessionDeviceId === undefined || this.activeSessionId === undefined) {
+      return
+    }
+    const decoded = decodeSessionId(this.activeSessionId)
+    if (!decoded.isRemote || decoded.deviceId !== this.activeSessionDeviceId) return
+    this.nativeProxyManager.openSession(decoded.deviceId, decoded.rawSessionId)
+  }
+
   private setNativePaneState(
     deviceId: DeviceId,
     state: NativePaneState,
@@ -708,10 +737,14 @@ export class DeviceRegistry {
     const previous = this.nativePanes.get(deviceId)
     const nextError = error?.trim() === '' ? undefined : error
     const nextSessionId = state === 'ready' ? previous?.sessionId : undefined
+    const nextTitle = state === 'ready' ? previous?.title : undefined
+    const nextVisible = state === 'ready' ? previous?.visible === true : false
     if (
       previous?.state === state &&
       previous.error === nextError &&
-      previous.sessionId === nextSessionId
+      previous.sessionId === nextSessionId &&
+      previous.title === nextTitle &&
+      (previous.visible === true) === nextVisible
     ) {
       return
     }
@@ -719,6 +752,8 @@ export class DeviceRegistry {
       state,
       ...(nextError !== undefined ? { error: nextError } : {}),
       ...(nextSessionId !== undefined ? { sessionId: nextSessionId } : {}),
+      ...(nextTitle !== undefined ? { title: nextTitle } : {}),
+      ...(nextVisible ? { visible: true } : {}),
     })
     this.bumpRevision()
     if (state === 'ready') {
@@ -738,11 +773,57 @@ export class DeviceRegistry {
       state: previous?.state ?? 'idle',
       ...(previous?.error !== undefined ? { error: previous.error } : {}),
       ...(sessionId !== undefined ? { sessionId } : {}),
+      ...(previous?.title !== undefined ? { title: previous.title } : {}),
+      ...(previous?.visible === true ? { visible: true } : {}),
     })
     this.bumpRevision()
-    if (sessionId !== undefined) {
-      this.readTracker.markRead(encodeRemoteSessionId(deviceId, sessionId))
-    }
+    // Selecting a Session is not the same as viewing it: keep-alive frames for
+    // other devices select Sessions in the background. The bridge sends an
+    // explicit `read` only while its page is visible, which is the sole clear
+    // signal besides the active local Session.
+  }
+
+  /** Persist the framed page's own document title for window chrome. */
+  private setNativePaneTitle(deviceId: DeviceId, title: string | undefined): void {
+    const previous = this.nativePanes.get(deviceId)
+    const next = sanitizeBridgeTitle(title)
+    if (previous === undefined && next === undefined) return
+    if (previous?.title === next) return
+    this.nativePanes.set(deviceId, {
+      state: previous?.state ?? 'idle',
+      ...(previous?.error !== undefined ? { error: previous.error } : {}),
+      ...(previous?.sessionId !== undefined ? { sessionId: previous.sessionId } : {}),
+      ...(next !== undefined ? { title: next } : {}),
+      ...(previous?.visible === true ? { visible: true } : {}),
+    })
+    this.bumpRevision()
+  }
+
+  /**
+   * Track whether any framed page for this device is actually on screen.
+   * Read clearing and "currently viewed" detection must not treat a hidden
+   * keep-alive page as if the user were reading it.
+   */
+  private setNativePaneVisibility(deviceId: DeviceId, visible: boolean): void {
+    const previous = this.nativePanes.get(deviceId)
+    if (previous === undefined && !visible) return
+    if (previous?.visible === visible) return
+    this.nativePanes.set(deviceId, {
+      state: previous?.state ?? 'idle',
+      ...(previous?.error !== undefined ? { error: previous.error } : {}),
+      ...(previous?.sessionId !== undefined ? { sessionId: previous.sessionId } : {}),
+      ...(previous?.title !== undefined ? { title: previous.title } : {}),
+      ...(visible ? { visible: true } : {}),
+    })
+  }
+
+  /** Persist the actually-bound native proxy port so the origin stays stable. */
+  private persistNativeProxyPort(deviceId: DeviceId, port: number): void {
+    const current = this.configs.get(deviceId)
+    if (current === undefined || current.nativeProxyPort === port) return
+    if (!Number.isInteger(port) || port <= 0 || port > 65_535) return
+    this.configs.set(deviceId, { ...current, nativeProxyPort: port })
+    this.schedulePersist()
   }
 
   private withNativePane(view: DeviceView): DeviceView {
@@ -753,6 +834,7 @@ export class DeviceRegistry {
       nativePaneState: pane.state,
       ...(pane.error !== undefined ? { nativePaneError: pane.error } : {}),
       ...(pane.sessionId !== undefined ? { nativePaneSessionId: pane.sessionId } : {}),
+      ...(pane.title !== undefined ? { nativePaneTitle: pane.title } : {}),
     }
   }
 
@@ -799,6 +881,10 @@ export class DeviceRegistry {
   setDisplayMode(mode: DisplayMode): void {
     if (this.displayMode === mode) return
     this.displayMode = mode
+    // Entering Native Mode from an aggregated remote Session must land on the
+    // owning device tab showing that conversation, not on 本机. The proxy keeps
+    // the command queued until the frame's bridge is ready.
+    if (mode === 'native') this.openActiveRemoteSessionInNative()
     this.saveToDisk()
     this.bumpRevision()
     this.notifyWorkspacesChanged()
@@ -881,6 +967,7 @@ export class DeviceRegistry {
     if (id === LOCAL_DEVICE_ID) {
       return { ok: false, error: '"local" is a reserved device ID' }
     }
+    const previous = this.configs.get(id)
 
     const config: DeviceConfig = {
       id,
@@ -890,6 +977,9 @@ export class DeviceRegistry {
       transport: input.transport,
       auth: input.auth ?? { mode: 'auto' },
       keepNativeAlive: input.keepNativeAlive !== false,
+      ...(previous?.nativeProxyPort !== undefined
+        ? { nativeProxyPort: previous.nativeProxyPort }
+        : {}),
     }
 
     if (input.auth?.credential !== undefined) {

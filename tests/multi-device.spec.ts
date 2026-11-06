@@ -88,6 +88,7 @@ import {
   type WorkspaceControllerLike,
 } from '../src/host/gateway.ts'
 import { nativePaneTarget, resolveSameSiteProxyUrl, shouldShowNativePane } from '../src/client/nativePane.ts'
+import { resolveWindowTitle } from '../src/client/windowTitle.ts'
 import { shouldDecorateProjectRows } from '../src/client/projectBadges.ts'
 import {
   countableUnreadIds,
@@ -109,7 +110,7 @@ import {
   sanitizeGroupState,
 } from '../src/host/native-bridge.ts'
 import { requestRemote } from '../src/host/http-request.ts'
-import { NativeDeviceProxy } from '../src/host/native-proxy.ts'
+import { NativeDeviceProxy, sanitizeBridgeTitle } from '../src/host/native-proxy.ts'
 import { ReadStateTracker } from '../src/host/read-state.ts'
 import {
   buildReadSharedStateCommand,
@@ -3432,6 +3433,8 @@ describe('10. Native Pane bridge, injection and view decisions', () => {
 
     const states: string[] = []
     const selections: (string | undefined)[] = []
+    const titles: (string | undefined)[] = []
+    const visibilities: boolean[] = []
     const groupReports: Record<string, boolean>[] = []
     const readReports: string[] = []
     const proxy = new NativeDeviceProxy(
@@ -3448,6 +3451,8 @@ describe('10. Native Pane bridge, injection and view decisions', () => {
       {
         onBridgeState: (_id, state) => { states.push(state) },
         onBridgeSelection: (_id, sessionId) => { selections.push(sessionId) },
+        onBridgeTitle: (_id, title) => { titles.push(title) },
+        onBridgeVisibility: (_id, visible) => { visibilities.push(visible) },
         getGroupState: () => ({ 'ws-1': true }),
         getUnreadState: () => ['rsess-9'],
         onGroupState: (_id, groups) => { groupReports.push(groups) },
@@ -3483,6 +3488,10 @@ describe('10. Native Pane bridge, injection and view decisions', () => {
       expect(scriptText).toContain('__ModuleLoader__')
       expect(scriptText).toContain('"ws-1":true')
       expect(scriptText).toContain('"rsess-9"')
+      expect(scriptText).toContain('__dshMdClipboard')
+      expect(scriptText).toContain('__dshMdVisibility')
+      expect(scriptText).toContain("type: 'title'")
+      expect(scriptText).toContain("type: 'visibility'")
 
       const messages: { type?: string; sessionId?: string; enabled?: boolean; unreadSessionIds?: string[]; groups?: Record<string, boolean> }[] = []
       ws = new WebSocket(`${origin.replace(/^http/, 'ws')}/__md/bridge?device=dev-bridge`, {
@@ -3515,6 +3524,12 @@ describe('10. Native Pane bridge, injection and view decisions', () => {
       await waitForCondition(() => messages.some(message => message.type === 'set-embedded' && message.enabled === true))
       ws.send(JSON.stringify({ type: 'selection', sessionId: 'rsess-1' }))
       await waitForCondition(() => selections.at(-1) === 'rsess-1')
+      ws.send(JSON.stringify({ type: 'title', title: 'Fix login — DSH' }))
+      await waitForCondition(() => titles.at(-1) === 'Fix login — DSH')
+      ws.send(JSON.stringify({ type: 'visibility', visible: true }))
+      await waitForCondition(() => visibilities.at(-1) === true)
+      ws.send(JSON.stringify({ type: 'visibility', visible: false }))
+      await waitForCondition(() => visibilities.at(-1) === false)
 
       proxy.openSession('rsess-2')
       await waitForCondition(() => messages.some(message => message.type === 'open-session' && message.sessionId === 'rsess-2'))
@@ -3522,6 +3537,232 @@ describe('10. Native Pane bridge, injection and view decisions', () => {
       ws?.close()
       proxy.stop()
       await new Promise<void>(resolve => upstream.close(() => resolve()))
+    }
+  })
+
+  it('reuses a persisted native proxy port so the framed page keeps its origin', async () => {
+    const upstream = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      res.end('<html><head><title>upstream</title></head><body>ok</body></html>')
+    })
+    await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
+    const address = upstream.address()
+    const port = typeof address === 'object' && address !== null ? address.port : 0
+    const base = `http://127.0.0.1:${String(port)}`
+    const makeProxy = (allocated: number[]): NativeDeviceProxy => new NativeDeviceProxy(
+      {
+        id: DeviceId('dev-stable-port'),
+        name: 'stable-port',
+        enabled: true,
+        transport: { kind: 'direct', baseUrl: base },
+        auth: { mode: 'none' },
+      },
+      () => base,
+      new DeviceAuthManager(),
+      undefined,
+      {
+        onPortAllocated: (_id, boundPort) => { allocated.push(boundPort) },
+      },
+    )
+
+    const firstAllocated: number[] = []
+    const first = makeProxy(firstAllocated)
+    try {
+      await first.start()
+      const bound = first.port()
+      expect(bound).toBeGreaterThan(0)
+      first.stop()
+      await new Promise<void>(resolve => setTimeout(resolve, 30))
+
+      const secondAllocated: number[] = []
+      const second = makeProxy(secondAllocated)
+      try {
+        await second.start(bound)
+        expect(second.port()).toBe(bound)
+        expect(secondAllocated.at(-1)).toBe(bound)
+        second.stop()
+      } finally {
+        second.stop()
+      }
+    } finally {
+      first.stop()
+      await new Promise<void>(resolve => upstream.close(() => resolve()))
+    }
+  })
+
+  it('bounds bridge titles and resolves window chrome for native and pane surfaces', () => {
+    expect(sanitizeBridgeTitle('Fix\nlogin \u0000 — DSH')).toBe('Fix login — DSH')
+    expect(sanitizeBridgeTitle('')).toBeUndefined()
+    expect(sanitizeBridgeTitle({ title: 'x' })).toBeUndefined()
+    expect(sanitizeBridgeTitle('x'.repeat(400))).toHaveLength(300)
+
+    const makeDevice = (
+      id: string,
+      name: string,
+      state: DeviceConnectionState,
+      extra: Partial<DeviceView> = {},
+    ): DeviceView => ({
+      id: DeviceId(id),
+      name,
+      enabled: true,
+      state,
+      transportKind: 'ssh',
+      targetSummary: `ssh://${name}`,
+      keepNativeAlive: true,
+      protocolVersion: '0.2',
+      realtime: true,
+      reconnectAttempt: 0,
+      sessionCount: 1,
+      runningSessionCount: 0,
+      pendingApprovalCount: 0,
+      workspaceCount: 1,
+      ...extra,
+    })
+
+    const device = makeDevice('dev-title', 'ubuntu-dev', 'connected', {
+      nativePaneState: 'ready',
+      nativePaneSessionId: 'rsess-1',
+      nativePaneTitle: 'Fix login — DSH',
+    })
+    expect(resolveWindowTitle({
+      displayMode: 'native',
+      activeNativeDeviceId: device.id,
+      devices: [device],
+      nativePaneEnabled: true,
+    })).toBe('Fix login — DSH')
+    expect(resolveWindowTitle({
+      displayMode: 'native',
+      activeNativeDeviceId: device.id,
+      devices: [{ ...device, nativePaneTitle: undefined }],
+      nativePaneEnabled: true,
+    })).toBe('ubuntu-dev')
+    expect(resolveWindowTitle({
+      displayMode: 'native',
+      devices: [device],
+      nativePaneEnabled: true,
+    })).toBeUndefined()
+
+    expect(resolveWindowTitle({
+      displayMode: 'aggregated',
+      activeSessionId: encodeRemoteSessionId(device.id, 'rsess-1'),
+      devices: [device],
+      nativePaneEnabled: true,
+    })).toBe('Fix login — DSH')
+    expect(resolveWindowTitle({
+      displayMode: 'aggregated',
+      activeSessionId: encodeRemoteSessionId(device.id, 'rsess-2'),
+      devices: [device],
+      nativePaneEnabled: true,
+    })).toBeUndefined()
+    expect(resolveWindowTitle({
+      displayMode: 'aggregated',
+      activeSessionId: 'local-session',
+      devices: [device],
+      nativePaneEnabled: true,
+    })).toBeUndefined()
+    expect(resolveWindowTitle({
+      displayMode: 'aggregated',
+      activeSessionId: encodeRemoteSessionId(device.id, 'rsess-1'),
+      devices: [device],
+      nativePaneEnabled: false,
+    })).toBeUndefined()
+  })
+
+  it('overrides document.title and restores the latest DSH-written title', async () => {
+    const proto = {}
+    Object.defineProperty(proto, 'title', {
+      configurable: true,
+      get() { return (this as { __title?: string }).__title ?? '' },
+      set(value: string) { (this as { __title?: string }).__title = String(value) },
+    })
+    const fakeDocument = Object.create(proto) as Record<string, unknown> & { title: string }
+    fakeDocument.__title = 'DSH'
+    fakeDocument.head = {}
+    vi.stubGlobal('document', fakeDocument)
+    try {
+      const { DocumentTitleController } = await import('../src/client/windowTitle.ts')
+      const controller = new DocumentTitleController()
+      expect(controller.install()).toBe(true)
+      fakeDocument.title = 'Local — DSH'
+      expect(fakeDocument.title).toBe('Local — DSH')
+      controller.apply('Remote — DSH')
+      expect(fakeDocument.title).toBe('Remote — DSH')
+      // DSH keeps writing the local Session title while the remote tab owns the
+      // window; the latest write must win when the override is removed.
+      fakeDocument.title = 'New local — DSH'
+      expect(fakeDocument.title).toBe('Remote — DSH')
+      controller.apply(undefined)
+      expect(fakeDocument.title).toBe('New local — DSH')
+      controller.dispose()
+      expect(fakeDocument.title).toBe('New local — DSH')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('copies local text with an execCommand fallback', async () => {
+    const area = {
+      value: '',
+      style: {} as Record<string, string>,
+      setAttribute: () => {},
+      select: () => {},
+      remove: () => {},
+    }
+    const fakeDocument = {
+      createElement: () => area,
+      body: { appendChild: () => {} },
+      getSelection: () => null,
+      execCommand: (command: string) => command === 'copy',
+    }
+    vi.stubGlobal('document', fakeDocument)
+    vi.stubGlobal('navigator', {})
+    try {
+      const { copyText, fallbackCopyText } = await import('../src/client/clipboard.ts')
+      expect(fallbackCopyText('diagnostics')).toBe(true)
+      expect(area.value).toBe('diagnostics')
+      await expect(copyText('diagnostics-2')).resolves.toBe(true)
+      expect(area.value).toBe('diagnostics-2')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('maps only remote Session ids to their owning device', async () => {
+    const { remoteDeviceForSession } = await import('../src/client/state.ts')
+    const deviceId = DeviceId('dev-mode-context')
+    expect(remoteDeviceForSession(encodeRemoteSessionId(deviceId, 'rsess-1'))).toBe(deviceId)
+    expect(remoteDeviceForSession('local-session')).toBeUndefined()
+    expect(remoteDeviceForSession(undefined)).toBeUndefined()
+  })
+
+  it('falls back to another loopback port when the persisted one is occupied', async () => {
+    const blocker = createServer((_req, res) => { res.end('occupied') })
+    await new Promise<void>(resolve => blocker.listen(0, '127.0.0.1', resolve))
+    const blockedAddress = blocker.address()
+    const blockedPort = typeof blockedAddress === 'object' && blockedAddress !== null ? blockedAddress.port : 0
+    const allocated: number[] = []
+    const proxy = new NativeDeviceProxy(
+      {
+        id: DeviceId('dev-port-fallback'),
+        name: 'port-fallback',
+        enabled: true,
+        transport: { kind: 'direct', baseUrl: 'http://127.0.0.1:1' },
+        auth: { mode: 'none' },
+      },
+      () => undefined,
+      new DeviceAuthManager(),
+      undefined,
+      { onPortAllocated: (_id, port) => { allocated.push(port) } },
+    )
+    try {
+      await proxy.start(blockedPort)
+      expect(proxy.port()).toBeGreaterThan(0)
+      expect(proxy.port()).not.toBe(blockedPort)
+      expect(allocated.at(-1)).toBe(proxy.port())
+      proxy.stop()
+    } finally {
+      proxy.stop()
+      await new Promise<void>(resolve => blocker.close(() => resolve()))
     }
   })
 
@@ -3584,6 +3825,14 @@ describe('10. Native Pane bridge, injection and view decisions', () => {
       await waitForCondition(
         () => messages.some(message => message.type === 'group-expansion' && message.groups?.['ws-1'] === true),
       )
+
+      // Entering Native Mode must carry the aggregated remote Session into the
+      // device tab rather than landing on 本机.
+      const openCount = (): number =>
+        messages.filter(message => message.type === 'open-session' && message.sessionId === 'rsess-1').length
+      const beforeNative = openCount()
+      registry.setDisplayMode('native')
+      await waitForCondition(() => openCount() > beforeNative)
     } finally {
       ws?.close()
       registry.dispose()
@@ -3824,6 +4073,116 @@ describe('11. Bridge runtime loader capture', () => {
     expect(groupCalls).toContainEqual({ key: 'ws-2', expanded: true })
 
     expect(() => socket.emit('message', { data: JSON.stringify({ type: 'set-embedded', enabled: true }) })).not.toThrow()
+  })
+
+  it('installs a clipboard fallback and reports title/visibility from the bridge', async () => {
+    class FakeSocket {
+      static instances: FakeSocket[] = []
+      readyState = 1
+      readonly sent: string[] = []
+      private readonly listeners = new Map<string, ((event: unknown) => void)[]>()
+      constructor(_url: string) {
+        FakeSocket.instances.push(this)
+      }
+      addEventListener(type: string, listener: (event: unknown) => void): void {
+        const list = this.listeners.get(type) ?? []
+        list.push(listener)
+        this.listeners.set(type, list)
+      }
+      send(data: string): void {
+        this.sent.push(data)
+      }
+      close(): void {
+        this.readyState = 3
+      }
+      emit(type: string, event: unknown): void {
+        for (const listener of this.listeners.get(type) ?? []) listener(event)
+      }
+    }
+
+    const copied: string[] = []
+    const area = {
+      value: '',
+      style: {} as Record<string, string>,
+      setAttribute: () => {},
+      select: () => {},
+      remove: () => {},
+    }
+    let titleObserverCallback: (() => void) | undefined
+    const windowListeners = new Map<string, ((event: unknown) => void)[]>()
+    const sandbox: Record<string, any> = {
+      document: {
+        currentScript: { src: 'http://127.0.0.1:1/__md/bridge.js?device=dev-clip' },
+        documentElement: {},
+        head: {},
+        title: 'DSH',
+        visibilityState: 'visible',
+        body: { appendChild: () => {} },
+        createElement: () => area,
+        execCommand: (command: string) => {
+          if (command !== 'copy') return false
+          copied.push(area.value)
+          return true
+        },
+        getSelection: () => null,
+        addEventListener: () => {},
+        querySelector: () => null,
+      },
+      navigator: {
+        clipboard: {
+          writeText: () => Promise.reject(new Error('clipboard denied')),
+        },
+      },
+      location: { protocol: 'http:', host: '127.0.0.1:1' },
+      WebSocket: FakeSocket,
+      MutationObserver: class {
+        constructor(callback: () => void) { titleObserverCallback = callback }
+        observe(): void {}
+        disconnect(): void {}
+      },
+      URL,
+      URLSearchParams,
+      JSON,
+      Object,
+      Array,
+      Map,
+      Promise,
+      console,
+      setTimeout: () => 0,
+      clearTimeout: () => {},
+      setInterval: () => 0,
+      clearInterval: () => {},
+      requestAnimationFrame: () => 0,
+      cancelAnimationFrame: () => {},
+      getComputedStyle: () => ({ gridTemplateColumns: '' }),
+      addEventListener: (type: string, listener: (event: unknown) => void) => {
+        const list = windowListeners.get(type) ?? []
+        list.push(listener)
+        windowListeners.set(type, list)
+      },
+    }
+    sandbox.window = sandbox
+
+    runInNewContext(buildNativeBridgeScript(), sandbox, { timeout: 2_000 })
+    const socket = FakeSocket.instances[0]!
+    socket.emit('open', {})
+    await new Promise<void>(resolve => setTimeout(resolve, 0))
+
+    await expect(sandbox.navigator.clipboard.writeText('hello')).resolves.toBeUndefined()
+    expect(copied).toContain('hello')
+
+    sandbox.document.title = 'Fix login — DSH'
+    titleObserverCallback?.()
+    await new Promise<void>(resolve => setTimeout(resolve, 0))
+    const messages = (): { type?: string; title?: string; visible?: boolean }[] =>
+      socket.sent.map(raw => JSON.parse(raw) as { type?: string; title?: string; visible?: boolean })
+    expect(messages().some(message => message.type === 'title' && message.title === 'Fix login — DSH')).toBe(true)
+
+    const messageListener = windowListeners.get('message')?.[0]
+    expect(messageListener).toBeDefined()
+    messageListener?.({ data: { __dshMdVisibility: true, visible: false } })
+    await new Promise<void>(resolve => setTimeout(resolve, 0))
+    expect(messages().some(message => message.type === 'visibility' && message.visible === false)).toBe(true)
   })
 
   it('keeps the sidebar grid item while embedding so the conversation track survives', () => {

@@ -13,6 +13,8 @@ export declare function buildForwardHeaders(incoming: IncomingMessage['headers']
     readonly cookie?: string;
     readonly authorization?: string;
 }): Record<string, string | string[]>;
+/** Bound and normalize a remote page title before it enters local window chrome. */
+export declare function sanitizeBridgeTitle(value: unknown): string | undefined;
 export interface NativeProxyHooks {
     /** Report the credential state observed while proxying a device. */
     readonly onAuthState?: (deviceId: DeviceId, state: 'ok' | 'required' | 'error', error?: string) => void;
@@ -20,6 +22,12 @@ export interface NativeProxyHooks {
     readonly onBridgeState?: (deviceId: DeviceId, state: NativePaneState, error?: string) => void;
     /** Report the raw remote Session the framed page currently shows. */
     readonly onBridgeSelection?: (deviceId: DeviceId, sessionId: string | undefined) => void;
+    /** Report the framed page's own `document.title` (empty means no title). */
+    readonly onBridgeTitle?: (deviceId: DeviceId, title: string | undefined) => void;
+    /** Report whether at least one framed page for this device is actually visible. */
+    readonly onBridgeVisibility?: (deviceId: DeviceId, visible: boolean) => void;
+    /** Persist the port a proxy actually bound, so the next restart keeps the origin. */
+    readonly onPortAllocated?: (deviceId: DeviceId, port: number) => void;
     /** Last Host-owned workspace fold state for the bridge's first render. */
     readonly getGroupState?: (deviceId: DeviceId) => Readonly<Record<string, boolean>> | undefined;
     /** The framed page reported a fold change the Host should persist. */
@@ -50,6 +58,10 @@ export declare class NativeDeviceProxy {
     private bridgeState;
     private bridgeError;
     private bridgeSessionId;
+    private bridgeTitle;
+    private bridgeVisible;
+    /** Per-bridge page visibility; the device is visible if any bridge is. */
+    private readonly bridgeVisibility;
     private bridgeReadyTimer;
     private pendingOpenSession;
     /** Pane mode hides the remote sidebar; native full mode restores it. */
@@ -66,7 +78,7 @@ export declare class NativeDeviceProxy {
     private allowedFramingAncestors;
     private isAllowedCallerOrigin;
     port(): number | undefined;
-    start(): Promise<void>;
+    start(preferredPort?: number): Promise<void>;
     stop(): void;
     /** Current bridge lifecycle, for the Host snapshot. */
     bridgeSnapshot(): {
@@ -108,6 +120,8 @@ export declare class NativeDeviceProxy {
     private handleBridgeUpgrade;
     /** Own one framed page's bridge socket, its readiness and its selection reports. */
     private attachBridge;
+    private anyBridgeVisible;
+    private updateBridgeVisibility;
     private resetBridgeSelection;
     private ensureAuthenticated;
     private recoverAuthentication;

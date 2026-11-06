@@ -43,6 +43,7 @@ import { SessionDeviceChip } from './SessionDeviceChip.tsx'
 import { SessionRowDeviceMarker } from './SessionRowDeviceMarker.tsx'
 import { clientStore, useMultiDeviceState } from './state.ts'
 import { adoptMultiDeviceStyles } from './styles.ts'
+import { installWindowTitle } from './windowTitle.ts'
 
 export const SETTINGS_SECTION_ID = 'multi-device'
 /** Retained alias for backwards compatibility with external callers. */
@@ -202,6 +203,39 @@ function installModeSideEffects(ctx: ClientContextLike): () => void {
   let reconcileAgain = false
   let guarding = false
 
+  /**
+   * Reopen the remote Session that was visible in Native Mode. The aggregated
+   * catalog is refreshed asynchronously, so the row can appear a beat after the
+   * mode snapshot; retry briefly instead of silently dropping the context.
+   */
+  const restoreAggregatedSession = async (sessionId: string): Promise<void> => {
+    const uiWorkspace = ctx.uiWorkspace
+    if (uiWorkspace === undefined) return
+    if (ctx.sessions === undefined) {
+      try {
+        uiWorkspace.openSession(sessionId)
+        void clientStore.setActiveSession(sessionId)
+      } catch { /* ignore */ }
+      return
+    }
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const known = ctx.sessions?.list.getSnapshot().byId[sessionId] !== undefined
+      if (known || attempt === 2) {
+        try {
+          uiWorkspace.openSession(sessionId)
+          void clientStore.setActiveSession(sessionId)
+        } catch {
+          // A disconnected device leaves the previous local Session in place.
+        }
+        return
+      }
+      await new Promise<void>(resolve => {
+        setTimeout(resolve, 180)
+      })
+      try { await ctx.sessions?.refresh() } catch { /* next poll retries */ }
+    }
+  }
+
   const reconcile = async (mode: string): Promise<void> => {
     if (reconciling) {
       reconcileAgain = true
@@ -221,6 +255,12 @@ function installModeSideEffects(ctx: ClientContextLike): () => void {
         // Navigation is best-effort; the Host-side filter already prevents
         // new remote rows from appearing in the local tab.
       }
+    }
+    if (mode === 'aggregated') {
+      // Leaving a Native device tab should return to the conversation that was
+      // on screen there, not to whatever local Session happened to be selected.
+      const pending = clientStore.takePendingAggregatedSession()
+      if (pending !== undefined) await restoreAggregatedSession(pending)
     }
     reconciling = false
     if (reconcileAgain) {
@@ -295,6 +335,7 @@ export function apply(ctx: ClientContextLike): void {
 
   ctx.effect(() => ctx.locale.register(LOCALE_NS, { zh, en }), 'dsh-multi-device: locales')
   ctx.effect(() => clientStore.start(), 'dsh-multi-device: client-store')
+  ctx.effect(() => installWindowTitle(), 'dsh-multi-device: window title')
 
   const getTranslate = (): ((key: MultiDeviceLocaleKey) => string) => {
     try {

@@ -100,6 +100,12 @@ export interface DeviceConfig {
   readonly auth: DeviceAuthConfig
   /** Whether to keep Native Mode page alive in background once opened; defaults to true. */
   readonly keepNativeAlive?: boolean
+  /**
+   * Preferred loopback port for this device's native reverse proxy. Persisted
+   * after the first allocation so the proxy origin (and the remote page's
+   * localStorage) survives Host restarts.
+   */
+  readonly nativeProxyPort?: number
 }
 
 /** Input payload for adding or updating a device. */
@@ -219,6 +225,12 @@ export interface DeviceView {
   readonly nativePaneError?: string
   /** Raw remote Session the framed page currently shows, for no-flash switching. */
   readonly nativePaneSessionId?: string
+  /**
+   * The framed page's own `document.title`, reported by the bridge. The client
+   * uses it for the window/taskbar title while that device is the active tab or
+   * its aggregated Native Pane is visible.
+   */
+  readonly nativePaneTitle?: string
 }
 
 /** One cached remote Session summary; projections are never persisted. */

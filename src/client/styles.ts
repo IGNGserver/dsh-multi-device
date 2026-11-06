@@ -987,6 +987,15 @@ html[data-platform='darwin'] .dsh-md-native-bar {
   font-size: 11px;
 }
 
+.dsh-md-pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--dsw-alias-state-warn-primary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
 .dsh-md-native-stage {
   position: absolute;
   top: calc(var(--dsh-md-native-bar-top) + var(--dsh-md-native-bar-height));
