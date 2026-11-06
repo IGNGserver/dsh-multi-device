@@ -50,7 +50,18 @@ import {
 } from './git-match.ts'
 import { scanLocalGitRepos, scanRemoteGitRepos, type ScannedRepository } from './git-scan.ts'
 import { requestRemote } from './http-request.ts'
+import { sanitizeGroupState } from './native-bridge.ts'
 import { NativeProxyManager } from './native-proxy.ts'
+import { ReadStateTracker, type SessionReadState } from './read-state.ts'
+import {
+  buildReadSharedStateCommand,
+  buildSharedReadDocument,
+  buildWriteSharedStateCommand,
+  isPosixRemoteHome,
+  parseSharedReadDocument,
+  sharedReadStatePath,
+  type SharedReadEntry,
+} from './shared-state.ts'
 import {
   classifyRemoteProtocol,
   RemoteDeviceClient,
@@ -58,7 +69,7 @@ import {
   type RemoteDeviceCallbacks,
 } from './remote-client.ts'
 import { listLocalSshKeys, listSshConfigHosts } from './ssh-config.ts'
-import { probeSshTunnel } from './tunnel.ts'
+import { execSshCommand, probeSshTunnel } from './tunnel.ts'
 
 /**
  * The SSH tunnel can be up while DSH itself still rejects the HTTP call.
@@ -123,11 +134,45 @@ interface PersistedRegistryDocument {
   readonly catalogs?: Record<string, DeviceCatalogCache>
   /** Persisted display preferences. */
   readonly ui?: MultiDeviceUiPreferences
+  /**
+   * Per-device workspace fold state last reported by a native page. Keyed by
+   * device id and then by the remote workspace key used by DSH's sidebar.
+   */
+  readonly nativeGroups?: Record<string, Record<string, boolean>>
+  /** Host-owned unread/read state, keyed by namespaced remote Session id. */
+  readonly readState?: {
+    readonly entries: Record<string, SessionReadState>
+  }
+  /** Stable identity for this Host, used by the optional cross-Host state file. */
+  readonly hostId?: string
 }
 
 const DEFAULT_UI_PREFERENCES: MultiDeviceUiPreferences = {
   sessionRowDeviceDot: false,
   nativePane: true,
+  crossHostReadState: false,
+}
+
+/** Structural equality for a bounded workspace fold map. */
+function sameGroupState(
+  left: Readonly<Record<string, boolean>>,
+  right: Readonly<Record<string, boolean>>,
+): boolean {
+  const leftKeys = Object.keys(left)
+  if (leftKeys.length !== Object.keys(right).length) return false
+  return leftKeys.every(key => left[key] === right[key])
+}
+
+/** Bound one device's persisted fold map; the remote sidebar has far fewer rows. */
+function sanitizeNativeGroups(value: unknown): Record<DeviceId, Record<string, boolean>> {
+  const out: Record<DeviceId, Record<string, boolean>> = {}
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return out
+  for (const [deviceId, groups] of Object.entries(value as Record<string, unknown>)) {
+    if (deviceId === '') continue
+    const clean = sanitizeGroupState(groups)
+    if (Object.keys(clean).length > 0) out[DeviceId(deviceId)] = clean
+  }
+  return out
 }
 
 export interface LocalHostProvider {
@@ -200,8 +245,24 @@ export class DeviceRegistry {
   private readonly nativePanes = new Map<DeviceId, { state: NativePaneState; error?: string; sessionId?: string }>()
   /** Previous connection state per device, so workspace rows are recomputed on a real transition. */
   private readonly lastDeviceStates = new Map<DeviceId, DeviceConnectionState>()
+  /** Host-owned fold state per device, restored into the framed page before its first render. */
+  private readonly nativeGroups = new Map<DeviceId, Record<string, boolean>>()
+  /** Host-owned read/unread state for namespaced remote Sessions. */
+  private readonly readTracker = new ReadStateTracker((sessionId, _state, unreadChanged) => {
+    this.schedulePersist()
+    if (unreadChanged) this.bumpRevision()
+    this.publishUnreadState(sessionId)
+  })
+  /** Stable Host identity (used by the optional cross-Host state file). */
+  private hostId: string = randomUUID()
   private uiPreferences: MultiDeviceUiPreferences = { ...DEFAULT_UI_PREFERENCES }
   private catalogPersistTimer: ReturnType<typeof setTimeout> | undefined
+  private persistTimer: ReturnType<typeof setTimeout> | undefined
+  /** Optional cross-Host read-state polling and per-device push debounce. */
+  private sharedReadStateTimer: ReturnType<typeof setInterval> | undefined
+  private readonly sharedReadStateInFlight = new Set<DeviceId>()
+  private readonly sharedReadStateInitialized = new Set<DeviceId>()
+  private readonly sharedReadStatePushTimers = new Map<DeviceId, ReturnType<typeof setTimeout>>()
 
   constructor(
     private readonly dataFilePath: string,
@@ -228,11 +289,20 @@ export class DeviceRegistry {
         onBridgeSelection: (deviceId, sessionId) => {
           this.setNativePaneSelection(deviceId, sessionId)
         },
+        getGroupState: deviceId => this.nativeGroups.get(deviceId),
+        onGroupState: (deviceId, groups) => {
+          this.setNativeGroupState(deviceId, groups)
+        },
+        getUnreadState: deviceId => this.unreadForDevice(deviceId),
+        onBridgeRead: (deviceId, sessionId) => {
+          this.readTracker.markRead(encodeRemoteSessionId(deviceId, sessionId))
+        },
       },
     )
     this.aggregator = new WorkspaceAggregator()
     this.nativeProxyActive = options.enableNativeProxy !== false
     this.loadFromDisk()
+    this.syncSharedReadStateTimer()
   }
 
   setGatewayStatus(active: boolean, error?: string): void {
@@ -314,7 +384,253 @@ export class DeviceRegistry {
       this.publishNativePaneSession(this.activeSessionDeviceId)
     }
     this.syncNativePaneEmbedding()
+    if (next !== undefined) this.readTracker.markRead(next)
     return changed
+  }
+
+  /**
+   * Clear one remote Session's unread marker. Returns true when this call
+   * actually removed a marker, so callers can distinguish a real transition
+   * from a redundant read touch.
+   */
+  markSessionRead(sessionId: string): boolean {
+    return this.readTracker.markRead(sessionId)
+  }
+
+  /** Local DSH session status, observed through this Host's own event bus. */
+  observeLocalSessionStatus(sessionId: string, running: boolean): void {
+    if (typeof sessionId !== 'string' || sessionId === '') return
+    this.readTracker.observeRunning(sessionId, running)
+  }
+
+  /** Persisted fold state for one device; the bridge injection uses this map. */
+  nativeGroupState(deviceId: DeviceId): Readonly<Record<string, boolean>> | undefined {
+    return this.nativeGroups.get(deviceId)
+  }
+
+  /**
+   * Accept a fold-state report from a framed page. This is deliberately not
+   * part of the UI snapshot: only the device's bridge needs it, and routing it
+   * through revisions would re-render every sidebar row on each fold click.
+   */
+  private setNativeGroupState(deviceId: DeviceId, groups: Readonly<Record<string, boolean>>): void {
+    if (!this.configs.has(deviceId)) return
+    const next = sanitizeGroupState(groups)
+    const previous = this.nativeGroups.get(deviceId)
+    if (previous !== undefined && sameGroupState(previous, next)) return
+    if (Object.keys(next).length === 0) this.nativeGroups.delete(deviceId)
+    else this.nativeGroups.set(deviceId, next)
+    this.schedulePersist()
+    this.nativeProxyManager.setGroupState(deviceId, next)
+  }
+
+  /** Raw remote Session IDs that are unread on one device. */
+  private unreadForDevice(deviceId: DeviceId): string[] {
+    const out: string[] = []
+    for (const sessionId of this.readTracker.unreadIds()) {
+      const decoded = decodeSessionId(sessionId)
+      if (decoded.isRemote && decoded.deviceId === deviceId) out.push(decoded.rawSessionId)
+    }
+    return out
+  }
+
+  /** Push the new unread set to the owning device's framed page. */
+  private publishUnreadState(sessionId: string): void {
+    const decoded = decodeSessionId(sessionId)
+    if (!decoded.isRemote) return
+    this.nativeProxyManager.setUnreadState(decoded.deviceId, this.unreadForDevice(decoded.deviceId))
+    this.scheduleSharedReadStatePush(decoded.deviceId)
+  }
+
+  /**
+   * Reconcile running flags from the authoritative list. DSH can miss a
+   * `api-session/status` frame across a stream gap; the list refresh still
+   * carries the final flag, and a live `true -> false` there is a completion
+   * for the same reason a stream event is.
+   */
+  private reconcileRunningForDevice(deviceId: DeviceId): void {
+    const client = this.clients.get(deviceId)
+    if (client === undefined || !client.isConnected()) return
+    if (client.toView().catalogStale === true) return
+    for (const summary of client.sessionSummaries()) {
+      this.readTracker.observeRunning(
+        encodeRemoteSessionId(deviceId, summary.sessionId),
+        summary.running,
+      )
+    }
+  }
+
+  /** Observe one remote event before it is forwarded to the local mirror. */
+  private observeRemoteFrame(
+    deviceId: DeviceId,
+    frame:
+      | { type: 'emit'; event: string; args: unknown[] }
+      | { type: 'waterfall'; event: string; eventId: string; agentId: string; request: Record<string, unknown> }
+      | { type: 'cancel'; eventId: string },
+  ): void {
+    if (frame.type !== 'emit' || frame.event !== 'api-session/status') return
+    const [sessionId, running] = frame.args
+    if (typeof sessionId !== 'string' || typeof running !== 'boolean') return
+    // `markDisconnected()` deliberately emits `running:false` so local
+    // spinners stop. An outage is not a completion: only a live client may
+    // turn the transition into an unread reminder.
+    const client = this.clients.get(deviceId)
+    if (client === undefined || !client.isConnected()) return
+    this.readTracker.observeRunning(sessionId, running)
+  }
+
+  /**
+   * Optional cross-Host sync. The state file lives in the remote DSH home and
+   * is written only over an existing SSH transport; direct-only devices and
+   * Windows remote homes are skipped rather than guessed at.
+   */
+  /** Seed the transition baseline from a cached catalog without marking it unread. */
+  private seedRunningFromCatalog(client: RemoteDeviceClient): void {
+    for (const summary of client.sessionSummaries()) {
+      if (!summary.running) continue
+      this.readTracker.observeRunning(encodeRemoteSessionId(client.id, summary.sessionId), true)
+    }
+  }
+
+  /** One pull+push per connection once the remote home is known. */
+  private maybeInitializeSharedReadState(deviceId: DeviceId): void {
+    if (!this.uiPreferences.crossHostReadState) return
+    if (this.sharedReadStateInitialized.has(deviceId)) return
+    const client = this.clients.get(deviceId)
+    if (client === undefined || !client.isConnected()) return
+    if (!isPosixRemoteHome(client.toView().remoteHome)) return
+    this.sharedReadStateInitialized.add(deviceId)
+    void this.pullSharedReadState(deviceId).then(() => {
+      this.scheduleSharedReadStatePush(deviceId, 0)
+    })
+  }
+
+  private sharedReadStateTarget(deviceId: DeviceId):
+    | { readonly transport: Extract<DeviceConfig['transport'], { kind: 'ssh' }>; readonly path: string }
+    | undefined {
+    if (!this.uiPreferences.crossHostReadState) return undefined
+    const client = this.clients.get(deviceId)
+    if (client === undefined || !client.isConnected()) return undefined
+    const transport = client.deviceConfig.transport
+    if (transport.kind !== 'ssh') return undefined
+    const remoteHome = client.toView().remoteHome
+    if (!isPosixRemoteHome(remoteHome)) return undefined
+    return { transport, path: sharedReadStatePath(remoteHome!) }
+  }
+
+  private scheduleSharedReadStatePush(deviceId: DeviceId, delayMs = 1_500): void {
+    if (!this.uiPreferences.crossHostReadState) return
+    if (this.sharedReadStateInFlight.has(deviceId)) return
+    if (this.sharedReadStatePushTimers.has(deviceId)) return
+    const timer = setTimeout(() => {
+      this.sharedReadStatePushTimers.delete(deviceId)
+      void this.pushSharedReadState(deviceId)
+    }, delayMs)
+    timer.unref?.()
+    this.sharedReadStatePushTimers.set(deviceId, timer)
+  }
+
+  /** Read the remote file and merge every Host's Session entries locally. */
+  private async pullSharedReadState(deviceId: DeviceId): Promise<void> {
+    const target = this.sharedReadStateTarget(deviceId)
+    if (target === undefined || this.sharedReadStateInFlight.has(deviceId)) return
+    this.sharedReadStateInFlight.add(deviceId)
+    try {
+      const read = await execSshCommand(
+        target.transport,
+        buildReadSharedStateCommand(target.path),
+        8_000,
+      )
+      if (!read.ok) return
+      const doc = parseSharedReadDocument(read.stdout)
+      if (doc !== undefined) this.mergeSharedReadDocument(deviceId, doc)
+    } catch {
+      // Cross-Host sync is best-effort; never break the local unread state.
+    } finally {
+      this.sharedReadStateInFlight.delete(deviceId)
+    }
+  }
+
+  /**
+   * Read-merge-write one Host section. Preserving the other sections is what
+   * makes several Hosts converge; the write only happens after a successful
+   * read so an unreachable file cannot clobber another machine's reminders.
+   */
+  private async pushSharedReadState(deviceId: DeviceId): Promise<void> {
+    const target = this.sharedReadStateTarget(deviceId)
+    if (target === undefined || this.sharedReadStateInFlight.has(deviceId)) return
+    this.sharedReadStateInFlight.add(deviceId)
+    try {
+      const read = await execSshCommand(
+        target.transport,
+        buildReadSharedStateCommand(target.path),
+        8_000,
+      )
+      if (!read.ok) return
+      const existing = parseSharedReadDocument(read.stdout)
+      if (existing !== undefined) this.mergeSharedReadDocument(deviceId, existing)
+
+      const sessions: Record<string, SharedReadEntry> = {}
+      for (const [sessionId, entry] of Object.entries(this.readTracker.entriesSnapshot())) {
+        const decoded = decodeSessionId(sessionId)
+        if (!decoded.isRemote || decoded.deviceId !== deviceId) continue
+        if (decoded.rawSessionId === '__proto__' || decoded.rawSessionId === 'constructor' || decoded.rawSessionId === 'prototype') continue
+        sessions[decoded.rawSessionId] = entry
+      }
+      const doc = buildSharedReadDocument(existing, this.hostId, sessions, Date.now())
+      await execSshCommand(
+        target.transport,
+        buildWriteSharedStateCommand(target.path, doc),
+        15_000,
+      )
+    } catch {
+      // Best-effort, like the pull path.
+    } finally {
+      this.sharedReadStateInFlight.delete(deviceId)
+    }
+  }
+
+  private mergeSharedReadDocument(deviceId: DeviceId, doc: ReturnType<typeof parseSharedReadDocument>): void {
+    if (doc === undefined) return
+    for (const section of Object.values(doc.hosts)) {
+      for (const [rawSessionId, entry] of Object.entries(section.sessions)) {
+        this.readTracker.mergeEntry(encodeRemoteSessionId(deviceId, rawSessionId), entry)
+      }
+    }
+  }
+
+  /** Start/stop the 30s remote scan when the preference changes. */
+  private syncSharedReadStateTimer(): void {
+    if (!this.uiPreferences.crossHostReadState) {
+      if (this.sharedReadStateTimer !== undefined) {
+        clearInterval(this.sharedReadStateTimer)
+        this.sharedReadStateTimer = undefined
+      }
+      this.sharedReadStateInitialized.clear()
+      return
+    }
+    if (this.sharedReadStateTimer !== undefined) return
+    const timer = setInterval(() => {
+      for (const deviceId of this.clients.keys()) {
+        void this.pullSharedReadState(deviceId)
+      }
+    }, 30_000)
+    timer.unref?.()
+    this.sharedReadStateTimer = timer
+    for (const deviceId of this.clients.keys()) {
+      this.maybeInitializeSharedReadState(deviceId)
+      this.scheduleSharedReadStatePush(deviceId, 0)
+    }
+  }
+
+  private schedulePersist(): void {
+    if (this.persistTimer !== undefined) return
+    const timer = setTimeout(() => {
+      this.persistTimer = undefined
+      try { this.saveToDisk() } catch { /* persistence is best-effort */ }
+    }, 800)
+    timer.unref?.()
+    this.persistTimer = timer
   }
 
   /**
@@ -392,6 +708,9 @@ export class DeviceRegistry {
       ...(sessionId !== undefined ? { sessionId } : {}),
     })
     this.bumpRevision()
+    if (sessionId !== undefined) {
+      this.readTracker.markRead(encodeRemoteSessionId(deviceId, sessionId))
+    }
   }
 
   private withNativePane(view: DeviceView): DeviceView {
@@ -479,6 +798,16 @@ export class DeviceRegistry {
       clearTimeout(this.catalogPersistTimer)
       this.catalogPersistTimer = undefined
     }
+    if (this.persistTimer !== undefined) {
+      clearTimeout(this.persistTimer)
+      this.persistTimer = undefined
+    }
+    if (this.sharedReadStateTimer !== undefined) {
+      clearInterval(this.sharedReadStateTimer)
+      this.sharedReadStateTimer = undefined
+    }
+    for (const timer of this.sharedReadStatePushTimers.values()) clearTimeout(timer)
+    this.sharedReadStatePushTimers.clear()
     this.nativeProxyManager.dispose()
   }
 
@@ -562,6 +891,17 @@ export class DeviceRegistry {
     this.authStates.delete(deviceId)
     this.catalogs.delete(deviceId)
     this.nativePanes.delete(deviceId)
+    this.nativeGroups.delete(deviceId)
+    this.sharedReadStateInitialized.delete(deviceId)
+    const pendingPush = this.sharedReadStatePushTimers.get(deviceId)
+    if (pendingPush !== undefined) {
+      clearTimeout(pendingPush)
+      this.sharedReadStatePushTimers.delete(deviceId)
+    }
+    this.readTracker.retain(sessionId => {
+      const decoded = decodeSessionId(sessionId)
+      return !decoded.isRemote || decoded.deviceId !== deviceId
+    })
     this.lastDeviceStates.delete(deviceId)
     if (this.paneEmbeddedDeviceId === deviceId) this.paneEmbeddedDeviceId = undefined
     this.saveToDisk()
@@ -1037,6 +1377,7 @@ export class DeviceRegistry {
       logicalWorkspaces,
       allPhysicalWorkspaces,
       sessionOrigins,
+      unreadSessionIds: this.readTracker.unreadIds(),
       gitMatch: this.gitMatchRun,
       ui: this.uiPreferences,
     }
@@ -1056,10 +1397,14 @@ export class DeviceRegistry {
       nativePane: patch.nativePane === undefined
         ? this.uiPreferences.nativePane
         : patch.nativePane === true,
+      crossHostReadState: patch.crossHostReadState === undefined
+        ? this.uiPreferences.crossHostReadState
+        : patch.crossHostReadState === true,
     }
     this.saveToDisk()
     this.bumpRevision()
     this.syncNativePaneEmbedding()
+    this.syncSharedReadStateTimer()
     return this.uiPreferences
   }
 
@@ -1122,6 +1467,12 @@ export class DeviceRegistry {
         // logical workspace keeps its old path and device until an unrelated
         // workspace event happens to arrive.
         const state = this.clients.get(deviceId)?.connectionState
+        if (state === 'connected') {
+          this.reconcileRunningForDevice(deviceId)
+          this.maybeInitializeSharedReadState(deviceId)
+        } else {
+          this.sharedReadStateInitialized.delete(deviceId)
+        }
         if (state !== undefined && this.lastDeviceStates.get(deviceId) !== state) {
           this.lastDeviceStates.set(deviceId, state)
           this.notifyWorkspacesChanged()
@@ -1144,12 +1495,14 @@ export class DeviceRegistry {
         }
       },
       onRemoteEventFrame: (deviceId, frame) => {
+        this.observeRemoteFrame(deviceId, frame)
         for (const listener of this.eventListeners) listener(deviceId, frame)
       },
       onControlProjectionFrame: (deviceId, frame) => {
         for (const listener of this.projectionListeners) listener(deviceId, frame)
       },
-      onWorkspacesChanged: () => {
+      onWorkspacesChanged: (deviceId) => {
+        this.reconcileRunningForDevice(deviceId)
         this.bumpRevision()
         this.notifyWorkspacesChanged()
         this.scheduleCatalogPersist()
@@ -1166,6 +1519,7 @@ export class DeviceRegistry {
       client = new RemoteDeviceClient(config, this.authManager, callbacks)
       client.hydrateCatalog(this.catalogs.get(config.id))
       this.clients.set(config.id, client)
+      this.seedRunningFromCatalog(client)
     } else {
       client.updateConfig(config)
     }
@@ -1232,6 +1586,9 @@ export class DeviceRegistry {
     let migratedSecrets = false
     try {
       const raw = JSON.parse(readFileSync(this.dataFilePath, 'utf8')) as Partial<PersistedRegistryDocument>
+      if (typeof raw.hostId === 'string' && /^[A-Za-z0-9-]{8,80}$/.test(raw.hostId)) {
+        this.hostId = raw.hostId
+      }
       if (Array.isArray(raw.devices)) {
         for (const dev of raw.devices) {
           if (dev && typeof dev.id === 'string' && typeof dev.name === 'string' && dev.transport) {
@@ -1259,6 +1616,7 @@ export class DeviceRegistry {
           sessionRowDeviceDot: raw.ui.sessionRowDeviceDot === true,
           // Older documents predate the preference; the pane is the default.
           nativePane: raw.ui.nativePane !== false,
+          crossHostReadState: raw.ui.crossHostReadState === true,
         }
       }
       if (raw.displayMode === 'native') this.displayMode = 'native'
@@ -1269,6 +1627,16 @@ export class DeviceRegistry {
             this.catalogs.set(DeviceId(deviceId), catalog)
           }
         }
+      }
+      for (const [deviceId, groups] of Object.entries(sanitizeNativeGroups(raw.nativeGroups))) {
+        if (this.configs.has(deviceId)) this.nativeGroups.set(deviceId, groups)
+      }
+      if (raw.readState && typeof raw.readState === 'object') {
+        this.readTracker.hydrate(raw.readState.entries)
+        this.readTracker.retain(sessionId => {
+          const decoded = decodeSessionId(sessionId)
+          return decoded.isRemote && this.configs.has(decoded.deviceId)
+        })
       }
       if (raw.gitMatch && typeof raw.gitMatch === 'object') {
         const restored = raw.gitMatch as GitMatchRun
@@ -1340,6 +1708,7 @@ export class DeviceRegistry {
     const dir = dirname(this.dataFilePath)
     mkdirSync(dir, { recursive: true })
     const tmp = `${this.dataFilePath}.${randomUUID()}.tmp`
+    const readEntries = this.readTracker.entriesSnapshot()
     const doc: PersistedRegistryDocument = {
       version: 1,
       devices: [...this.configs.values()],
@@ -1347,8 +1716,15 @@ export class DeviceRegistry {
       displayMode: this.displayMode,
       gitMatch: this.gitMatchRun,
       ui: this.uiPreferences,
+      hostId: this.hostId,
       ...(this.catalogs.size > 0
         ? { catalogs: Object.fromEntries(this.catalogs) }
+        : {}),
+      ...(this.nativeGroups.size > 0
+        ? { nativeGroups: Object.fromEntries(this.nativeGroups) }
+        : {}),
+      ...(Object.keys(readEntries).length > 0
+        ? { readState: { entries: readEntries } }
         : {}),
     }
     try {

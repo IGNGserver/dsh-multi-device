@@ -207,6 +207,31 @@ export function apply(ctx: Context, config?: Config): void {
     },
   )
 
+  // Seed local running baselines so a completion observed after a reload is
+  // still a real transition rather than a first `false`.
+  try {
+    for (const agent of getLocalAgents()?.list?.() ?? []) {
+      if (agent.status === 'running') registry.observeLocalSessionStatus(String(agent.id), true)
+    }
+  } catch {
+    // Best-effort: the status event path still covers later transitions.
+  }
+
+  // Local Sessions share the same Host-owned unread set as remote Sessions, so
+  // several browsers attached to this Host agree on local reminders too.
+  ctx.effect(() => {
+    const on = (ctx as unknown as {
+      on?: (event: string, listener: (sessionId: string, running: boolean) => void) => (() => void) | void
+    }).on
+    if (typeof on !== 'function') return () => {}
+    const dispose = on.call(ctx, 'api-session/status', (sessionId, running) => {
+      if (typeof sessionId === 'string' && typeof running === 'boolean') {
+        registry.observeLocalSessionStatus(sessionId, running)
+      }
+    })
+    return typeof dispose === 'function' ? dispose : () => {}
+  }, 'dsh-multi-device: local session status')
+
   if (features.autoGitAggregate === false) {
     registry.aggregator.setConfig({ autoGitAggregate: false })
   }

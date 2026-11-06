@@ -20,6 +20,14 @@ export interface NativeProxyHooks {
     readonly onBridgeState?: (deviceId: DeviceId, state: NativePaneState, error?: string) => void;
     /** Report the raw remote Session the framed page currently shows. */
     readonly onBridgeSelection?: (deviceId: DeviceId, sessionId: string | undefined) => void;
+    /** Last Host-owned workspace fold state for the bridge's first render. */
+    readonly getGroupState?: (deviceId: DeviceId) => Readonly<Record<string, boolean>> | undefined;
+    /** The framed page reported a fold change the Host should persist. */
+    readonly onGroupState?: (deviceId: DeviceId, groups: Record<string, boolean>) => void;
+    /** Raw remote Session IDs whose completion is unread on the Host. */
+    readonly getUnreadState?: (deviceId: DeviceId) => readonly string[] | undefined;
+    /** The framed page opened a Session and considers its unread marker read. */
+    readonly onBridgeRead?: (deviceId: DeviceId, sessionId: string) => void;
 }
 /** Backwards-compatible alias for callers that only cared about auth hooks. */
 export type NativeProxyAuthHooks = NativeProxyHooks;
@@ -45,8 +53,13 @@ export declare class NativeDeviceProxy {
     private pendingOpenSession;
     /** Pane mode hides the remote sidebar; native full mode restores it. */
     private bridgeEmbedded;
+    /** Host-owned workspace fold state, applied before the remote page's first render. */
+    private groupState;
+    /** Host-owned raw Session IDs whose completion is unread. */
+    private unreadState;
     constructor(device: DeviceConfig, getUpstreamBaseUrl: () => string | undefined, authManager: DeviceAuthManager, localOrigin?: (() => string | undefined) | undefined, hooks?: NativeProxyHooks);
     updateDevice(device: DeviceConfig): void;
+    private refreshHostState;
     proxyUrl(): string | undefined;
     private proxyOrigin;
     port(): number | undefined;
@@ -68,6 +81,10 @@ export declare class NativeDeviceProxy {
     requestRefresh(): void;
     /** Switch the same framed page between embedded pane and full native mode. */
     setEmbedded(enabled: boolean): void;
+    /** Apply Host-owned fold state to the framed page and every open client. */
+    setGroupState(groups: Readonly<Record<string, boolean>>): void;
+    /** Apply Host-owned unread state to the framed page. */
+    setUnreadState(unreadSessionIds: readonly string[]): void;
     /** Reset the cached bridge command target (device switched away). */
     clearPendingSession(): void;
     private sendToBridge;
@@ -114,6 +131,10 @@ export declare class NativeProxyManager {
     requestRefresh(deviceId: DeviceId): boolean;
     /** Toggle the remote sidebar for pane vs full native rendering. */
     setEmbedded(deviceId: DeviceId, enabled: boolean): void;
+    /** Push Host-owned fold state to the device's framed page(s). */
+    setGroupState(deviceId: DeviceId, groups: Readonly<Record<string, boolean>>): void;
+    /** Push Host-owned unread Session IDs to the device's framed page(s). */
+    setUnreadState(deviceId: DeviceId, unreadSessionIds: readonly string[]): void;
     removeProxy(deviceId: DeviceId): void;
     dispose(): void;
 }

@@ -33,6 +33,9 @@
   - 其余设备标签在顶栏下方加载对应远端设备完整的 DSH Web 页面，保留远端自己的 DSH 版本、主题、已装插件与界面效果。
   - 每个设备拥有独立的本地环回反向代理（自动完成 `Host`/`Origin` 归一化、Cookie 注入、WebSocket `/api/remote.mux` 升级转发、一次性代理 token 与 `frame-ancestors` 本地白名单），同时适配 Electron Desktop `<webview>`（`dshDesktop.browser`）与标准 `<iframe>`。
   - **DOM 级后台保活**：已打开的设备页面在切换标签或切回聚合模式时常驻 DOM（`display: none`），实现 **0ms 瞬时切换**，不丢失滚动位置、未发送草稿与实时流连接。
+  - **文件夹展开状态由 Host 记住**：原生页首次渲染前就把该设备上次的工作区展开/折叠状态注入 DSH 的 `uiWorkspace`，因此 Host/Desktop 重启、代理端口变化或 Electron 存储分区变化都不会让所有文件夹回到默认折叠；同一 Host 的多个客户端也会互相同步。首次打开保持 DSH 默认折叠，只记住之后的改动。
+  - **未读/已读跨客户端一致**：Host 观察本地与远端 `api-session/status` 的 `running → false`，统一维护未读集合，并在聚合侧栏与原生远端页面上覆盖 DSH 页面本地的「已完成」提醒。同一 Host 上任一端打开会话都会清掉其他端的提醒；刷新或重启后未读仍在。设备掉线不会被误判成「刚完成」。
+  - **可选跨 Host 共享**：仅当多台电脑各自运行 DSH Host 时，可在「设置 → 多设备 → 跨 DSH Host 同步未读状态」开启。届时通过现有 SSH 在远端 DSH 家目录写入一个只含 Session ID 与时间戳的 `read-state.json`；不安装远端插件，也不上传消息内容。默认关闭。
 - **双向故障隔离**：
   - 聚合模式网关（`AggregatedGateway`）与原生模式代理/控制面（`NativeProxyManager` + `/multi-device/api`）完全解耦。即使远端 DSH 版本升级导致 `/api` 聚合接口不兼容，原生模式与设备管理中枢依然可用；反之亦然。
   - 模式状态由 Host 持久化，因此重启后本地页面仍按正确的聚合/本机边界渲染。
@@ -138,13 +141,16 @@ dsh plugin --profile desktop add file:$(pwd)
 │   │   ├── tunnel.ts                # 双引擎 SSH 本地端口转发与退避重连 (system-ssh + ssh2)
 │   │   ├── auth.ts                  # DSH 0.2/0.1 鉴权管理、Token 兑换与 SSH 自动密钥引导
 │   │   ├── native-proxy.ts          # 原生模式/原生窗格独立本地反向代理（HTTP + WebSocket 升级转发 + HTML 注入）
-│   │   ├── native-bridge.ts         # 注入远端页面的 bridge 脚本与 HTML 注入工具（纯函数，可单测）
+│   │   ├── native-bridge.ts         # 注入远端页面的 bridge 脚本、Host 折叠/未读状态首屏前缀与 HTML 注入工具
+│   │   ├── read-state.ts            # Host 侧未读/已读状态机（running 转换、跨 Host 合并、上限裁剪）
+│   │   ├── shared-state.ts          # 可选的跨 Host `read-state.json` 序列化、合并与 SSH 读写命令
 │   │   ├── git-aggregator.ts        # Git Remote 自动探测（含 worktree）与逻辑工作区聚合引擎
 │   │   ├── remote-client.ts         # 跨版本（0.2.x / 0.1.x）远端 DSH 客户端与多路复用流泵
-│   │   ├── registry.ts              # 设备/工作区注册表、Host 侧模式持久化与聚合过滤开关
+│   │   ├── registry.ts              # 设备/工作区注册表、Host 侧模式/折叠/未读持久化与聚合过滤
 │   │   └── gateway.ts               # 聚合模式 Host 服务桥接；本地模式只透传本地 Session/Workspace
 │   └── client/
 │       ├── index.tsx                # Browser 插件入口（Slots、模式副作用、主动会话上报与多语言）
+│       ├── readState.ts             # 聚合页 `uiSession.sessionStatus` 的未读覆盖层（仅远端 ID）
 │       ├── state.ts                 # Host 模式镜像、SSE 同步、本机 tab、会话模型作用域与保活 LRU 管理
 │       ├── NativeViewport.tsx       # 原生模式常驻 tab bar（含最右侧聚合模式按钮）、聚合窗格与 Keep-Alive 容器（<webview>/<iframe>）
 │       ├── nativePane.ts            # 原生窗格可见性/目标会话的纯函数决策

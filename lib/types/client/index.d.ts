@@ -21,6 +21,7 @@
  */
 import React from 'react';
 import { type MultiDeviceLocaleKey } from './locales.ts';
+import { type SessionStatusSource } from './readState.ts';
 export declare const SETTINGS_SECTION_ID = "multi-device";
 /** Retained alias for backwards compatibility with external callers. */
 export declare const PANEL_ID = "multi-device";
@@ -74,6 +75,9 @@ export interface ClientContextLike {
     };
     sessions?: SessionsServiceLike;
     uiWorkspace?: UiWorkspaceServiceLike;
+    uiSession?: {
+        readonly sessionStatus?: SessionStatusSource;
+    };
     slots: {
         inject(slotName: string, fn: () => (() => void) | void): () => void;
         register(options: Record<string, unknown>, component: (props: any) => React.ReactNode): () => void;

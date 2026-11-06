@@ -31,6 +31,25 @@ export declare const NATIVE_BRIDGE_WORKSPACE_MODULE = "@deepseek-ai/dsh-client-u
  * the proxy can serve it byte-for-byte without another build target.
  */
 export declare const NATIVE_BRIDGE_SCRIPT: string;
+/**
+ * Bound and validate one device's workspace fold state before it crosses the
+ * Host/page boundary. Unknown shapes are dropped rather than injected into
+ * the remote workspace store.
+ */
+export declare function sanitizeGroupState(value: unknown): Record<string, boolean>;
+/** Initial page state served alongside the bridge script. */
+export interface NativeBridgeScriptState {
+    /** Explicit workspace fold state last observed by the Host. */
+    readonly groups?: Readonly<Record<string, boolean>>;
+    /** Raw remote Session IDs whose completion is currently unread. */
+    readonly unread?: readonly string[];
+}
+/**
+ * Build the per-device bridge response. The state prefix runs before the
+ * bridge body and before any DSH module, so the first workspace render already
+ * has the Host's fold state.
+ */
+export declare function buildNativeBridgeScript(state?: NativeBridgeScriptState): string;
 /** Options for {@link injectNativeBridge}. */
 export interface NativeBridgeInjectionOptions {
     readonly deviceId: string;

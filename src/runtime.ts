@@ -141,6 +141,7 @@ export interface ControlPlaneRequest {
     | 'startGitMatch'
     | 'cancelGitMatch'
     | 'setActiveSession'
+    | 'markSessionRead'
     | 'setUiPreferences'
   readonly payload?: Record<string, unknown>
 }
@@ -170,6 +171,18 @@ export class MultiDeviceControlPlane {
           const clientId = typeof payload.clientId === 'string' ? payload.clientId : ''
           this.registry.setActiveSession(sessionId, requestSeq, clientId)
           return { ok: true, value: { accepted: true as const } }
+        }
+
+        case 'markSessionRead': {
+          const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId.trim() : ''
+          if (sessionId === '') {
+            return { ok: false, error: 'sessionId is required' }
+          }
+          const changed = this.registry.markSessionRead(sessionId)
+          return {
+            ok: true,
+            value: { changed, snapshot: this.registry.snapshot() },
+          }
         }
 
         case 'setDisplayMode': {
@@ -281,6 +294,9 @@ export class MultiDeviceControlPlane {
               : {}),
             ...(typeof payload.nativePane === 'boolean'
               ? { nativePane: payload.nativePane }
+              : {}),
+            ...(typeof payload.crossHostReadState === 'boolean'
+              ? { crossHostReadState: payload.crossHostReadState }
               : {}),
           })
           return { ok: true, value: this.registry.snapshot() }

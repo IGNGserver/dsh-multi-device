@@ -43,12 +43,42 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
   try { params = new URL(script.src).searchParams; } catch (error) { return; }
   var deviceId = params.get('device') || '';
 
+  var initialGroups = {};
+  var initialUnread = [];
+  try {
+    if (window.__DSH_MD_GROUPS__ && typeof window.__DSH_MD_GROUPS__ === 'object' && !Array.isArray(window.__DSH_MD_GROUPS__)) {
+      initialGroups = window.__DSH_MD_GROUPS__;
+    }
+    if (Array.isArray(window.__DSH_MD_UNREAD__)) initialUnread = window.__DSH_MD_UNREAD__;
+  } catch (error) {}
+
   var socket = null;
   var retryTimer = null;
   var readySent = false;
   var failedReason = null;
   var captured = null;
   var lastSelection = null;
+
+  // Workspace fold state is owned by the local Host. The injected prefix is
+  // applied before the workspace browser first renders, so there is no
+  // collapsed-then-expanded flash.
+  var groups = normalizeGroups(initialGroups);
+  var groupSyncInstalled = false;
+  var groupSendTimer = null;
+  var groupEchoGuard = false;
+
+  // Session completion reminders are owned by the local Host too. Native and
+  // aggregated surfaces both overlay this set instead of DSH's in-memory one.
+  var unread = {};
+  for (var initialUnreadIndex = 0; initialUnreadIndex < initialUnread.length; initialUnreadIndex += 1) {
+    if (typeof initialUnread[initialUnreadIndex] === 'string' && initialUnread[initialUnreadIndex] !== '') {
+      unread[initialUnread[initialUnreadIndex]] = true;
+    }
+  }
+  var readOverlayInstalled = false;
+  var readOverlayTries = 0;
+  var readListeners = [];
+  var mergedStatusCache = null;
 
   function send(message) {
     if (!socket || socket.readyState !== 1) return false;
@@ -82,9 +112,18 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
   function report() {
     if (!readySent) return;
     var sessionId = currentSelection();
-    if (sessionId === lastSelection) return;
-    lastSelection = sessionId;
-    send({ type: 'selection', sessionId: sessionId });
+    if (sessionId !== lastSelection) {
+      lastSelection = sessionId;
+      send({ type: 'selection', sessionId: sessionId });
+    }
+    // A completion that arrives while its conversation is already on screen
+    // must not leave a reminder behind. Clearing here also covers the Host
+    // snapshot that marks the Session unread a moment before this report.
+    if (sessionId && unread[sessionId] === true) {
+      delete unread[sessionId];
+      notifyRead();
+      send({ type: 'read', sessionId: sessionId });
+    }
   }
 
   function refreshSessions() {
@@ -112,6 +151,239 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
       return;
     }
     run();
+  }
+
+  function normalizeGroups(value) {
+    var out = {};
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return out;
+    var keys = Object.keys(value);
+    for (var i = 0; i < keys.length && i < 1000; i += 1) {
+      var key = keys[i];
+      if (typeof key !== 'string' || key === '' || key.length > 256) continue;
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
+      if (typeof value[key] === 'boolean') out[key] = value[key];
+    }
+    return out;
+  }
+
+  function sameGroups(left, right) {
+    var leftKeys = Object.keys(left);
+    var rightKeys = Object.keys(right);
+    if (leftKeys.length !== rightKeys.length) return false;
+    for (var i = 0; i < leftKeys.length; i += 1) {
+      if (left[leftKeys[i]] !== right[leftKeys[i]]) return false;
+    }
+    return true;
+  }
+
+  function sendGroups() {
+    if (groupSendTimer !== null) return;
+    groupSendTimer = setTimeout(function () {
+      groupSendTimer = null;
+      send({ type: 'group-expansion', groups: groups });
+    }, 120);
+  }
+
+  function applyGroupState(next) {
+    var incoming = normalizeGroups(next);
+    // Keep locally observed keys the Host has not reported yet: a fold click
+    // may be mid-debounce when another client broadcasts its map. DSH's own
+    // retainAccountKeys prunes deleted workspaces on both sides.
+    var merged = {};
+    var existing = Object.keys(groups);
+    for (var existingIndex = 0; existingIndex < existing.length; existingIndex += 1) {
+      merged[existing[existingIndex]] = groups[existing[existingIndex]];
+    }
+    var incomingKeys = Object.keys(incoming);
+    for (var incomingIndex = 0; incomingIndex < incomingKeys.length; incomingIndex += 1) {
+      merged[incomingKeys[incomingIndex]] = incoming[incomingKeys[incomingIndex]];
+    }
+    groups = merged;
+    if (!captured) return;
+    var workspace = captured.uiWorkspace;
+    var view = workspace && workspace.view;
+    if (!view || typeof view.setGroupExpanded !== 'function') return;
+    groupEchoGuard = true;
+    try {
+      for (var i = 0; i < incomingKeys.length; i += 1) {
+        try { view.setGroupExpanded(incomingKeys[i], merged[incomingKeys[i]]); } catch (error) {}
+      }
+    } finally {
+      groupEchoGuard = false;
+    }
+  }
+
+  function installGroupSync(context) {
+    if (groupSyncInstalled) return true;
+    var workspace = context && context.uiWorkspace;
+    var view = workspace && workspace.view;
+    if (!view || typeof view.setGroupExpanded !== 'function') return false;
+    groupSyncInstalled = true;
+    var originalSet = view.setGroupExpanded;
+    view.setGroupExpanded = function (key, expanded) {
+      var result = originalSet.call(this, key, expanded);
+      if (!groupEchoGuard) {
+        try {
+          groups[String(key)] = expanded === true;
+          sendGroups();
+        } catch (error) {}
+      }
+      return result;
+    };
+    var originalRetain = view.retainAccountKeys;
+    if (typeof originalRetain === 'function') {
+      view.retainAccountKeys = function (keys) {
+        var result = originalRetain.call(this, keys);
+        if (!groupEchoGuard) {
+          try {
+            var retained = {};
+            for (var i = 0; i < keys.length; i += 1) {
+              var key = keys[i];
+              if (Object.prototype.hasOwnProperty.call(groups, key)) retained[key] = groups[key];
+            }
+            groups = retained;
+            sendGroups();
+          } catch (error) {}
+        }
+        return result;
+      };
+    }
+    applyGroupState(groups);
+    return true;
+  }
+
+  // Storage-level fallback: even when a future workspace build stops going
+  // through the view.setGroupExpanded action we can still observe the
+  // persisted state and report it. The Host remains authoritative.
+  function installStorageGroupFallback() {
+    try {
+      var proto = window.Storage && window.Storage.prototype;
+      if (!proto || typeof proto.setItem !== 'function' || proto.setItem.__dshMdWrapped) return;
+      var originalSetItem = proto.setItem;
+      var wrapped = function (key, value) {
+        // Capture even when the underlying write throws: some browsers block
+        // third-party localStorage, and the Host mirror is still authoritative.
+        try {
+          if (!groupEchoGuard && typeof key === 'string' && key.indexOf('dsh.workspace.view.') === 0) {
+            var parsed = JSON.parse(String(value));
+            if (parsed && parsed.groupExpansion && typeof parsed.groupExpansion === 'object') {
+              var next = normalizeGroups(parsed.groupExpansion);
+              if (!sameGroups(groups, next)) {
+                groups = next;
+                sendGroups();
+              }
+            }
+          }
+        } catch (error) {}
+        return originalSetItem.apply(this, arguments);
+      };
+      wrapped.__dshMdWrapped = true;
+      proto.setItem = wrapped;
+    } catch (error) {}
+  }
+
+  function sameStatusMap(left, right) {
+    if (left === right) return true;
+    if (!left || !right || left.size !== right.size) return false;
+    var same = true;
+    left.forEach(function (value, key) {
+      var candidate = right.get(key);
+      if (
+        candidate === undefined ||
+        candidate.running !== value.running ||
+        candidate.pendingInteraction !== value.pendingInteraction ||
+        candidate.completionUnread !== value.completionUnread
+      ) {
+        same = false;
+      }
+    });
+    return same;
+  }
+
+  function mergeStatus(base) {
+    if (!base || typeof base.forEach !== 'function') return new Map();
+    var next = new Map();
+    base.forEach(function (value, key) {
+      var unreadNow = unread[key] === true;
+      if (value && value.completionUnread === unreadNow) {
+        next.set(key, value);
+        return;
+      }
+      var copy = {};
+      for (var field in value) copy[field] = value[field];
+      copy.completionUnread = unreadNow;
+      next.set(key, copy);
+    });
+    return next;
+  }
+
+  function notifyRead() {
+    mergedStatusCache = null;
+    for (var i = 0; i < readListeners.length; i += 1) {
+      try { readListeners[i](); } catch (error) {}
+    }
+  }
+
+  function installReadOverlay(context) {
+    if (readOverlayInstalled) return true;
+    var service = null;
+    try { service = context && context.uiSession; } catch (error) {}
+    if (!service) {
+      try { service = context && typeof context.get === 'function' ? context.get('uiSession') : null; } catch (error) {}
+    }
+    var source = service && service.sessionStatus;
+    if (!source || typeof source.getSnapshot !== 'function' || typeof source.subscribe !== 'function') return false;
+    readOverlayInstalled = true;
+    var originalGet = source.getSnapshot;
+    var originalSubscribe = source.subscribe;
+    mergedStatusCache = null;
+    source.getSnapshot = function () {
+      var next = mergeStatus(originalGet.call(source));
+      if (mergedStatusCache !== null && sameStatusMap(mergedStatusCache, next)) return mergedStatusCache;
+      mergedStatusCache = next;
+      return mergedStatusCache;
+    };
+    source.subscribe = function (listener) {
+      var off = originalSubscribe.call(source, listener);
+      readListeners.push(listener);
+      return function () {
+        try { off(); } catch (error) {}
+        var index = readListeners.indexOf(listener);
+        if (index !== -1) readListeners.splice(index, 1);
+      };
+    };
+    return true;
+  }
+
+  function retryReadOverlay() {
+    if (readOverlayInstalled || !captured) return;
+    readOverlayTries += 1;
+    if (readOverlayTries > 100) return;
+    try {
+      if (!installReadOverlay(captured)) setTimeout(retryReadOverlay, 100);
+    } catch (error) {}
+  }
+
+  function clearUnreadForSelection() {
+    var current = lastSelection;
+    if (current === null) current = currentSelection();
+    if (current && unread[current] === true) {
+      delete unread[current];
+      notifyRead();
+      send({ type: 'read', sessionId: current });
+    }
+  }
+
+  function setUnreadState(ids) {
+    var next = {};
+    if (Array.isArray(ids)) {
+      for (var i = 0; i < ids.length && i < 2000; i += 1) {
+        if (typeof ids[i] === 'string' && ids[i] !== '') next[ids[i]] = true;
+      }
+    }
+    unread = next;
+    notifyRead();
+    clearUnreadForSelection();
   }
 
   // Pane embedding hides the remote left sidebar. Native/full mode must get it
@@ -262,6 +534,8 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
   function capture(context) {
     if (!context || captured === context) return;
     captured = context;
+    try { installGroupSync(context); } catch (error) {}
+    try { installReadOverlay(context); } catch (error) {}
     var tries = 0;
     var finish = function () {
       tries += 1;
@@ -278,6 +552,7 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
       readySent = true;
       send({ type: 'ready', deviceId: deviceId });
       report();
+      if (!readOverlayInstalled) retryReadOverlay();
     };
     finish();
   }
@@ -301,6 +576,7 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
       if (readySent) send({ type: 'ready', deviceId: deviceId });
       else if (failedReason) send({ type: 'failed', error: failedReason });
       report();
+      if (groupSyncInstalled) sendGroups();
     });
     socket.addEventListener('message', function (event) {
       var data;
@@ -309,6 +585,8 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
       if (data.type === 'open-session' && typeof data.sessionId === 'string') openSession(data.sessionId);
       else if (data.type === 'refresh') refreshSessions();
       else if (data.type === 'set-embedded') setEmbedded(data.enabled === true);
+      else if (data.type === 'group-expansion') applyGroupState(data.groups);
+      else if (data.type === 'read-state') setUnreadState(data.unreadSessionIds);
     });
     socket.addEventListener('close', function () {
       socket = null;
@@ -416,6 +694,10 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
   }
 
   try {
+    installStorageGroupFallback();
+  } catch (error) {}
+
+  try {
     installLoaderHook();
   } catch (error) {
     fail('the DSH client module loader could not be wrapped');
@@ -427,6 +709,61 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
 
   connect();
 })();`
+
+/**
+ * Bound and validate one device's workspace fold state before it crosses the
+ * Host/page boundary. Unknown shapes are dropped rather than injected into
+ * the remote workspace store.
+ */
+export function sanitizeGroupState(value: unknown): Record<string, boolean> {
+  const out: Record<string, boolean> = {}
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return out
+  let index = 0
+  for (const [key, expanded] of Object.entries(value as Record<string, unknown>)) {
+    if (index >= 1_000) break
+    if (typeof key !== 'string' || key === '' || key.length > 256) continue
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue
+    if (typeof expanded !== 'boolean') continue
+    out[key] = expanded
+    index += 1
+  }
+  return out
+}
+
+/** Serialize a value for a classic `<script>` body without closing the tag. */
+function jsonForInlineScript(value: unknown): string {
+  return JSON.stringify(value)
+    .replaceAll('<', '\\u003c')
+    .replaceAll('\u2028', '\\u2028')
+    .replaceAll('\u2029', '\\u2029')
+}
+
+/** Initial page state served alongside the bridge script. */
+export interface NativeBridgeScriptState {
+  /** Explicit workspace fold state last observed by the Host. */
+  readonly groups?: Readonly<Record<string, boolean>>
+  /** Raw remote Session IDs whose completion is currently unread. */
+  readonly unread?: readonly string[]
+}
+
+/**
+ * Build the per-device bridge response. The state prefix runs before the
+ * bridge body and before any DSH module, so the first workspace render already
+ * has the Host's fold state.
+ */
+export function buildNativeBridgeScript(state: NativeBridgeScriptState = {}): string {
+  const groups = sanitizeGroupState(state.groups)
+  const unread = Array.isArray(state.unread)
+    ? state.unread
+        .filter((id): id is string => typeof id === 'string' && id !== '' && id.length <= 512)
+        .slice(0, 2_000)
+    : []
+  return [
+    `window.__DSH_MD_GROUPS__ = ${jsonForInlineScript(groups)};`,
+    `window.__DSH_MD_UNREAD__ = ${jsonForInlineScript(unread)};`,
+    NATIVE_BRIDGE_SCRIPT,
+  ].join('\n')
+}
 
 /** Options for {@link injectNativeBridge}. */
 export interface NativeBridgeInjectionOptions {

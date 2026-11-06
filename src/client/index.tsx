@@ -35,6 +35,10 @@ import {
 import { MultiDeviceHubPanel } from './MultiDeviceHubPanel.tsx'
 import { OfflineDeviceBanner } from './OfflineDeviceBanner.tsx'
 import { installProjectDeviceBadges } from './projectBadges.ts'
+import {
+  installReadStateOverlay,
+  type SessionStatusSource,
+} from './readState.ts'
 import { SessionDeviceChip } from './SessionDeviceChip.tsx'
 import { SessionRowDeviceMarker } from './SessionRowDeviceMarker.tsx'
 import { clientStore, useMultiDeviceState } from './state.ts'
@@ -116,6 +120,9 @@ export interface ClientContextLike {
   }
   sessions?: SessionsServiceLike
   uiWorkspace?: UiWorkspaceServiceLike
+  uiSession?: {
+    readonly sessionStatus?: SessionStatusSource
+  }
   slots: {
     inject(slotName: string, fn: () => (() => void) | void): () => void
     register(options: Record<string, unknown>, component: (props: any) => React.ReactNode): () => void
@@ -299,6 +306,27 @@ export function apply(ctx: ClientContextLike): void {
       }),
       'dsh-multi-device: client service handles',
     )
+  })
+
+  // 1b. Replace DSH's page-local completion reminders with the Host-owned set
+  //     for local and remote Sessions alike.
+  ctx.inject(['uiSession'], (readCtx) => {
+    readCtx.effect(() => {
+      const service = readCtx.uiSession ??
+        (readCtx.get?.('uiSession') as { sessionStatus?: SessionStatusSource } | undefined)
+      return installReadStateOverlay({
+        source: service?.sessionStatus,
+        getUnread: () => {
+          const snapshot = clientStore.getSnapshot()
+          // Before the first Host snapshot arrives, keep DSH's own local
+          // reminders instead of masking them with an empty set.
+          if (snapshot.snapshot.revision === 0) return undefined
+          return new Set(snapshot.snapshot.unreadSessionIds ?? [])
+        },
+        subscribeReadState: listener => clientStore.subscribe(listener),
+        shouldOverride: () => true,
+      })
+    }, 'dsh-multi-device: remote unread overlay')
   })
 
   // 2. Register Native Settings Section (`settings.section`, id: 'multi-device')

@@ -66,8 +66,20 @@ export declare class DeviceRegistry {
     private readonly nativePanes;
     /** Previous connection state per device, so workspace rows are recomputed on a real transition. */
     private readonly lastDeviceStates;
+    /** Host-owned fold state per device, restored into the framed page before its first render. */
+    private readonly nativeGroups;
+    /** Host-owned read/unread state for namespaced remote Sessions. */
+    private readonly readTracker;
+    /** Stable Host identity (used by the optional cross-Host state file). */
+    private hostId;
     private uiPreferences;
     private catalogPersistTimer;
+    private persistTimer;
+    /** Optional cross-Host read-state polling and per-device push debounce. */
+    private sharedReadStateTimer;
+    private readonly sharedReadStateInFlight;
+    private readonly sharedReadStateInitialized;
+    private readonly sharedReadStatePushTimers;
     constructor(dataFilePath: string, secretsFilePath: string, localHost: LocalHostProvider, options?: {
         enableTunnels?: boolean;
         enableNativeProxy?: boolean;
@@ -109,6 +121,58 @@ export declare class DeviceRegistry {
      * the scope back to a previously selected Session.
      */
     setActiveSession(sessionId: string | undefined, requestSeq?: number, clientId?: string): boolean;
+    /**
+     * Clear one remote Session's unread marker. Returns true when this call
+     * actually removed a marker, so callers can distinguish a real transition
+     * from a redundant read touch.
+     */
+    markSessionRead(sessionId: string): boolean;
+    /** Local DSH session status, observed through this Host's own event bus. */
+    observeLocalSessionStatus(sessionId: string, running: boolean): void;
+    /** Persisted fold state for one device; the bridge injection uses this map. */
+    nativeGroupState(deviceId: DeviceId): Readonly<Record<string, boolean>> | undefined;
+    /**
+     * Accept a fold-state report from a framed page. This is deliberately not
+     * part of the UI snapshot: only the device's bridge needs it, and routing it
+     * through revisions would re-render every sidebar row on each fold click.
+     */
+    private setNativeGroupState;
+    /** Raw remote Session IDs that are unread on one device. */
+    private unreadForDevice;
+    /** Push the new unread set to the owning device's framed page. */
+    private publishUnreadState;
+    /**
+     * Reconcile running flags from the authoritative list. DSH can miss a
+     * `api-session/status` frame across a stream gap; the list refresh still
+     * carries the final flag, and a live `true -> false` there is a completion
+     * for the same reason a stream event is.
+     */
+    private reconcileRunningForDevice;
+    /** Observe one remote event before it is forwarded to the local mirror. */
+    private observeRemoteFrame;
+    /**
+     * Optional cross-Host sync. The state file lives in the remote DSH home and
+     * is written only over an existing SSH transport; direct-only devices and
+     * Windows remote homes are skipped rather than guessed at.
+     */
+    /** Seed the transition baseline from a cached catalog without marking it unread. */
+    private seedRunningFromCatalog;
+    /** One pull+push per connection once the remote home is known. */
+    private maybeInitializeSharedReadState;
+    private sharedReadStateTarget;
+    private scheduleSharedReadStatePush;
+    /** Read the remote file and merge every Host's Session entries locally. */
+    private pullSharedReadState;
+    /**
+     * Read-merge-write one Host section. Preserving the other sections is what
+     * makes several Hosts converge; the write only happens after a successful
+     * read so an unreachable file cannot clobber another machine's reminders.
+     */
+    private pushSharedReadState;
+    private mergeSharedReadDocument;
+    /** Start/stop the 30s remote scan when the preference changes. */
+    private syncSharedReadStateTimer;
+    private schedulePersist;
     /**
      * Keep exactly one device frame in embedded mode (remote sidebar hidden) and
      * restore every other frame's sidebar for full native rendering.

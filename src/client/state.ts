@@ -174,7 +174,8 @@ const EMPTY_SNAPSHOT: MultiDeviceSnapshot = {
   logicalWorkspaces: [],
   allPhysicalWorkspaces: [],
   sessionOrigins: {},
-  ui: { sessionRowDeviceDot: false, nativePane: true },
+  unreadSessionIds: [],
+  ui: { sessionRowDeviceDot: false, nativePane: true, crossHostReadState: false },
   gitMatch: {
     status: 'idle',
     totalDevices: 0,
@@ -200,6 +201,8 @@ class MultiDeviceClientStore {
   private reportedSessionId: string | undefined
   /** Monotonic control-plane sequence so an older HTTP request cannot win. */
   private activeSessionSeq = 0
+  /** Sessions for which this client already asked the Host to clear unread. */
+  private readonly unreadClearInFlight = new Set<string>()
 
   constructor() {
     this.state = {
@@ -349,6 +352,26 @@ class MultiDeviceClientStore {
       activeNativeDeviceId: activeNative,
       keepAliveDeviceIds: keepAlive,
     })
+    this.clearUnreadForActiveSession(snap)
+  }
+
+  /**
+   * A completion can arrive while its conversation is already the main view.
+   * The Host has no reliable cross-client presence signal, so every viewing
+   * client clears the marker as soon as it sees it. The next snapshot removes
+   * the dot everywhere; the round-trip is short enough to avoid a lingering
+   * reminder and keeps the "main view is read" rule identical to DSH's.
+   */
+  private clearUnreadForActiveSession(snap: MultiDeviceSnapshot): void {
+    const active = this.state.activeSessionId
+    if (active === undefined) return
+    const unread = snap.unreadSessionIds ?? []
+    if (!unread.includes(active)) return
+    if (this.unreadClearInFlight.has(active)) return
+    this.unreadClearInFlight.add(active)
+    void this.markSessionRead(active).finally(() => {
+      this.unreadClearInFlight.delete(active)
+    })
   }
 
   private activateNativeDevice(deviceId: DeviceId): void {
@@ -482,6 +505,18 @@ class MultiDeviceClientStore {
   clearActiveSession(sessionId: string): void {
     if (this.reportedSessionId !== sessionId) return
     void this.setActiveSession(undefined)
+  }
+
+  /** Ask the Host to clear one Session's unread marker. */
+  async markSessionRead(sessionId: string): Promise<boolean> {
+    if (sessionId === '') return false
+    const res = await this.callControlPlane<{ changed: boolean; snapshot: MultiDeviceSnapshot }>({
+      action: 'markSessionRead',
+      payload: { sessionId },
+    })
+    if (!res.ok) return false
+    this.applyIncomingSnapshot(res.value.snapshot)
+    return res.value.changed
   }
 
   // ==========================================================================
