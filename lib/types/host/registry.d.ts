@@ -1,4 +1,4 @@
-import { type DeviceAuthState, type DeviceCatalogCache, type DeviceConfig, DeviceId, type DeviceView, type DisplayMode, type GitMatchRun, type MultiDeviceSnapshot, type RemoteSessionCreateInput, type RemoteWorkspaceCreateInput, type SshKeyEntry, type UpsertDeviceInput, type WorkspaceAggregationConfig } from '../contract.ts';
+import { type DeviceAuthState, type DeviceCatalogCache, type DeviceConfig, DeviceId, type DeviceView, type DisplayMode, type GitMatchRun, type MultiDeviceSnapshot, type MultiDeviceUiPreferences, type RemoteSessionCreateInput, type RemoteWorkspaceCreateInput, type SshKeyEntry, type UpsertDeviceInput, type WorkspaceAggregationConfig } from '../contract.ts';
 import { DeviceAuthManager } from './auth.ts';
 import { type PhysicalWorkspaceInput, WorkspaceAggregator } from './git-aggregator.ts';
 import { NativeProxyManager } from './native-proxy.ts';
@@ -59,6 +59,7 @@ export declare class DeviceRegistry {
     private readonly authStates;
     /** Durable mirror of each device catalog (see {@link DeviceCatalogCache}). */
     private readonly catalogs;
+    private uiPreferences;
     private catalogPersistTimer;
     constructor(dataFilePath: string, secretsFilePath: string, localHost: LocalHostProvider, options?: {
         enableTunnels?: boolean;
@@ -201,6 +202,10 @@ export declare class DeviceRegistry {
     private scanRemoteRepos;
     /** Build the complete snapshot for the Client UI and Aggregated Gateway. */
     snapshot(): MultiDeviceSnapshot;
+    /** Persisted display preferences (Snapshot also carries them under `ui`). */
+    ui(): MultiDeviceUiPreferences;
+    /** Update and persist display preferences; unknown keys are ignored by the type. */
+    updateUiPreferences(patch: Partial<MultiDeviceUiPreferences>): MultiDeviceUiPreferences;
     /**
      * Wait for a device to become reachable, bounded by `timeoutMs`.
      *

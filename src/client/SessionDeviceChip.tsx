@@ -8,7 +8,9 @@
  * - `hero` (`conversation.hero.options`): sits in the New Session row. For a
  *   logical workspace with several member devices it opens a device picker;
  *   choosing one persists the preference and restarts the blank conversation on
- *   that device through DSH's own `startSession`.
+ *   that device through DSH's own `startSession`. A secondary panel can start a
+ *   session on any *other* device that already has a workspace, which covers
+ *   "device first, directory second".
  *
  * @module dsh-multi-device/client/SessionDeviceChip
  */
@@ -17,7 +19,7 @@ import {
   StateDot,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import type { DeviceId, DeviceConnectionState } from '../contract.ts'
+import type { DeviceConnectionState, DeviceId } from '../contract.ts'
 import { getClientServices, useSessionSummary } from './clientServices.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
 import {
@@ -33,6 +35,14 @@ type Translate = (key: MultiDeviceLocaleKey) => string
 interface PopoverPosition {
   readonly top: number
   readonly right: number
+}
+
+/** One remote device plus the workspaces a device-first session can start in. */
+interface OtherDeviceGroup {
+  readonly deviceId: DeviceId
+  readonly name: string
+  readonly state: DeviceConnectionState
+  readonly workspaces: readonly { readonly workspaceId: string; readonly title: string; readonly path: string }[]
 }
 
 function stateLabelKey(state: DeviceConnectionState): MultiDeviceLocaleKey {
@@ -84,10 +94,30 @@ export function SessionDeviceChip({
     () => (workspace === undefined ? [] : deviceTargetsForWorkspace(snapshot, workspace, t('nativeLocalTab'))),
     [snapshot, workspace, t],
   )
+  const otherDevices = useMemo<readonly OtherDeviceGroup[]>(() => {
+    if (variant !== 'hero') return []
+    return snapshot.devices
+      .filter(candidate => candidate.enabled && candidate.id !== device.deviceId)
+      .map(candidate => ({
+        deviceId: candidate.id,
+        name: candidate.name,
+        state: candidate.state,
+        workspaces: snapshot.allPhysicalWorkspaces
+          .filter(member => member.deviceId === candidate.id)
+          .map(member => ({
+            workspaceId: member.remoteWorkspaceId,
+            title: member.title,
+            path: member.path,
+          })),
+      }))
+      .filter(group => group.workspaces.length > 0)
+  }, [snapshot, variant, device.deviceId])
+
   const [open, setOpen] = useState(false)
+  const [panel, setPanel] = useState<'target' | 'other'>('target')
   const [position, setPosition] = useState<PopoverPosition | null>(null)
   const [pendingTarget, setPendingTarget] = useState<DeviceId | undefined>(undefined)
-  const [switchError, setSwitchError] = useState<string | undefined>(undefined)
+  const [actionError, setActionError] = useState<string | undefined>(undefined)
   const buttonRef = useRef<HTMLButtonElement | null>(null)
 
   useEffect(() => {
@@ -117,6 +147,7 @@ export function SessionDeviceChip({
     targets.length > 1 &&
     summary?.blank !== false
   const offlineTargets = targets.filter(target => !target.online)
+  const showOtherPanel = variant === 'hero' && otherDevices.length > 0
   const aria = `${t('deviceChipAria')}: ${device.name}`
 
   const toggle = (): void => {
@@ -130,14 +161,15 @@ export function SessionDeviceChip({
       top: Math.round(rect.bottom + 6),
       right: Math.max(8, Math.round(window.innerWidth - rect.right)),
     })
-    setSwitchError(undefined)
+    setActionError(undefined)
+    setPanel('target')
     setOpen(true)
   }
 
   const selectTarget = async (target: DeviceTargetOption): Promise<void> => {
     if (workspace === undefined) return
     setPendingTarget(target.deviceId)
-    setSwitchError(undefined)
+    setActionError(undefined)
     try {
       const result = await clientStore.switchNewSessionDevice(
         getClientServices().uiWorkspace,
@@ -145,7 +177,7 @@ export function SessionDeviceChip({
         target.deviceId,
       )
       if (!result.ok) {
-        setSwitchError(
+        setActionError(
           result.error === 'startSession-unavailable'
             ? t('deviceSwitchUnavailable')
             : result.error ?? t('actionFailed'),
@@ -157,6 +189,117 @@ export function SessionDeviceChip({
       setPendingTarget(undefined)
     }
   }
+
+  /** Device-first creation: a remote workspace that already exists on that box. */
+  const createOnOtherDevice = async (deviceId: DeviceId, workspaceId: string): Promise<void> => {
+    setPendingTarget(deviceId)
+    setActionError(undefined)
+    try {
+      const result = await clientStore.createRemoteSession({ deviceId, workspaceId })
+      if (!result.ok || result.sessionId === undefined) {
+        setActionError(result.error ?? t('actionFailed'))
+        return
+      }
+      const services = getClientServices()
+      services.uiWorkspace?.openSession(result.sessionId)
+      void services.sessions?.refresh?.().catch(() => {})
+      setOpen(false)
+    } finally {
+      setPendingTarget(undefined)
+    }
+  }
+
+  const otherPanel = (
+    <div className="dsh-md-device-other">
+      <div className="dsh-md-device-other-head">
+        <span className="dsh-md-device-popover-name">{t('newOnOtherDeviceTitle')}</span>
+        <button
+          type="button"
+          className="dsh-md-device-other-back"
+          onClick={() => {
+            setActionError(undefined)
+            setPanel('target')
+          }}
+        >
+          {t('back')}
+        </button>
+      </div>
+      <p className="dsh-md-device-popover-hint">{t('newOnOtherDeviceDesc')}</p>
+      <div className="dsh-md-device-other-list">
+        {otherDevices.map((group) => (
+          <div key={group.deviceId} className="dsh-md-device-other-group">
+            <div className="dsh-md-device-other-device">
+              <StateDot state={deviceStateToDotState(group.state)} size={8} />
+              <span className="dsh-md-device-other-name">{group.name}</span>
+              {group.state !== 'connected' && (
+                <span className="dsh-md-device-other-state">{t('deviceOfflineShort')}</span>
+              )}
+            </div>
+            {group.workspaces.map(target => (
+              <button
+                key={`${group.deviceId}:${target.workspaceId}`}
+                type="button"
+                className="dsh-md-device-other-workspace"
+                disabled={group.state !== 'connected' || pendingTarget !== undefined}
+                onClick={() => {
+                  void createOnOtherDevice(group.deviceId, target.workspaceId)
+                }}
+              >
+                <span className="dsh-md-device-other-title" title={target.path}>{target.title}</span>
+                <span className="dsh-md-device-other-path" title={target.path}>{target.path}</span>
+                {pendingTarget === group.deviceId && (
+                  <span className="dsh-md-device-other-state">{t('deviceSwitchPending')}</span>
+                )}
+              </button>
+            ))}
+          </div>
+        ))}
+      </div>
+      {actionError !== undefined && (
+        <p className="dsh-md-device-popover-error" role="alert">{actionError}</p>
+      )}
+    </div>
+  )
+
+  const footer = (
+    <div className="dsh-md-device-popover-actions">
+      {panel === 'target' && showOtherPanel && (
+        <button
+          type="button"
+          className="dsh-md-device-popover-action"
+          onClick={() => {
+            setActionError(undefined)
+            setPanel('other')
+          }}
+        >
+          {t('newOnOtherDevice')}
+        </button>
+      )}
+      {panel === 'target' && offlineTargets.length > 0 && (
+        <button
+          type="button"
+          className="dsh-md-device-popover-action"
+          onClick={() => {
+            for (const target of offlineTargets) {
+              void clientStore.reconnectDevice(target.deviceId)
+            }
+          }}
+        >
+          {t('deviceReconnectOffline')}
+        </button>
+      )}
+      <button
+        type="button"
+        className="dsh-md-device-popover-action"
+        onClick={() => {
+          setOpen(false)
+          onOpenSettings()
+        }}
+      >
+        {t('deviceChipOpenSettings')}
+      </button>
+    </div>
+  )
 
   return (
     <span className="dsh-md-device-chip-wrap" data-variant={variant}>
@@ -183,7 +326,17 @@ export function SessionDeviceChip({
       {open && position !== null && (
         <>
           <div className="dsh-md-device-chip-backdrop" onClick={() => setOpen(false)} />
-          {canSwitchDevice && workspace !== undefined ? (
+          {panel === 'other' ? (
+            <div
+              className="dsh-md-device-popover dsh-md-device-menu"
+              role="dialog"
+              aria-label={aria}
+              style={{ top: position.top, right: position.right }}
+            >
+              {otherPanel}
+              {footer}
+            </div>
+          ) : canSwitchDevice && workspace !== undefined ? (
             <div
               className="dsh-md-device-popover dsh-md-device-menu"
               role="dialog"
@@ -233,38 +386,13 @@ export function SessionDeviceChip({
                 })}
               </ul>
 
-              {switchError !== undefined && (
+              {actionError !== undefined && (
                 <p className="dsh-md-device-popover-error" role="alert">
-                  {switchError}
+                  {actionError}
                 </p>
               )}
               <p className="dsh-md-device-popover-hint">{t('deviceSwitchKeepsBlank')}</p>
-
-              <div className="dsh-md-device-popover-actions">
-                {offlineTargets.length > 0 && (
-                  <button
-                    type="button"
-                    className="dsh-md-device-popover-action"
-                    onClick={() => {
-                      for (const target of offlineTargets) {
-                        void clientStore.reconnectDevice(target.deviceId)
-                      }
-                    }}
-                  >
-                    {t('deviceReconnectOffline')}
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="dsh-md-device-popover-action"
-                  onClick={() => {
-                    setOpen(false)
-                    onOpenSettings()
-                  }}
-                >
-                  {t('deviceChipOpenSettings')}
-                </button>
-              </div>
+              {footer}
             </div>
           ) : (
             <div
@@ -315,6 +443,9 @@ export function SessionDeviceChip({
               {variant === 'hero' && workspace !== undefined && targets.length <= 1 && (
                 <p className="dsh-md-device-popover-hint">{t('deviceTargetSingleDevice')}</p>
               )}
+              {actionError !== undefined && (
+                <p className="dsh-md-device-popover-error" role="alert">{actionError}</p>
+              )}
 
               <div className="dsh-md-device-popover-actions">
                 {!device.isLocal && !online && (
@@ -327,6 +458,18 @@ export function SessionDeviceChip({
                     }}
                   >
                     {t('reconnect')}
+                  </button>
+                )}
+                {showOtherPanel && (
+                  <button
+                    type="button"
+                    className="dsh-md-device-popover-action"
+                    onClick={() => {
+                      setActionError(undefined)
+                      setPanel('other')
+                    }}
+                  >
+                    {t('newOnOtherDevice')}
                   </button>
                 )}
                 <button

@@ -124,6 +124,12 @@ export declare const zh: {
     readonly deviceSwitchPending: "切换中…";
     readonly deviceSwitchUnavailable: "当前 DSH 版本不支持在此切换设备，请到多设备设置中调整。";
     readonly deviceReconnectOffline: "重连离线设备";
+    readonly back: "返回";
+    readonly rowDeviceDotTitle: "在会话行显示设备标记";
+    readonly rowDeviceDotDesc: "聚合模式下在会话行左侧显示设备首字母，离线时带红点；运行/审批状态仍优先显示。默认关闭。";
+    readonly newOnOtherDevice: "在其它设备新建…";
+    readonly newOnOtherDeviceTitle: "在其它设备新建会话";
+    readonly newOnOtherDeviceDesc: "从该设备已有的工作区创建会话，不复制或修改任何文件。";
     readonly gatewayDegradedNotice: "聚合网关当前处于降级状态，原生模式仍可正常使用";
     readonly savedNotice: "设置已保存";
     readonly actionFailed: "操作失败";

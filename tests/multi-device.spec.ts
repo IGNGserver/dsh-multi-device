@@ -1005,6 +1005,56 @@ describe('4d. Offline catalog cache & reconnect waiting', () => {
   })
 })
 
+describe('4e. Display preferences for session rows', () => {
+  it('defaults the row device marker off, persists a change, and restores it after a restart', async () => {
+    const dir = makeTempDir('dsh-md-ui-prefs-')
+    const dataFile = join(dir, 'registry.json')
+    const secretsFile = join(dir, 'secrets.json')
+    const localHost = {
+      localPort: () => 3080,
+      localWorkspaces: () => [],
+      localSessionUpdatedAt: () => new Map<string, number>(),
+    }
+    const options = { allowDirectTransport: true, enableNativeProxy: false as const }
+
+    const registry = new DeviceRegistry(dataFile, secretsFile, localHost, options)
+    expect(registry.snapshot().ui?.sessionRowDeviceDot).toBe(false)
+
+    const plane = new MultiDeviceControlPlane(registry, () => true)
+    const toggled = await plane.dispatch({ action: 'setUiPreferences', payload: { sessionRowDeviceDot: true } })
+    expect(toggled.ok).toBe(true)
+    expect(registry.ui().sessionRowDeviceDot).toBe(true)
+    expect((toggled as { value: { ui?: { sessionRowDeviceDot: boolean } } }).value.ui?.sessionRowDeviceDot)
+      .toBe(true)
+    registry.dispose()
+
+    const second = new DeviceRegistry(dataFile, secretsFile, localHost, options)
+    expect(second.ui().sessionRowDeviceDot).toBe(true)
+    expect(second.snapshot().ui?.sessionRowDeviceDot).toBe(true)
+
+    // Explicit false must stick too (not "undefined means false" twice).
+    second.updateUiPreferences({ sessionRowDeviceDot: false })
+    second.dispose()
+    const third = new DeviceRegistry(dataFile, secretsFile, localHost, options)
+    expect(third.ui().sessionRowDeviceDot).toBe(false)
+    third.dispose()
+  })
+
+  it('treats a malformed preference document as the default instead of throwing', () => {
+    const dir = makeTempDir('dsh-md-ui-prefs-bad-')
+    const dataFile = join(dir, 'registry.json')
+    writeFileSync(dataFile, JSON.stringify({ version: 1, devices: [], ui: { sessionRowDeviceDot: 'yes' } }))
+    const registry = new DeviceRegistry(
+      dataFile,
+      join(dir, 'secrets.json'),
+      { localPort: () => 3080, localWorkspaces: () => [], localSessionUpdatedAt: () => new Map() },
+      { allowDirectTransport: true, enableNativeProxy: false },
+    )
+    expect(registry.ui().sessionRowDeviceDot).toBe(false)
+    registry.dispose()
+  })
+})
+
 describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, & Native Proxy', () => {
   it('connects to a simulated remote DSH 0.2 server, aggregates sessions & workspaces, routes prompts/approvals, and serves Native Mode via reverse proxy', async () => {
     const dir = makeTempDir('dsh-md-e2e-')
