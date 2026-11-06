@@ -160,6 +160,13 @@ export declare const zh: {
     readonly authBackLocal: "返回本机";
     readonly authOpenSettings: "打开多设备设置";
     readonly authHint: "若远端 DSH 关闭了 Token 登录，请在远端重新启动 dsh web 后粘贴新的启动链接。";
+    readonly diagnosticsTitle: "诊断信息";
+    readonly diagnosticsDesc: "导出一份可复制的现场快照：当前显示模式、每台设备的连接与工作区/会话计数，以及浏览器视口和标签栏尺寸。侧栏“展开没有对话”一类问题通常能直接看出原因（例如实际处于原生模式、设备目录未同步）。";
+    readonly diagnosticsRun: "生成诊断";
+    readonly diagnosticsCopy: "复制";
+    readonly diagnosticsCopied: "诊断信息已复制";
+    readonly diagnosticsCopyFailed: "复制失败，请手动选择下方文本";
+    readonly diagnosticsModeLine: "当前显示模式：{mode} · 设备 {devices} 台 · 已连接 {connected} 台 · 工作区 {workspaces} 个";
 };
 export type MultiDeviceLocaleKey = keyof typeof zh;
 export declare const en: Record<MultiDeviceLocaleKey, string>;

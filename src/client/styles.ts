@@ -849,6 +849,11 @@ html[data-platform='darwin'] [data-sidebar-collapsed] .dsh-md-pane-bar {
   top: var(--dsh-md-native-bar-top);
   left: 0;
   right: 0;
+  /* A Host frame wider than the viewport (embedded remote page) must never
+   * push the right-aligned mode switch off-screen: clamp to the viewport and
+   * let the component measure the exact remainder. */
+  width: min(100%, 100vw);
+  max-width: 100vw;
   height: var(--dsh-md-native-bar-height);
   box-sizing: border-box;
   z-index: 2;
@@ -861,6 +866,63 @@ html[data-platform='darwin'] [data-sidebar-collapsed] .dsh-md-pane-bar {
   color: var(--dsw-alias-label-primary);
   pointer-events: auto;
   -webkit-app-region: no-drag;
+}
+
+/* Compact bars render the mode switch and Settings before the tab strip, so
+ * the way back to Aggregated Mode is always inside the visible viewport. */
+.dsh-md-native-bar-leading {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+.dsh-md-native-bar[data-compact='true'] {
+  gap: 6px;
+  padding: 0 8px;
+}
+
+.dsh-md-native-bar[data-compact='true'] .dsh-md-native-tabs {
+  gap: 4px;
+}
+
+/* Diagnostics card in Settings → Multi-Device */
+.dsh-md-diagnostics {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 0;
+  border-top: 0.5px solid var(--dsw-alias-border-l2);
+}
+
+.dsh-md-diagnostics-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.dsh-md-diagnostics-mode {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.dsh-md-diagnostics-output {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 12px;
+  max-height: 320px;
+  overflow: auto;
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font-family: var(--dsw-font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 html[data-platform='darwin'] .dsh-md-native-bar {

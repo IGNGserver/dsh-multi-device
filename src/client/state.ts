@@ -25,7 +25,8 @@ import {
   type UpsertDeviceInput,
   type WorkspaceAggregationConfig,
 } from '../contract.ts'
-import type { ControlPlaneRequest } from '../runtime.ts'
+import type { ControlPlaneRequest, DiagnosticsClientReport, MultiDeviceDiagnostics } from '../runtime.ts'
+import { readNativeBarMetrics } from './barMetrics.ts'
 
 export type HubTabId = 'native' | 'devices' | 'git'
 
@@ -576,6 +577,19 @@ class MultiDeviceClientStore {
     }
   }
 
+  /**
+   * Ask the Host for a support report. The browser contributes the geometry it
+   * alone can see (viewport + Native Mode bar box), so a clipped mode switch is
+   * visible in the copied report instead of being lost with the screenshot.
+   */
+  async fetchDiagnostics(): Promise<{ ok: true; value: MultiDeviceDiagnostics } | { ok: false; error: string }> {
+    const client = collectClientDiagnosticsReport()
+    return this.callControlPlane<MultiDeviceDiagnostics>({
+      action: 'diagnostics',
+      payload: client === undefined ? {} : { client: client as unknown as Record<string, unknown> },
+    })
+  }
+
   async upsertDevice(input: UpsertDeviceInput): Promise<{ ok: boolean; error?: string }> {
     const res = await this.callControlPlane<{ snapshot: MultiDeviceSnapshot }>({
       action: 'upsertDevice',
@@ -797,6 +811,34 @@ class MultiDeviceClientStore {
     uiWorkspace.startSession(logicalWorkspaceId)
     return { ok: true }
   }
+}
+
+/**
+ * Browser-only geometry for a Diagnostics report.
+ *
+ * `undefined` outside a browser (SSR/test), so the Host falls back to its own
+ * snapshot without inventing viewport numbers.
+ */
+export function collectClientDiagnosticsReport(): DiagnosticsClientReport | undefined {
+  if (typeof window === 'undefined') return undefined
+  const bar = readNativeBarMetrics()
+  const report: DiagnosticsClientReport = {
+    innerWidth: window.innerWidth,
+    innerHeight: window.innerHeight,
+    ...(Number.isFinite(window.devicePixelRatio) ? { devicePixelRatio: window.devicePixelRatio } : {}),
+    ...(bar !== undefined
+      ? {
+          barLeft: bar.barLeft,
+          barWidth: bar.barWidth,
+          barClampedWidth: bar.clampedWidth,
+          compact: bar.compact,
+        }
+      : {}),
+    ...(typeof navigator !== 'undefined' && typeof navigator.userAgent === 'string'
+      ? { userAgent: navigator.userAgent }
+      : {}),
+  }
+  return report
 }
 
 export const clientStore = new MultiDeviceClientStore()

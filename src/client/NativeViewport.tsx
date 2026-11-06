@@ -7,6 +7,9 @@
  *   the same strip.
  * - The rightmost action switches back to Aggregated Mode, so the two surfaces
  *   stay one click apart without opening Settings. The Host still owns the mode.
+ *   The switch moves into the leading cluster when the visible bar is narrow or
+ *   when the Host frame is wider than the viewport (Windows Desktop), so the way
+ *   back to Aggregated Mode can never be clipped off-screen.
  * - Each tab carries its owner's unread completion count (本机 included), so a
  *   finished conversation on another device stays visible without switching.
  *   Archived and subagent Sessions never get a standalone row and are excluded.
@@ -37,6 +40,11 @@ import {
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { LOCAL_DEVICE_ID, type DeviceId, type DeviceView } from '../contract.ts'
 import { AuthRequiredPanel } from './AuthPanel.tsx'
+import {
+  type NativeBarMetrics,
+  measureNativeBar,
+  recordNativeBarMetrics,
+} from './barMetrics.ts'
 import { UnreadCountBadge } from './UnreadCountBadge.tsx'
 import { useSessionSummary } from './clientServices.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
@@ -206,7 +214,46 @@ export function NativeTabBar({
   const { devices } = state.snapshot
   const [switching, setSwitching] = useState(false)
   const [switchFailure, setSwitchFailure] = useState<{ seq: number; message: string } | null>(null)
+  const [bar, setBar] = useState<NativeBarMetrics | undefined>(undefined)
   const failureSeq = useRef(0)
+  const barRef = useRef<HTMLDivElement | null>(null)
+
+  // Clamp the strip to what the viewport can actually show. A frame wider than
+  // the window (embedded remote page) would otherwise push the right-aligned
+  // Settings gear and mode switch off-screen, leaving Native Mode with no way
+  // back to Aggregated Mode.
+  useEffect(() => {
+    if (state.displayMode !== 'native') return
+    const measure = (): void => {
+      if (typeof window === 'undefined') return
+      const rect = barRef.current?.getBoundingClientRect()
+      const metrics = measureNativeBar({
+        innerWidth: window.innerWidth,
+        innerHeight: window.innerHeight,
+        devicePixelRatio: window.devicePixelRatio,
+        left: rect?.left ?? 0,
+        width: rect?.width ?? 0,
+      })
+      recordNativeBarMetrics(metrics)
+      setBar(previous =>
+        previous !== undefined
+        && previous.clampedWidth === metrics.clampedWidth
+        && previous.compact === metrics.compact
+        && previous.barLeft === metrics.barLeft
+          ? previous
+          : metrics)
+    }
+    measure()
+    window.addEventListener('resize', measure)
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(measure)
+    if (observer !== undefined && barRef.current !== null) observer.observe(barRef.current)
+    return () => {
+      window.removeEventListener('resize', measure)
+      observer?.disconnect()
+      recordNativeBarMetrics(undefined)
+    }
+  }, [state.displayMode])
+
   if (state.displayMode !== 'native') return null
 
   // Count only unread Sessions that DSH can actually show as rows: archived
@@ -238,8 +285,58 @@ export function NativeTabBar({
     })
   }
 
+  const compact = bar?.compact === true
+  const clipped = bar === undefined ? false : bar.barWidth > bar.clampedWidth + 1
+
+  const settingsButton = (
+    <Tooltip label={t('settingsSectionTitle')} side="bottom" align={compact ? 'start' : 'end'}>
+      <Button
+        variant="ghost"
+        size="icon"
+        aria-label={t('settingsSectionTitle')}
+        onClick={onOpenSettings}
+      >
+        <IconSettingsOutlineRegular size={14} />
+      </Button>
+    </Tooltip>
+  )
+
+  // The way back to Aggregated Mode. Rightmost while there is room; the leading
+  // cluster when the bar is narrow or clipped, so it can never be pushed
+  // off-screen by a Host frame that is wider than the viewport.
+  const aggregatedSwitch = (
+    <Tooltip label={t('switchToAggregated')} side="bottom" align={compact ? 'start' : 'end'}>
+      <Button
+        variant="outline"
+        size="sm"
+        className="dsh-md-native-mode-switch"
+        icon={<IconChevronLeftOutlineRegular size={12} />}
+        aria-label={t('switchToAggregated')}
+        aria-busy={switching || undefined}
+        disabled={switching}
+        onClick={switchToAggregated}
+      >
+        {compact ? null : t('modeAggregated')}
+      </Button>
+    </Tooltip>
+  )
+
   return (
-    <div className="dsh-md-native-bar">
+    <div
+      className="dsh-md-native-bar"
+      ref={barRef}
+      data-compact={compact ? 'true' : 'false'}
+      data-clipped={clipped ? 'true' : 'false'}
+      data-mode="native"
+      style={bar !== undefined && bar.clampedWidth > 0 ? { maxWidth: bar.clampedWidth } : undefined}
+    >
+      {compact && (
+        <div className="dsh-md-native-bar-leading">
+          {aggregatedSwitch}
+          {settingsButton}
+        </div>
+      )}
+
       <div className="dsh-md-native-tabs" role="tablist" aria-label={t('nativeTabsLabel')}>
         <div className="dsh-md-native-tab-item">
           <Pill
@@ -328,35 +425,14 @@ export function NativeTabBar({
         </div>
       )}
 
-      <Tooltip label={t('settingsSectionTitle')} side="bottom">
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label={t('settingsSectionTitle')}
-          onClick={onOpenSettings}
-        >
-          <IconSettingsOutlineRegular size={14} />
-        </Button>
-      </Tooltip>
+      {!compact && settingsButton}
 
-      <span className="dsh-md-native-bar-sep" aria-hidden="true" />
+      {!compact && <span className="dsh-md-native-bar-sep" aria-hidden="true" />}
 
-      {/* Rightmost action: Aggregated Mode is one click away, never buried in
-          Settings. The Host persists the switch and re-merges remote rows. */}
-      <Tooltip label={t('switchToAggregated')} side="bottom" align="end">
-        <Button
-          variant="outline"
-          size="sm"
-          className="dsh-md-native-mode-switch"
-          icon={<IconChevronLeftOutlineRegular size={12} />}
-          aria-label={t('switchToAggregated')}
-          aria-busy={switching || undefined}
-          disabled={switching}
-          onClick={switchToAggregated}
-        >
-          {t('modeAggregated')}
-        </Button>
-      </Tooltip>
+      {/* Rightmost action while there is room: Aggregated Mode is one click
+          away, never buried in Settings. The Host persists the switch and
+          re-merges remote rows. Compact/clipped bars render it first instead. */}
+      {!compact && aggregatedSwitch}
 
       {switchFailure !== null && (
         <Toast

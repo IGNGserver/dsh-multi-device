@@ -11,7 +11,7 @@
  */
 import type { StateDotState } from '@deepseek-ai/dsh-client-ui-primitives';
 import { type DeviceConnectionState, type DeviceId, type DisplayMode, type ManualWorkspaceRule, type MultiDeviceSnapshot, type MultiDeviceUiPreferences, type RemoteSessionCreateInput, type RemoteWorkspaceCreateInput, type SshKeyEntry, type UpsertDeviceInput, type WorkspaceAggregationConfig } from '../contract.ts';
-import type { ControlPlaneRequest } from '../runtime.ts';
+import type { ControlPlaneRequest, DiagnosticsClientReport, MultiDeviceDiagnostics } from '../runtime.ts';
 export type HubTabId = 'native' | 'devices' | 'git';
 /** Map device connection lifecycle states to official DSH `StateDot` states. */
 export declare function deviceStateToDotState(state: DeviceConnectionState): StateDotState;
@@ -125,6 +125,18 @@ declare class MultiDeviceClientStore {
         error: string;
     }>;
     refreshSnapshot(): Promise<void>;
+    /**
+     * Ask the Host for a support report. The browser contributes the geometry it
+     * alone can see (viewport + Native Mode bar box), so a clipped mode switch is
+     * visible in the copied report instead of being lost with the screenshot.
+     */
+    fetchDiagnostics(): Promise<{
+        ok: true;
+        value: MultiDeviceDiagnostics;
+    } | {
+        ok: false;
+        error: string;
+    }>;
     upsertDevice(input: UpsertDeviceInput): Promise<{
         ok: boolean;
         error?: string;
@@ -202,6 +214,13 @@ declare class MultiDeviceClientStore {
         error?: string;
     }>;
 }
+/**
+ * Browser-only geometry for a Diagnostics report.
+ *
+ * `undefined` outside a browser (SSR/test), so the Host falls back to its own
+ * snapshot without inventing viewport numbers.
+ */
+export declare function collectClientDiagnosticsReport(): DiagnosticsClientReport | undefined;
 export declare const clientStore: MultiDeviceClientStore;
 export declare function useMultiDeviceState(): MultiDeviceClientState;
 export {};

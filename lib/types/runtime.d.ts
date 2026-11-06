@@ -12,6 +12,7 @@
  */
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http';
 import type { Context } from '@deepseek-ai/cordis';
+import type { DeviceView, MultiDeviceSnapshot } from './contract.ts';
 import type { DeviceRegistry } from './host/registry.ts';
 export declare const MULTI_DEVICE_API_PATH = "/multi-device/api";
 export declare const MULTI_DEVICE_EVENTS_PATH = "/multi-device/events";
@@ -55,9 +56,74 @@ export declare function connectionRequestRejection(ctx: Context, headers: Incomi
  */
 export declare function admitMultiDeviceRequest(ctx: Context, req: IncomingMessage): boolean;
 export interface ControlPlaneRequest {
-    readonly action: 'snapshot' | 'setDisplayMode' | 'upsertDevice' | 'removeDevice' | 'reconnectDevice' | 'authenticateDevice' | 'testDevice' | 'listSshKeys' | 'createSession' | 'createRemoteWorkspace' | 'updateAggregationConfig' | 'upsertManualRule' | 'removeManualRule' | 'setMemberExcluded' | 'setPreferredDevice' | 'setCustomTitle' | 'startGitMatch' | 'cancelGitMatch' | 'setActiveSession' | 'markSessionRead' | 'setUiPreferences';
+    readonly action: 'snapshot' | 'diagnostics' | 'setDisplayMode' | 'upsertDevice' | 'removeDevice' | 'reconnectDevice' | 'authenticateDevice' | 'testDevice' | 'listSshKeys' | 'createSession' | 'createRemoteWorkspace' | 'updateAggregationConfig' | 'upsertManualRule' | 'removeManualRule' | 'setMemberExcluded' | 'setPreferredDevice' | 'setCustomTitle' | 'startGitMatch' | 'cancelGitMatch' | 'setActiveSession' | 'markSessionRead' | 'setUiPreferences';
     readonly payload?: Record<string, unknown>;
 }
+/**
+ * Browser geometry the Client volunteers with a Diagnostics request. The Host
+ * cannot read the viewport, but a clipped Native Mode bar is a layout fact on
+ * the client side, so the report travels with the request and is echoed back.
+ */
+export interface DiagnosticsClientReport {
+    readonly innerWidth?: number;
+    readonly innerHeight?: number;
+    readonly devicePixelRatio?: number;
+    /** Frame-relative left edge of the Native Mode tab bar. */
+    readonly barLeft?: number;
+    /** Frame-relative width before clamping. */
+    readonly barWidth?: number;
+    /** Width the bar actually occupies inside the viewport. */
+    readonly barClampedWidth?: number;
+    readonly compact?: boolean;
+    readonly userAgent?: string;
+}
+/** One device row of the Diagnostics report. */
+export interface DiagnosticsDevice {
+    readonly id: string;
+    readonly name: string;
+    readonly enabled: boolean;
+    readonly state: DeviceView['state'];
+    readonly transportKind: DeviceView['transportKind'];
+    readonly protocolVersion: DeviceView['protocolVersion'];
+    readonly realtime: boolean;
+    readonly remoteDshVersion?: string;
+    readonly authState?: DeviceView['authState'];
+    readonly sessionCount: number;
+    readonly runningSessionCount: number;
+    readonly workspaceCount: number;
+    readonly pendingApprovalCount: number;
+    readonly catalogStale: boolean;
+    readonly lastSyncedAt?: number;
+    readonly lastError?: string;
+}
+/** Aggregated snapshot of everything a support report needs to explain a UI state. */
+export interface MultiDeviceDiagnostics {
+    readonly kind: 'dsh-multi-device/diagnostics';
+    readonly generatedAt: number;
+    readonly hostId: string;
+    readonly displayMode: MultiDeviceSnapshot['displayMode'];
+    readonly hostStatus: MultiDeviceSnapshot['hostStatus'];
+    readonly counts: {
+        readonly devices: number;
+        readonly connectedDevices: number;
+        readonly staleDevices: number;
+        readonly logicalWorkspaces: number;
+        readonly physicalWorkspaces: number;
+        readonly runningSessions: number;
+    };
+    readonly devices: readonly DiagnosticsDevice[];
+    readonly client?: DiagnosticsClientReport;
+}
+/** Parse the Client's Diagnostics payload; unknown fields are dropped. */
+export declare function readDiagnosticsClientReport(raw: unknown): DiagnosticsClientReport | undefined;
+/**
+ * Build the Diagnostics report from one Host snapshot.
+ *
+ * The mode is the first field on purpose: a "missing conversations" report is
+ * almost always the Native/Aggregated distinction, and the per-device staging
+ * (`state`, `catalogStale`, counts) explains the rest.
+ */
+export declare function buildDiagnostics(snapshot: MultiDeviceSnapshot, client?: DiagnosticsClientReport, now?: number): MultiDeviceDiagnostics;
 export declare class MultiDeviceControlPlane {
     private readonly registry;
     private readonly admitRequest?;
