@@ -42,6 +42,7 @@ export declare const DEFAULT_AGGREGATION_CONFIG: WorkspaceAggregationConfig;
 export declare class WorkspaceAggregator {
     private config;
     private readonly gitRemoteCache;
+    private readonly negativeCacheAt;
     constructor(initialConfig?: Partial<WorkspaceAggregationConfig>);
     getConfig(): WorkspaceAggregationConfig;
     setConfig(next: Partial<WorkspaceAggregationConfig>): WorkspaceAggregationConfig;

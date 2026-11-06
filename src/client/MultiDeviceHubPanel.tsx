@@ -77,7 +77,9 @@ function formatCompactDeviceTarget(dev: DeviceView): string {
 }
 
 function hasCustomAdvancedFields(dev: DeviceView | undefined): boolean {
-  if (dev?.ssh === undefined) return false
+  if (dev === undefined) return false
+  if (dev.enabled === false) return true
+  if (dev.ssh === undefined) return false
   return (
     (dev.ssh.remotePort !== undefined && dev.ssh.remotePort !== 3080) ||
     (dev.ssh.port !== undefined && dev.ssh.port !== 22) ||
@@ -238,7 +240,9 @@ function DeviceEditorForm({
   const [advancedOpen, setAdvancedOpen] = useState(() => hasCustomAdvancedFields(device))
   const [remotePort, setRemotePort] = useState(String(device?.ssh?.remotePort ?? 3080))
   const [sshUser, setSshUser] = useState(device?.ssh?.username ?? '')
-  const [sshPort, setSshPort] = useState(String(device?.ssh?.port ?? 22))
+  const [sshPort, setSshPort] = useState(
+    device?.ssh?.port !== undefined && device.ssh.port !== 22 ? String(device.ssh.port) : '',
+  )
   const [sshKeyPath, setSshKeyPath] = useState(device?.ssh?.privateKeyPath ?? '')
   const [sshPassphrase, setSshPassphrase] = useState('')
   const [sshProxyJump, setSshProxyJump] = useState(device?.ssh?.proxyJump ?? '')
@@ -246,6 +250,7 @@ function DeviceEditorForm({
   const [bootstrapCredentials, setBootstrapCredentials] = useState(
     device?.ssh?.bootstrapFromRemoteCredentials !== false,
   )
+  const [deviceEnabled, setDeviceEnabled] = useState(device?.enabled !== false)
 
   const [testing, setTesting] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -263,22 +268,22 @@ function DeviceEditorForm({
     const effectiveUser = sshUser.trim() || parsedHost.username
     const explicitPort = Number(sshPort)
     const effectiveSshPort =
-      sshPort.trim() !== '' && explicitPort > 0 && (explicitPort !== 22 || parsedHost.port === undefined)
+      sshPort.trim() !== '' && Number.isInteger(explicitPort) && explicitPort > 0 && explicitPort <= 65535
         ? explicitPort
-        : (parsedHost.port ?? 22)
+        : parsedHost.port
     const parsedRemotePort = Number(remotePort)
 
     return {
       ...(device !== undefined ? { id: device.id } : {}),
       name: name.trim() || effectiveHost || 'remote-device',
       ...(device?.label !== undefined ? { label: device.label } : {}),
-      enabled: true,
+      enabled: deviceEnabled,
       keepNativeAlive: device?.keepNativeAlive ?? true,
       transport: {
         kind: 'ssh',
         host: effectiveHost,
         ...(effectiveUser !== undefined && effectiveUser !== '' ? { username: effectiveUser } : {}),
-        ...(effectiveSshPort > 0 ? { port: effectiveSshPort } : {}),
+        ...(effectiveSshPort !== undefined && effectiveSshPort > 0 ? { port: effectiveSshPort } : {}),
         ...(sshKeyPath.trim() !== '' ? { privateKeyPath: sshKeyPath.trim() } : {}),
         ...(sshPassphrase.trim() !== '' ? { passphrase: sshPassphrase.trim() } : {}),
         ...(sshProxyJump.trim() !== '' ? { proxyJump: sshProxyJump.trim() } : {}),
@@ -302,10 +307,11 @@ function DeviceEditorForm({
     setSaveAnyway(false)
     setSshHost(entry.alias)
     if (name.trim() === '') setName(entry.alias)
-    setSshUser(entry.user ?? '')
-    setSshPort(String(entry.port ?? 22))
-    setSshKeyPath(entry.identityFile ?? '')
-    setSshProxyJump(entry.proxyJump ?? '')
+    // Leave explicit overrides blank so `ssh <alias>` uses `~/.ssh/config` directly.
+    setSshUser('')
+    setSshPort('')
+    setSshKeyPath('')
+    setSshProxyJump('')
   }
 
   const handleTest = async (): Promise<void> => {
@@ -480,6 +486,7 @@ function DeviceEditorForm({
               min={1}
               max={65535}
               value={sshPort}
+              placeholder={t('sshPortPlaceholder')}
               disabled={busy}
               onChange={(e) => setSshPort(e.currentTarget.value)}
             />
@@ -558,6 +565,17 @@ function DeviceEditorForm({
               onChange={setBootstrapCredentials}
             />
           </div>
+
+          {device !== undefined && (
+            <div className="dsh-md-field dsh-md-field-span">
+              <Switch
+                checked={deviceEnabled}
+                disabled={busy}
+                label={t('deviceEnabledLabel')}
+                onChange={setDeviceEnabled}
+              />
+            </div>
+          )}
         </div>
       </DisclosureRow>
 
@@ -959,9 +977,37 @@ export function MultiDeviceHubPanel({
             </div>
           </div>
         )}
+        {snapshot.aggregationConfig.excludedMemberKeys.length > 0 && (
+          <div className="dsh-md-subpanel">
+            <div className="dsh-md-subpanel-header">
+              <div className="dsh-md-subpanel-title-wrap">
+                <span className="dsh-md-subpanel-title">{t('excludedWorkspacesHeading')}</span>
+              </div>
+              <span className="dsh-md-subpanel-desc">{t('excludedWorkspacesDesc')}</span>
+            </div>
+            <div className="dsh-md-merged-repos-list">
+              {snapshot.aggregationConfig.excludedMemberKeys.map((memberKey) => (
+                <div key={memberKey} className="dsh-md-merged-repo-card">
+                  <div className="dsh-md-merged-repo-info">
+                    <span className="dsh-md-merged-repo-remote" title={memberKey}>
+                      {memberKey}
+                    </span>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      void clientStore.setMemberExcluded(memberKey, false)
+                    }}
+                  >
+                    {t('restoreAggregation')}
+                  </Button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
-
-      {/* Remote Devices List & Inline Editor (aligned with DSH Models Settings cards) */}
       <div className="dsh-md-devices-block">
         <div className="dsh-md-devices-header">
           <div className="dsh-md-devices-heading-group">

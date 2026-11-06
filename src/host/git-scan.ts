@@ -12,7 +12,7 @@
  * @module dsh-multi-device/host/git-scan
  */
 import { type Dirent, readdirSync, statSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { join, posix, resolve, win32 } from 'node:path'
 import { normalizeGitRemote, type SshTransportConfig } from '../contract.ts'
 import { discoverLocalGitRemote } from './git-aggregator.ts'
 import { execSshCommand } from './tunnel.ts'
@@ -50,6 +50,17 @@ export interface ScanOptions {
   readonly extraRoots?: readonly string[]
 }
 
+function normalizeTargetPath(input: string, stepUp = false): string {
+  const trimmed = input.trim()
+  if (/^[A-Za-z]:[/\\]/.test(trimmed) || trimmed.startsWith('\\\\')) {
+    return stepUp ? win32.resolve(trimmed, '..') : win32.resolve(trimmed)
+  }
+  if (trimmed.startsWith('/')) {
+    return stepUp ? posix.resolve(trimmed, '..') : posix.resolve(trimmed)
+  }
+  return stepUp ? resolve(trimmed, '..') : resolve(trimmed)
+}
+
 /**
  * Derive scan roots from a home directory and the workspace paths registered on
  * that device. Deepest parent first is irrelevant; roots are de-duplicated and
@@ -61,11 +72,11 @@ export function deriveScanRoots(
   extraRoots: readonly string[] = [],
 ): string[] {
   const roots = new Set<string>()
-  const push = (candidate: string | undefined): void => {
+  const push = (candidate: string | undefined, stepUp = false): void => {
     if (candidate === undefined) return
     const trimmed = candidate.trim()
     if (trimmed === '') return
-    roots.add(resolve(trimmed))
+    roots.add(normalizeTargetPath(trimmed, stepUp))
   }
 
   for (const extra of extraRoots) push(extra)
@@ -73,7 +84,7 @@ export function deriveScanRoots(
     const normalized = path.trim()
     if (normalized === '') continue
     // A workspace is a repository root, not a scan root: go one level up.
-    push(resolve(normalized, '..'))
+    push(normalized, true)
   }
   push(home)
   return [...roots].sort()
@@ -91,7 +102,7 @@ function shellQuote(value: string): string {
  */
 export function buildGitScanScript(roots: readonly string[], maxDepth = DEFAULT_SCAN_DEPTH): string {
   const depth = Math.max(1, Math.trunc(maxDepth)) + 1
-  const rootList = roots.map(shellQuote).join(' ')
+  const rootList = roots.length > 0 ? roots.map(shellQuote).join(' ') : '"$HOME"'
   const prune = [...PRUNED_NAMES].map(name => `-name ${shellQuote(name)}`).join(' -o ')
   return [
     `for root in ${rootList}; do`,
@@ -100,7 +111,7 @@ export function buildGitScanScript(roots: readonly string[], maxDepth = DEFAULT_
     `    \\( ${prune} \\) -prune -o`,
     `    -name '.*' ! -name '.git' -prune -o`,
     `    -type d -name '.git' -print 2>/dev/null`,
-    `done | while IFS= read -r g; do`,
+    `done | sort -u | while IFS= read -r g; do`,
     `  d=\${g%/.git}`,
     `  u=$(git -C "$d" config --get remote.origin.url 2>/dev/null || true)`,
     `  [ -n "$u" ] && printf '${SCAN_MARKER}\\t%s\\t%s\\n' "$d" "$u"`,

@@ -147,6 +147,7 @@ export declare class DeviceRegistry {
      * carries the final flag, and a live `true -> false` there is a completion
      * for the same reason a stream event is.
      */
+    private isCurrentlyViewedSession;
     private reconcileRunningForDevice;
     /** Observe one remote event before it is forwarded to the local mirror. */
     private observeRemoteFrame;

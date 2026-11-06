@@ -62,6 +62,11 @@ export declare const zh: {
     readonly sshUser: "SSH 用户名";
     readonly sshUserPlaceholder: "留空复用 ~/.ssh/config";
     readonly sshPort: "SSH 端口";
+    readonly sshPortPlaceholder: "默认 22 / 复用 ~/.ssh/config";
+    readonly excludedWorkspacesHeading: "已拆分的跨设备工作区成员";
+    readonly excludedWorkspacesDesc: "此前在侧边栏拆分的成员工作区不会参与自动聚合；可在此恢复合并。";
+    readonly restoreAggregation: "恢复合并";
+    readonly deviceEnabledLabel: "启用此远端设备连接";
     readonly sshKeySelect: "SSH 私钥";
     readonly sshKeyAuto: "自动（SSH Agent / 默认密钥）";
     readonly sshKeyAutoDesc: "优先复用系统 SSH Agent 或默认密钥对";

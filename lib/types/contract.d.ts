@@ -430,6 +430,8 @@ export interface MultiDeviceUiPreferences {
 /** Complete Hub snapshot returned to the Client UI. */
 export interface MultiDeviceSnapshot {
     readonly revision: number;
+    /** Stable Host identity used to detect self-loops across any hostname/IP. */
+    readonly hostId?: string;
     /**
      * Host-authoritative UI mode. `aggregated` merges remote workspaces and
      * sessions into the local DSH surface; `native` keeps that surface local-only
@@ -458,6 +460,12 @@ export interface MultiDeviceSnapshot {
     /** Persisted display preferences; optional so older Hosts still parse. */
     readonly ui?: MultiDeviceUiPreferences;
 }
+/** True when a Session ID is already namespaced by `dsh-multi-device`. */
+export declare function isNamespacedSessionId(sessionId: string): boolean;
+/** True when a Workspace ID is already a remote or logical workspace from `dsh-multi-device`. */
+export declare function isNamespacedWorkspaceId(workspaceId: string): boolean;
+/** True when an Event ID is already namespaced by `dsh-multi-device`. */
+export declare function isNamespacedEventId(eventId: string): boolean;
 /** Waterfall interactions the host tracks per remote device. */
 export type PendingInteractionKind = 'approval' | 'question' | 'plan-review';
 /**

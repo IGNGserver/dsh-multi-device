@@ -202,7 +202,8 @@ export const DEFAULT_AGGREGATION_CONFIG: WorkspaceAggregationConfig = {
  */
 export class WorkspaceAggregator {
   private config: WorkspaceAggregationConfig
-  private readonly gitRemoteCache = new Map<string, string>()
+  private readonly gitRemoteCache = new Map<string, string | null>()
+  private readonly negativeCacheAt = new Map<string, number>()
 
   constructor(initialConfig: Partial<WorkspaceAggregationConfig> = {}) {
     this.config = {
@@ -292,18 +293,26 @@ export class WorkspaceAggregator {
   noteGitRemote(deviceId: DeviceId, path: string, rawGitRemote: string): void {
     const key = workspaceMemberKey(deviceId, path)
     this.gitRemoteCache.set(key, rawGitRemote)
+    this.negativeCacheAt.delete(key)
   }
 
   getCachedGitRemote(deviceId: DeviceId, path: string): string | undefined {
     const key = workspaceMemberKey(deviceId, path)
     const cached = this.gitRemoteCache.get(key)
-    if (cached !== undefined) return cached
+    if (typeof cached === 'string') return cached
+    if (cached === null) {
+      const at = this.negativeCacheAt.get(key) ?? 0
+      if (Date.now() - at < 30_000) return undefined
+    }
     if (deviceId === LOCAL_DEVICE_ID) {
       const discovered = discoverLocalGitRemote(path)
       if (discovered !== undefined) {
         this.gitRemoteCache.set(key, discovered)
+        this.negativeCacheAt.delete(key)
         return discovered
       }
+      this.gitRemoteCache.set(key, null)
+      this.negativeCacheAt.set(key, Date.now())
     }
     return undefined
   }

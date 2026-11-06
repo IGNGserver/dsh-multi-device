@@ -199,8 +199,10 @@ class MultiDeviceClientStore {
   private started = false
   /** Latest Session reported to the Host, used to dedupe mount/cleanup races. */
   private reportedSessionId: string | undefined
+  private activeSessionInFlight: Promise<void> | undefined
   /** Monotonic control-plane sequence so an older HTTP request cannot win. */
   private activeSessionSeq = 0
+  private lastPollAt = 0
   /** Sessions for which this client already asked the Host to clear unread. */
   private readonly unreadClearInFlight = new Set<string>()
 
@@ -239,6 +241,10 @@ class MultiDeviceClientStore {
     void this.refreshSnapshot()
     this.connectSse()
     this.pollTimer = setInterval(() => {
+      const sseOpen = typeof EventSource !== 'undefined' && this.eventSource?.readyState === EventSource.OPEN
+      const now = Date.now()
+      if (sseOpen && now - this.lastPollAt < 30_000) return
+      this.lastPollAt = now
       void this.refreshSnapshot()
     }, 5_000)
 
@@ -293,7 +299,16 @@ class MultiDeviceClientStore {
     activeOverride?: DeviceId | null,
   ): void {
     if (snap.revision < this.state.snapshot.revision) return
-    const alive = new Set(
+    if (
+      snap.revision === this.state.snapshot.revision &&
+      activeOverride === undefined &&
+      !this.state.loading &&
+      this.state.error === undefined
+    ) {
+      return
+    }
+    const configuredIds = new Set(snap.devices.map(device => device.id))
+    const keepAliveEligible = new Set(
       snap.devices.filter(device => device.keepNativeAlive !== false).map(device => device.id),
     )
     const nextDisplayMode: DisplayMode = snap.displayMode ?? this.state.displayMode
@@ -302,11 +317,11 @@ class MultiDeviceClientStore {
     if (nextDisplayMode === 'native') {
       if (activeOverride === null) {
         activeNative = undefined
-      } else if (activeOverride !== undefined && alive.has(activeOverride)) {
+      } else if (activeOverride !== undefined && configuredIds.has(activeOverride)) {
         activeNative = activeOverride
       } else if (
         this.state.activeNativeDeviceId !== undefined &&
-        alive.has(this.state.activeNativeDeviceId)
+        configuredIds.has(this.state.activeNativeDeviceId)
       ) {
         activeNative = this.state.activeNativeDeviceId
       }
@@ -314,10 +329,13 @@ class MultiDeviceClientStore {
       // tab guaranteed to exist.
     }
 
-    const keepAlive = this.state.keepAliveDeviceIds.filter(id => alive.has(id)).slice(-MAX_KEEP_ALIVE_PAGES)
+    const keepAlive = this.state.keepAliveDeviceIds
+      .filter(id => keepAliveEligible.has(id))
+      .slice(-MAX_KEEP_ALIVE_PAGES)
     if (
       nextDisplayMode === 'native' &&
       activeNative !== undefined &&
+      keepAliveEligible.has(activeNative) &&
       !keepAlive.includes(activeNative)
     ) {
       keepAlive.push(activeNative)
@@ -330,7 +348,7 @@ class MultiDeviceClientStore {
     if (
       nextDisplayMode === 'aggregated' &&
       paneDevice?.isRemote === true &&
-      alive.has(paneDevice.deviceId) &&
+      keepAliveEligible.has(paneDevice.deviceId) &&
       !keepAlive.includes(paneDevice.deviceId)
     ) {
       keepAlive.push(paneDevice.deviceId)
@@ -375,15 +393,18 @@ class MultiDeviceClientStore {
   }
 
   private activateNativeDevice(deviceId: DeviceId): void {
-    const alive = new Set(
+    const device = this.state.snapshot.devices.find(candidate => candidate.id === deviceId)
+    if (device === undefined) return
+    const keepAliveEligible = new Set(
       this.state.snapshot.devices
-        .filter(device => device.keepNativeAlive !== false)
-        .map(device => device.id),
+        .filter(candidate => candidate.keepNativeAlive !== false)
+        .map(candidate => candidate.id),
     )
-    if (!alive.has(deviceId)) return
-    const keepAlive = this.state.keepAliveDeviceIds.filter(id => alive.has(id) && id !== deviceId)
-    keepAlive.push(deviceId)
-    while (keepAlive.length > MAX_KEEP_ALIVE_PAGES) keepAlive.shift()
+    const keepAlive = this.state.keepAliveDeviceIds.filter(id => keepAliveEligible.has(id) && id !== deviceId)
+    if (keepAliveEligible.has(deviceId)) {
+      keepAlive.push(deviceId)
+      while (keepAlive.length > MAX_KEEP_ALIVE_PAGES) keepAlive.shift()
+    }
     this.setState({ activeNativeDeviceId: deviceId, keepAliveDeviceIds: keepAlive })
   }
 
@@ -485,7 +506,9 @@ class MultiDeviceClientStore {
    */
   setActiveSession(sessionId: string | undefined): Promise<void> {
     const next = sessionId === undefined || sessionId === '' ? undefined : sessionId
-    if (this.reportedSessionId === next) return Promise.resolve()
+    if (this.reportedSessionId === next) {
+      return this.activeSessionInFlight ?? Promise.resolve()
+    }
     this.reportedSessionId = next
     this.setState({
       ...(next !== undefined ? { activeSessionId: next } : { activeSessionId: undefined }),
@@ -495,10 +518,12 @@ class MultiDeviceClientStore {
       if (decoded.isRemote) this.ensureKeepAliveDevice(decoded.deviceId)
     }
     const requestSeq = ++this.activeSessionSeq
-    return this.callControlPlane<{ accepted: true }>({
+    const promise = this.callControlPlane<{ accepted: true }>({
       action: 'setActiveSession',
       payload: { sessionId: next ?? '', requestSeq, clientId: CLIENT_INSTANCE_ID },
     }).then(() => undefined)
+    this.activeSessionInFlight = promise
+    return promise
   }
 
   /** Clear the scope only when the unmounting Session is still the reported one. */

@@ -311,7 +311,8 @@ export class GitMatchRunner {
       }
     }
 
-    return [...seeds.values()].filter(seed => seed.presentDeviceIds.size < devices.length)
+    const enabledCount = devices.filter(device => device.state !== 'disabled').length
+    return [...seeds.values()].filter(seed => seed.presentDeviceIds.size < enabledCount)
   }
 
   private async discoverLocalOrigins(paths: readonly string[]): Promise<Map<string, string>> {

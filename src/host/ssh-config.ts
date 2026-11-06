@@ -252,6 +252,9 @@ export function loadSystemSshConfigBlocks(
   )
 }
 
+let cachedDefaultHosts: { at: number; configFile: string; home: string; hosts: SshConfigHostEntry[] } | undefined
+const SSH_CONFIG_CACHE_TTL_MS = 3_000
+
 /**
  * List concrete (non-wildcard) SSH host entries from `~/.ssh/config` for UI discovery/import.
  */
@@ -259,8 +262,19 @@ export function listSshConfigHosts(
   configFile = join(homedir(), '.ssh', 'config'),
   home = homedir(),
 ): SshConfigHostEntry[] {
+  const now = Date.now()
+  if (
+    cachedDefaultHosts !== undefined &&
+    cachedDefaultHosts.configFile === configFile &&
+    cachedDefaultHosts.home === home &&
+    now - cachedDefaultHosts.at < SSH_CONFIG_CACHE_TTL_MS
+  ) {
+    return cachedDefaultHosts.hosts
+  }
   const blocks = loadSystemSshConfigBlocks(configFile)
-  return extractConcreteHostsFromBlocks(blocks, home)
+  const hosts = extractConcreteHostsFromBlocks(blocks, home)
+  cachedDefaultHosts = { at: now, configFile, home, hosts }
+  return hosts
 }
 
 /**
@@ -279,12 +293,20 @@ export function extractConcreteHostsFromBlocks(
       if (seenAliases.has(pattern)) continue
       seenAliases.add(pattern)
 
+      let hasExplicitUser = false
+      let hasExplicitPort = false
+      for (const candidate of blocks) {
+        if (!matchesHostPatterns(pattern, candidate.patterns)) continue
+        if (candidate.options['user']?.[0] !== undefined) hasExplicitUser = true
+        if (candidate.options['port']?.[0] !== undefined) hasExplicitPort = true
+      }
+
       const resolved = resolveSshParametersFromBlocks(pattern, blocks, home)
       entries.push({
         alias: pattern,
         hostName: resolved.hostName,
-        ...(resolved.user !== '' ? { user: resolved.user } : {}),
-        ...(resolved.port !== 22 ? { port: resolved.port } : { port: 22 }),
+        ...(hasExplicitUser && resolved.user !== '' ? { user: resolved.user } : {}),
+        ...(hasExplicitPort ? { port: resolved.port } : { port: 22 }),
         ...(resolved.identityFiles[0] !== undefined ? { identityFile: resolved.identityFiles[0] } : {}),
         ...(resolved.proxyJump !== undefined ? { proxyJump: resolved.proxyJump } : {}),
         ...(resolved.proxyCommand !== undefined ? { proxyCommand: resolved.proxyCommand } : {}),
@@ -380,8 +402,7 @@ export function resolveSshParametersFromBlocks(
     }
     if (opts['identityfile'] !== undefined) {
       for (const rawKey of opts['identityfile']) {
-        const expanded = expandHomePath(rawKey, home)
-        if (!identityFiles.includes(expanded)) identityFiles.push(expanded)
+        if (!identityFiles.includes(rawKey)) identityFiles.push(rawKey)
       }
     }
     if (proxyJump === undefined && opts['proxyjump']?.[0] !== undefined) {
@@ -413,15 +434,18 @@ export function resolveSshParametersFromBlocks(
     r: finalUser,
     p: String(finalPort),
   })
+  const tokenMap = {
+    h: finalHostName,
+    u: localUser,
+    r: finalUser,
+    p: String(finalPort),
+  }
 
-  const expandedIdentityFiles = identityFiles.map(file =>
-    expandSshTokens(file, {
-      h: finalHostName,
-      u: localUser,
-      r: finalUser,
-      p: String(finalPort),
-    }),
-  )
+  const expandedIdentityFiles: string[] = []
+  for (const file of identityFiles) {
+    const expanded = expandHomePath(expandSshTokens(file, tokenMap), home)
+    if (!expandedIdentityFiles.includes(expanded)) expandedIdentityFiles.push(expanded)
+  }
 
   return {
     aliasOrHost: targetHost,
@@ -429,8 +453,8 @@ export function resolveSshParametersFromBlocks(
     port: finalPort,
     user: finalUser,
     identityFiles: expandedIdentityFiles,
-    ...(proxyJump !== undefined ? { proxyJump } : {}),
-    ...(proxyCommand !== undefined ? { proxyCommand } : {}),
+    ...(proxyJump !== undefined ? { proxyJump: expandSshTokens(proxyJump, tokenMap) } : {}),
+    ...(proxyCommand !== undefined ? { proxyCommand: expandSshTokens(proxyCommand, tokenMap) } : {}),
     ...(forwardAgent !== undefined ? { forwardAgent } : {}),
     ...(serverAliveInterval !== undefined ? { serverAliveInterval } : {}),
     ...(strictHostKeyChecking !== undefined ? { strictHostKeyChecking } : {}),

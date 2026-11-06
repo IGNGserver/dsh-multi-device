@@ -61,6 +61,7 @@ export interface SessionControllerLike {
     fork(request: {
         sessionId: string;
         atSeq?: number;
+        allowMigration?: boolean;
     }): Promise<{
         sessionId: string;
     }>;

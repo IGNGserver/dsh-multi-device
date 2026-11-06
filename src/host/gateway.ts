@@ -37,7 +37,7 @@ export interface SessionControllerLike {
   selectModel(request: { sessionId: string; provider: string; model: string; reasoningEffort?: string }): Promise<{ selected: Record<string, unknown> }>
   modelCatalog(): Promise<Record<string, unknown>>
   rename(request: { sessionId: string; title: string }): Promise<{ title: string; seq: number }>
-  fork(request: { sessionId: string; atSeq?: number }): Promise<{ sessionId: string }>
+  fork(request: { sessionId: string; atSeq?: number; allowMigration?: boolean }): Promise<{ sessionId: string }>
   prompt(request: { requestId: string; sessionId: string; mode: 'queue' | 'steer'; content: readonly unknown[]; clientTimeZone?: string }, signal: AbortSignal): Promise<{ accepted: true }>
   attachment(request: { sessionId: string; attachmentId: string }): Promise<Record<string, unknown>>
   updateQueue(request: { sessionId: string; itemId: string; action: Record<string, unknown> }): Promise<{ accepted: true }>
@@ -414,6 +414,7 @@ export function installAggregatedGateway02(
               ...(request.agentPreset !== undefined ? { agentPreset: request.agentPreset } : {}),
             },
           })) as { sessionId: string; agentPreset?: string }
+          registry.nativeProxyManager.requestRefresh(owner.client.id)
           return {
             sessionId: encodeRemoteSessionId(owner.client.id, created.sessionId),
             ...(created.agentPreset !== undefined ? { agentPreset: created.agentPreset } : {}),
@@ -456,6 +457,7 @@ export function installAggregatedGateway02(
               ...(request.agentPreset !== undefined ? { agentPreset: request.agentPreset } : {}),
             },
           })) as { sessionId: string; agentPreset?: string }
+          registry.nativeProxyManager.requestRefresh(remoteClient.id)
           return {
             sessionId: encodeRemoteSessionId(remoteClient.id, created.sessionId),
             ...(created.agentPreset !== undefined ? { agentPreset: created.agentPreset } : {}),
@@ -479,6 +481,7 @@ export function installAggregatedGateway02(
               ...(request.agentPreset !== undefined ? { agentPreset: request.agentPreset } : {}),
             },
           })) as { sessionId: string; agentPreset?: string }
+          registry.nativeProxyManager.requestRefresh(remoteClient.id)
           return {
             sessionId: encodeRemoteSessionId(remoteClient.id, created.sessionId),
             ...(created.agentPreset !== undefined ? { agentPreset: created.agentPreset } : {}),
@@ -554,8 +557,11 @@ export function installAggregatedGateway02(
       request: {
         sessionId: owner.rawSessionId,
         ...(request.atSeq !== undefined ? { atSeq: request.atSeq } : {}),
+        ...(request.allowMigration !== undefined ? { allowMigration: request.allowMigration } : {}),
       },
     })) as { sessionId: string }
+    await owner.client.refreshSessionCatalog().catch(() => {})
+    registry.nativeProxyManager.requestRefresh(owner.client.id)
     return { sessionId: encodeRemoteSessionId(owner.client.id, res.sessionId) }
   })
 
@@ -609,12 +615,17 @@ export function installAggregatedGateway02(
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner === undefined) return origSessionProjections(request, signal)
     requireConnected(owner.client)
-    return (await owner.client.invokeUnary(
+    const res = (await owner.client.invokeUnary(
       'session',
       'projections',
       { request: { sessionId: owner.rawSessionId } },
       signal,
-    )) as { asOfSeq: number; values: Record<string, unknown> } | null
+    )) as { kind?: string; asOfSeq: number; values: Record<string, unknown> } | null
+    if (res === null || !isRecord(res) || !isRecord(res.values)) return res
+    return {
+      ...res,
+      values: owner.client.namespaceProjectionValues(res.values),
+    }
   })
 
   if (origSessionOpenWorkspacePath !== undefined) {
@@ -671,7 +682,17 @@ export function installAggregatedGateway02(
                 ? { parentSession: encodeRemoteSessionId(routed.client.id, rawFrame.header.parentSession) }
                 : {}),
             }
-            yield { ...rawFrame, header }
+            const projections = isRecord(rawFrame.projections) && isRecord(rawFrame.projections.values)
+              ? {
+                  ...rawFrame.projections,
+                  values: routed.client.namespaceProjectionValues(rawFrame.projections.values),
+                }
+              : rawFrame.projections
+            yield {
+              ...rawFrame,
+              header,
+              ...(projections !== undefined ? { projections } : {}),
+            }
           } else {
             yield rawFrame as Record<string, unknown>
           }
@@ -844,12 +865,16 @@ export function installAggregatedGateway02(
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner !== undefined) {
       requireConnected(owner.client)
-      await owner.client.invokeUnary('workspace', 'archiveSession', {
+      const remoteRes = (await owner.client.invokeUnary('workspace', 'archiveSession', {
         request: {
           sessionId: owner.rawSessionId,
           ...(request.stopActivity === true ? { stopActivity: true } : {}),
         },
-      })
+      })) as { archivedSessionIds?: readonly string[] } | undefined
+      if (Array.isArray(remoteRes?.archivedSessionIds)) {
+        owner.client.setArchivedIds(remoteRes.archivedSessionIds)
+        registry.refreshWorkspaceView()
+      }
       return { archivedSessionIds: collectMergedArchivedIds(registry, workspaceRegistry) }
     }
     const localRes = await origWorkspaceArchive(request)
@@ -866,9 +891,13 @@ export function installAggregatedGateway02(
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner !== undefined) {
       requireConnected(owner.client)
-      await owner.client.invokeUnary('workspace', 'unarchiveSession', {
+      const remoteRes = (await owner.client.invokeUnary('workspace', 'unarchiveSession', {
         request: { sessionId: owner.rawSessionId },
-      })
+      })) as { archivedSessionIds?: readonly string[] } | undefined
+      if (Array.isArray(remoteRes?.archivedSessionIds)) {
+        owner.client.setArchivedIds(remoteRes.archivedSessionIds)
+        registry.refreshWorkspaceView()
+      }
       return { archivedSessionIds: collectMergedArchivedIds(registry, workspaceRegistry) }
     }
     const localRes = await origWorkspaceUnarchive(request)
@@ -885,9 +914,13 @@ export function installAggregatedGateway02(
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner !== undefined) {
       requireConnected(owner.client)
-      await owner.client.invokeUnary('workspace', 'pinSession', {
+      const remoteRes = (await owner.client.invokeUnary('workspace', 'pinSession', {
         request: { sessionId: owner.rawSessionId },
-      })
+      })) as { pinnedSessionIds?: readonly string[] } | undefined
+      if (Array.isArray(remoteRes?.pinnedSessionIds)) {
+        owner.client.setPinnedIds(remoteRes.pinnedSessionIds)
+        registry.refreshWorkspaceView()
+      }
       return { pinnedSessionIds: collectMergedPinnedIds(registry, workspaceRegistry) }
     }
     const localRes = await origWorkspacePin(request)
@@ -904,9 +937,13 @@ export function installAggregatedGateway02(
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner !== undefined) {
       requireConnected(owner.client)
-      await owner.client.invokeUnary('workspace', 'unpinSession', {
+      const remoteRes = (await owner.client.invokeUnary('workspace', 'unpinSession', {
         request: { sessionId: owner.rawSessionId },
-      })
+      })) as { pinnedSessionIds?: readonly string[] } | undefined
+      if (Array.isArray(remoteRes?.pinnedSessionIds)) {
+        owner.client.setPinnedIds(remoteRes.pinnedSessionIds)
+        registry.refreshWorkspaceView()
+      }
       return { pinnedSessionIds: collectMergedPinnedIds(registry, workspaceRegistry) }
     }
     const localRes = await origWorkspaceUnpin(request)
@@ -925,9 +962,25 @@ export function installAggregatedGateway02(
     )
   })
 
-  // 8. TypertGateway `$events` stream & `$events/result` waterfall response routing
+  // 8. TypertGateway `$events` stream, `userQuestions/attachWait`, `userQuestions/answer`, & `$events/result` routing
   const origWireOpen = typertGateway.wireStream.open.bind(typertGateway.wireStream)
   typertGateway.wireStream.open = async (endpoint, payload, uplink, peer, signal) => {
+    if (
+      registry.isAggregatedMode() &&
+      endpoint === 'userQuestions/attachWait' &&
+      isRecord(payload) &&
+      isRecord(payload.args) &&
+      typeof payload.args.agent === 'string'
+    ) {
+      const owner = registry.resolveSessionOwner(payload.args.agent)
+      if (owner !== undefined) {
+        return owner.client.openStream(
+          'userQuestions/attachWait',
+          { ...payload.args, agent: owner.rawSessionId },
+          signal,
+        )
+      }
+    }
     const inner = await origWireOpen(endpoint, payload, uplink, peer, signal)
     if (endpoint !== '$events') return inner
     return multiplexRemoteEventsStream(registry, inner, signal)
@@ -939,6 +992,47 @@ export function installAggregatedGateway02(
   if (typeof typertGateway.dispatchRpc === 'function') {
     const origDispatchRpc = typertGateway.dispatchRpc.bind(typertGateway)
     typertGateway.dispatchRpc = async (endpoint, payload, signal, peer) => {
+      if (
+        registry.isAggregatedMode() &&
+        endpoint === 'userQuestions/answer' &&
+        isRecord(payload) &&
+        isRecord(payload.args) &&
+        typeof payload.args.agent === 'string'
+      ) {
+        const owner = registry.resolveSessionOwner(payload.args.agent)
+        if (owner !== undefined) {
+          if (!owner.client.isConnected()) {
+            return {
+              ok: false,
+              error: {
+                code: 'dsh-md/device-offline',
+                message: `Device "${owner.client.deviceConfig.name}" is offline`,
+                details: {},
+              },
+            }
+          }
+          try {
+            const value = await owner.client.invokeUnary(
+              'userQuestions',
+              'answer',
+              { ...payload.args, agent: owner.rawSessionId },
+              signal,
+            )
+            return { ok: true, value }
+          } catch (error) {
+            const code = isRecord(error) && typeof error.code === 'string' ? error.code : 'gateway/internal'
+            const details = isRecord(error) && isRecord(error.details) ? error.details : {}
+            return {
+              ok: false,
+              error: {
+                code,
+                message: error instanceof Error ? error.message : String(error),
+                details,
+              },
+            }
+          }
+        }
+      }
       if (
         registry.isAggregatedMode() &&
         endpoint === '$events/result' &&
@@ -957,9 +1051,19 @@ export function installAggregatedGateway02(
                 error: { code: 'gateway/service-unavailable', message: 'Owning remote device is disconnected', details: {} },
               }
             }
+            let forwardedOutcome = outcome as Parameters<typeof client.respondWaterfall>[1]
+            // Never let a local lookup failure (`session/not-found` from the
+            // hidden mirror) cancel a live remote waterfall on the remote Host.
+            if (
+              forwardedOutcome.kind === 'rejected' &&
+              isRecord(forwardedOutcome.error) &&
+              forwardedOutcome.error.code === 'session/not-found'
+            ) {
+              forwardedOutcome = { kind: 'next' }
+            }
             const res = await client.respondWaterfall(
               decoded.remoteEventId,
-              outcome as Parameters<typeof client.respondWaterfall>[1],
+              forwardedOutcome,
               signal,
             )
             if (!res.ok) {
@@ -1148,25 +1252,34 @@ async function* multiplexControlStream(
     })
   })
 
+  let localDone = false
+  let localError: unknown
   const pumpLocal = (async () => {
-    for await (const frame of localStream) {
-      if (signal.aborted) return
-      if (frame.type === 'baseline' && isRecord(frame.value) && isRecord(frame.value.projections)) {
-        const projections: Record<string, unknown> = { ...frame.value.projections }
-        if (registry.isAggregatedMode()) {
-          for (const client of registry.clientList()) {
-            for (const [rawSid, block] of client.controlProjections().entries()) {
-              projections[encodeRemoteSessionId(client.id, rawSid)] = block
+    try {
+      for await (const frame of localStream) {
+        if (signal.aborted) return
+        if (frame.type === 'baseline' && isRecord(frame.value) && isRecord(frame.value.projections)) {
+          const projections: Record<string, unknown> = { ...frame.value.projections }
+          if (registry.isAggregatedMode()) {
+            for (const client of registry.clientList()) {
+              for (const [rawSid, block] of client.controlProjections().entries()) {
+                projections[encodeRemoteSessionId(client.id, rawSid)] = block
+              }
             }
           }
+          push({
+            type: 'baseline',
+            value: { projections },
+          })
+        } else {
+          push(frame)
         }
-        push({
-          type: 'baseline',
-          value: { projections },
-        })
-      } else {
-        push(frame)
       }
+    } catch (error) {
+      localError = error
+    } finally {
+      localDone = true
+      queue.notify()
     }
   })()
 
@@ -1185,6 +1298,8 @@ async function* multiplexControlStream(
         yield next
         continue
       }
+      if (localError !== undefined) throw localError
+      if (localDone) return
       await queue.wait()
     }
   } finally {
@@ -1326,20 +1441,29 @@ async function* multiplexWorkspaceFollow(
     syncIncrementalDiff()
   })
 
+  let localDone = false
+  let localError: unknown
   const pumpLocal = (async () => {
-    for await (const frame of localStream) {
-      if (signal.aborted) return
-      if (frame.type === 'baseline') {
-        const state = computeCurrentState()
-        installPrevState(state)
-        baselineSent = true
-        push({
-          type: 'baseline',
-          value: state,
-        })
-      } else {
-        syncIncrementalDiff()
+    try {
+      for await (const frame of localStream) {
+        if (signal.aborted) return
+        if (frame.type === 'baseline') {
+          const state = computeCurrentState()
+          installPrevState(state)
+          baselineSent = true
+          push({
+            type: 'baseline',
+            value: state,
+          })
+        } else {
+          syncIncrementalDiff()
+        }
       }
+    } catch (error) {
+      localError = error
+    } finally {
+      localDone = true
+      queue.notify()
     }
   })()
 
@@ -1358,6 +1482,8 @@ async function* multiplexWorkspaceFollow(
         yield next
         continue
       }
+      if (localError !== undefined) throw localError
+      if (localDone) return
       await queue.wait()
     }
   } finally {
@@ -1414,34 +1540,43 @@ async function* multiplexRemoteEventsStream(
     pushPendingRemoteWaterfalls()
   })
 
+  let localDone = false
+  let localError: unknown
   const pumpLocal = (async () => {
-    for await (const frame of localEvents) {
-      if (signal.aborted) return
-      push(frame)
-      if (!readySent && isRecord(frame) && frame.type === 'ready') {
-        readySent = true
-        pushPendingRemoteWaterfalls()
-        if (registry.isAggregatedMode()) {
-          // DSH's Session store fetched `session.list` once before SSH devices
-          // finished connecting. Replay every known remote summary into this
-          // generation; without it, workspace rows point at Session ids the
-          // sidebar has no summary for and silently hides those rows.
-          for (const client of registry.clientList()) {
-            for (const summary of client.sessionSummaries()) {
-              push({
-                type: 'emit',
-                event: 'api-session/added',
-                args: [client.namespaceSummary(summary)],
-              })
+    try {
+      for await (const frame of localEvents) {
+        if (signal.aborted) return
+        push(frame)
+        if (!readySent && isRecord(frame) && frame.type === 'ready') {
+          readySent = true
+          pushPendingRemoteWaterfalls()
+          if (registry.isAggregatedMode()) {
+            // DSH's Session store fetched `session.list` once before SSH devices
+            // finished connecting. Replay every known remote summary into this
+            // generation; without it, workspace rows point at Session ids the
+            // sidebar has no summary for and silently hides those rows.
+            for (const client of registry.clientList()) {
+              for (const summary of client.sessionSummaries()) {
+                push({
+                  type: 'emit',
+                  event: 'api-session/added',
+                  args: [client.namespaceSummary(summary)],
+                })
+              }
             }
-          }
-          // A fresh browser generation starts with the local model catalog
-          // cached; make it refetch the active remote Session's catalog.
-          if (registry.activeSessionScope().kind === 'remote') {
-            push({ type: 'emit', event: 'llm/adapters-updated', args: [] })
+            // A fresh browser generation starts with the local model catalog
+            // cached; make it refetch the active remote Session's catalog.
+            if (registry.activeSessionScope().kind === 'remote') {
+              push({ type: 'emit', event: 'llm/adapters-updated', args: [] })
+            }
           }
         }
       }
+    } catch (error) {
+      localError = error
+    } finally {
+      localDone = true
+      queue.notify()
     }
   })()
 
@@ -1460,6 +1595,8 @@ async function* multiplexRemoteEventsStream(
         yield next
         continue
       }
+      if (localError !== undefined) throw localError
+      if (localDone) return
       await queue.wait()
     }
   } finally {

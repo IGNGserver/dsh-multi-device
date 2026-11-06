@@ -114,6 +114,11 @@ const CSS_TEXT = `
   color: var(--dsw-alias-label-tertiary);
 }
 
+[data-row-key^='workspace:']:hover > .dsh-md-project-device,
+[data-row-key^='workspace:'][class*='menuOpen'] > .dsh-md-project-device {
+  display: none;
+}
+
 .dsh-md-project-device-label {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -614,7 +619,7 @@ const CSS_TEXT = `
 .dsh-md-select-dropdown {
   position: absolute;
   top: calc(100% + 4px);
-  right: 0;
+  left: 0;
   min-width: 100%;
   width: max-content;
   max-width: min(380px, 90vw);
@@ -630,6 +635,11 @@ const CSS_TEXT = `
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+.dsh-md-select-container.isCompact .dsh-md-select-dropdown {
+  left: auto;
+  right: 0;
 }
 
 .dsh-md-select-empty {
@@ -770,6 +780,20 @@ html {
  * Browser-hosted DSH on macOS has no such native title area and keeps 0. */
 html[data-platform='darwin'] .dsh-md-frame-native.dsh-md-frame-desktop {
   --dsh-md-native-bar-top: var(--dsh-frame-top-clearance, 48px);
+}
+
+/* Keep macOS collapsed-sidebar window-chrome controls above the overlay */
+[data-shell-leading] {
+  z-index: 25 !important;
+}
+
+/* While resizing the local sidebar/rightbar, prevent iframes from swallowing pointer events */
+[data-dragging] .dsh-md-native-stage {
+  pointer-events: none !important;
+}
+
+html[data-platform='darwin'] [data-sidebar-collapsed] .dsh-md-pane-bar {
+  padding-left: var(--dsh-frame-leading-clearance, 160px);
 }
 
 .dsh-md-native-layer {
