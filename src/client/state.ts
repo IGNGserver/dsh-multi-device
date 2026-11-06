@@ -14,8 +14,9 @@ import { useSyncExternalStore } from 'react'
 import {
   decodeSessionId,
   type DeviceConnectionState,
-  type DeviceId,
+  DeviceId,
   type DisplayMode,
+  encodeRemoteSessionId,
   type ManualWorkspaceRule,
   type MultiDeviceSnapshot,
   type MultiDeviceUiPreferences,
@@ -29,6 +30,36 @@ import type { ControlPlaneRequest, DiagnosticsClientReport, MultiDeviceDiagnosti
 import { readNativeBarMetrics } from './barMetrics.ts'
 
 export type HubTabId = 'native' | 'devices' | 'git'
+
+/** Per-browser memory of the Native Mode device tab. */
+const ACTIVE_NATIVE_DEVICE_KEY = 'dsh-multi-device.active-native-device'
+
+/** Decode the owning device of a remote Session, or undefined for local/empty. */
+export function remoteDeviceForSession(sessionId: string | undefined): DeviceId | undefined {
+  if (sessionId === undefined || sessionId === '') return undefined
+  const decoded = decodeSessionId(sessionId)
+  return decoded.isRemote ? decoded.deviceId : undefined
+}
+
+function readStoredActiveNativeDevice(): DeviceId | undefined {
+  try {
+    if (typeof localStorage === 'undefined') return undefined
+    const value = localStorage.getItem(ACTIVE_NATIVE_DEVICE_KEY)
+    return value === null || value === '' ? undefined : DeviceId(value)
+  } catch {
+    return undefined
+  }
+}
+
+function storeActiveNativeDevice(deviceId: DeviceId | undefined): void {
+  try {
+    if (typeof localStorage === 'undefined') return
+    if (deviceId === undefined) localStorage.removeItem(ACTIVE_NATIVE_DEVICE_KEY)
+    else localStorage.setItem(ACTIVE_NATIVE_DEVICE_KEY, deviceId)
+  } catch {
+    // Private mode / blocked storage: keep the in-memory tab only.
+  }
+}
 
 /** Map device connection lifecycle states to official DSH `StateDot` states. */
 export function deviceStateToDotState(state: DeviceConnectionState): StateDotState {
@@ -144,6 +175,12 @@ export interface MultiDeviceClientState {
   readonly activeHubTab: HubTabId
   /** Fallback settings modal open state when the host shell does not expose `sidebar.settings`. */
   readonly settingsModalOpen: boolean
+  /**
+   * A remote Session to reopen after the next Aggregated Mode snapshot is
+   * applied. Set when leaving a Native device tab so the mode switch returns to
+   * the conversation the user was actually looking at.
+   */
+  readonly pendingAggregatedSessionId?: string
 }
 
 const MAX_KEEP_ALIVE_PAGES = 6
@@ -215,6 +252,9 @@ class MultiDeviceClientStore {
       // avoids showing a Native tab bar before the first snapshot arrives; the
       // local surface is already filtered by the Host if it persisted native.
       displayMode: 'aggregated',
+      // Restored so a browser refresh keeps the last Native device tab once the
+      // Host snapshot confirms Native Mode and the device still exists.
+      activeNativeDeviceId: readStoredActiveNativeDevice(),
       keepAliveDeviceIds: [],
       reloadCounters: {},
       activeHubTab: 'devices',
@@ -328,6 +368,7 @@ class MultiDeviceClientStore {
       }
       // No "first device" fallback: 本机 is the stable default and the only
       // tab guaranteed to exist.
+      storeActiveNativeDevice(activeNative)
     }
 
     const keepAlive = this.state.keepAliveDeviceIds
@@ -406,6 +447,7 @@ class MultiDeviceClientStore {
       keepAlive.push(deviceId)
       while (keepAlive.length > MAX_KEEP_ALIVE_PAGES) keepAlive.shift()
     }
+    storeActiveNativeDevice(deviceId)
     this.setState({ activeNativeDeviceId: deviceId, keepAliveDeviceIds: keepAlive })
   }
 
@@ -439,19 +481,49 @@ class MultiDeviceClientStore {
     mode: DisplayMode,
     targetDeviceId?: DeviceId,
   ): Promise<{ ok: boolean; error?: string }> {
+    const previousMode = this.state.displayMode
+    const previousNativeId = this.state.activeNativeDeviceId
+    const previousNative = previousNativeId === undefined
+      ? undefined
+      : this.state.snapshot.devices.find(device => device.id === previousNativeId)
+    const pendingAggregated = mode === 'aggregated' &&
+      previousMode === 'native' &&
+      previousNativeId !== undefined &&
+      previousNative?.nativePaneSessionId !== undefined
+      ? encodeRemoteSessionId(previousNativeId, previousNative.nativePaneSessionId)
+      : undefined
+    const nativeTarget = mode === 'native'
+      ? targetDeviceId ?? remoteDeviceForSession(this.state.activeSessionId)
+      : undefined
+    if (mode === 'aggregated') {
+      // Publish this before the mode snapshot so the reconcile effect can
+      // reopen the remote conversation after the aggregated catalog refreshes.
+      this.setState({ pendingAggregatedSessionId: pendingAggregated })
+    } else if (this.state.pendingAggregatedSessionId !== undefined) {
+      // Entering Native Mode again cancels a restore that never ran.
+      this.setState({ pendingAggregatedSessionId: undefined })
+    }
     const res = await this.callControlPlane<{ snapshot: MultiDeviceSnapshot }>({
       action: 'setDisplayMode',
       payload: { displayMode: mode },
     })
     if (!res.ok) {
+      if (mode === 'aggregated') this.setState({ pendingAggregatedSessionId: undefined })
       this.setState({ error: res.error })
       return { ok: false, error: res.error }
     }
     this.applyIncomingSnapshot(
       res.value.snapshot,
-      mode === 'native' ? targetDeviceId ?? null : null,
+      mode === 'native' ? nativeTarget ?? null : null,
     )
     return { ok: true }
+  }
+
+  /** Consume the remote Session captured when leaving Native Mode. */
+  takePendingAggregatedSession(): string | undefined {
+    const pending = this.state.pendingAggregatedSessionId
+    if (pending !== undefined) this.setState({ pendingAggregatedSessionId: undefined })
+    return pending
   }
 
   /** Switch to a remote device tab, entering Native Mode if necessary. */
@@ -466,6 +538,7 @@ class MultiDeviceClientStore {
   /** Return to the 本机 tab while staying in Native Mode. */
   selectLocalNativeTab(): void {
     if (this.state.displayMode !== 'native') return
+    storeActiveNativeDevice(undefined)
     this.setState({ activeNativeDeviceId: undefined })
   }
 
@@ -475,6 +548,7 @@ class MultiDeviceClientStore {
       this.state.activeNativeDeviceId === deviceId
         ? nextKeepAlive[nextKeepAlive.length - 1]
         : this.state.activeNativeDeviceId
+    storeActiveNativeDevice(nextActive)
     this.setState({
       keepAliveDeviceIds: nextKeepAlive,
       activeNativeDeviceId: nextActive,

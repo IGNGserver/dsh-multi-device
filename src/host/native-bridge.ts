@@ -60,6 +60,19 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
   var lastSelection = null;
   var requestedSessionId = null;
   var requestedAt = 0;
+  var lastTitle = '';
+  var lastSentTitle = null;
+  var titleObserver = null;
+  // A keep-alive page is often display:none. Read clearing must only happen
+  // while this page is actually visible, or a background device would consume
+  // another device's unread marker.
+  var frameVisible = true;
+  var visibilityObserver = null;
+  var lastSentVisibility = null;
+  // The parent shell knows exactly which tab/pane is active. Its postMessage
+  // signal is more reliable than IntersectionObserver for display:none frames,
+  // so it takes precedence once received.
+  var parentVisible = null;
 
   // Workspace fold state is owned by the local Host. The injected prefix is
   // applied before the workspace browser first renders, so there is no
@@ -85,6 +98,177 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
   function send(message) {
     if (!socket || socket.readyState !== 1) return false;
     try { socket.send(JSON.stringify(message)); return true; } catch (error) { return false; }
+  }
+
+  function isFrameVisible() {
+    var pageVisible = true;
+    try { pageVisible = document.visibilityState !== 'hidden'; } catch (error) {}
+    var shellVisible = parentVisible === null ? frameVisible : parentVisible;
+    return shellVisible && pageVisible;
+  }
+
+  function sendVisibility(force) {
+    var next = isFrameVisible();
+    if (!force && next === lastSentVisibility) return;
+    lastSentVisibility = next;
+    send({ type: 'visibility', visible: next });
+    if (next && readySent) {
+      clearUnreadForSelection();
+      report();
+    }
+  }
+
+  function installVisibilityTracking() {
+    if (typeof IntersectionObserver === 'function') {
+      // Start hidden until the observer confirms this frame is rendered. The
+      // callback fires immediately after observe(), including for display:none.
+      frameVisible = false;
+      try {
+        visibilityObserver = new IntersectionObserver(function (entries) {
+          var entry = entries && entries[0];
+          if (!entry) return;
+          var next = entry.isIntersecting === true;
+          if (next === frameVisible) return;
+          frameVisible = next;
+          sendVisibility(false);
+        }, { threshold: 0 });
+        visibilityObserver.observe(document.documentElement);
+      } catch (error) {
+        frameVisible = true;
+        visibilityObserver = null;
+      }
+    }
+    try {
+      document.addEventListener('visibilitychange', function () { sendVisibility(false); });
+    } catch (error) {}
+    try {
+      window.addEventListener('message', function (event) {
+        var data = event && event.data;
+        if (!data || data.__dshMdVisibility !== true) return;
+        var next = data.visible === true;
+        if (next === parentVisible) return;
+        parentVisible = next;
+        sendVisibility(false);
+      });
+    } catch (error) {}
+    sendVisibility(true);
+  }
+
+  function sanitizeTitle(value) {
+    var text = '';
+    try { text = String(value == null ? '' : value); } catch (error) { return ''; }
+    text = text.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+    return text.length > 300 ? text.slice(0, 300) : text;
+  }
+
+  function sendTitle(force) {
+    if (!force && lastSentTitle === lastTitle) return;
+    if (send({ type: 'title', title: lastTitle })) lastSentTitle = lastTitle;
+  }
+
+  function reportTitle() {
+    var next = '';
+    try { next = sanitizeTitle(document.title); } catch (error) {}
+    if (next !== lastTitle) lastTitle = next;
+    sendTitle(false);
+  }
+
+  function installTitleReporter() {
+    if (titleObserver === null && typeof MutationObserver === 'function') {
+      try {
+        titleObserver = new MutationObserver(function () { reportTitle(); });
+        titleObserver.observe(document.head || document.documentElement, {
+          subtree: true,
+          childList: true,
+          characterData: true
+        });
+      } catch (error) {
+        titleObserver = null;
+      }
+    }
+    reportTitle();
+  }
+
+  function copyTextFallback(text) {
+    var area = null;
+    var selection = null;
+    var previousRange = null;
+    try {
+      area = document.createElement('textarea');
+      area.value = text;
+      area.setAttribute('readonly', '');
+      area.style.position = 'fixed';
+      area.style.top = '-1000px';
+      area.style.left = '-1000px';
+      area.style.opacity = '0';
+      document.body.appendChild(area);
+      try {
+        selection = document.getSelection();
+        if (selection && selection.rangeCount > 0) previousRange = selection.getRangeAt(0);
+      } catch (error) {}
+      area.select();
+      var copied = false;
+      try { copied = document.execCommand('copy'); } catch (error) { copied = false; }
+      try { area.remove(); } catch (error) {}
+      if (selection && previousRange) {
+        try {
+          selection.removeAllRanges();
+          selection.addRange(previousRange);
+        } catch (error) {}
+      }
+      return copied === true;
+    } catch (error) {
+      try { if (area) area.remove(); } catch (cleanupError) {}
+      return false;
+    }
+  }
+
+  // Cross-origin iframes only receive clipboard-write when the parent delegates
+  // it (the client also sets allow= on the iframe). Electron guests can still
+  // deny it, so every copy gets a synchronous execCommand fallback inside the
+  // page that owns the click. Without this, DSH's copy buttons silently fail.
+  function installClipboardFallback() {
+    var proto = null;
+    try { proto = typeof Clipboard === 'function' ? Clipboard.prototype : null; } catch (error) {}
+    var target = proto;
+    var original = null;
+    try {
+      var descriptor = proto && Object.getOwnPropertyDescriptor(proto, 'writeText');
+      if (descriptor && typeof descriptor.value === 'function') original = descriptor.value;
+    } catch (error) {}
+    if (typeof original !== 'function') {
+      try {
+        var clipboard = navigator.clipboard;
+        if (clipboard && typeof clipboard.writeText === 'function') {
+          original = clipboard.writeText;
+          target = clipboard;
+        }
+      } catch (error) {}
+    }
+    if (typeof original !== 'function' || original.__dshMdClipboard === true) return;
+    var wrapped = function (text) {
+      var value = '';
+      try { value = String(text); } catch (error) { value = ''; }
+      if (copyTextFallback(value)) return Promise.resolve();
+      return original.apply(this, arguments);
+    };
+    wrapped.__dshMdClipboard = true;
+    try {
+      if (target && typeof target.writeText === 'function') {
+        target.writeText = wrapped;
+        return;
+      }
+    } catch (error) {}
+    try {
+      if (target && typeof Object.defineProperty === 'function') {
+        Object.defineProperty(target, 'writeText', {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: wrapped
+        });
+      }
+    } catch (error) {}
   }
 
   function currentSelection() {
@@ -152,7 +336,7 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
     // A completion that arrives while its conversation is already on screen
     // must not leave a reminder behind. Clearing here also covers the Host
     // snapshot that marks the Session unread a moment before this report.
-    if (sessionId && unread[sessionId] === true) {
+    if (sessionId && unread[sessionId] === true && isFrameVisible()) {
       delete unread[sessionId];
       notifyRead();
       send({ type: 'read', sessionId: sessionId });
@@ -404,6 +588,7 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
   }
 
   function clearUnreadForSelection() {
+    if (!isFrameVisible()) return;
     var current = lastSelection;
     if (current === null) current = currentSelection();
     if (current && unread[current] === true) {
@@ -607,6 +792,9 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
       readySent = true;
       send({ type: 'ready', deviceId: deviceId });
       report();
+      reportTitle();
+      sendTitle(true);
+      sendVisibility(true);
       if (!readOverlayInstalled) retryReadOverlay();
     };
     finish();
@@ -631,6 +819,9 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
       if (readySent) send({ type: 'ready', deviceId: deviceId });
       else if (failedReason) send({ type: 'failed', error: failedReason });
       report();
+      reportTitle();
+      sendTitle(true);
+      sendVisibility(true);
       if (groupSyncInstalled) sendGroups();
     });
     socket.addEventListener('message', function (event) {
@@ -645,6 +836,11 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
     });
     socket.addEventListener('close', function () {
       socket = null;
+      // Force a fresh selection/title/visibility report on reconnect; the
+      // previous socket may have gone away before the Host persisted them.
+      lastSelection = null;
+      lastSentTitle = null;
+      lastSentVisibility = null;
       schedule();
     });
     socket.addEventListener('error', function () {
@@ -750,6 +946,18 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
 
   try {
     installStorageGroupFallback();
+  } catch (error) {}
+
+  try {
+    installClipboardFallback();
+  } catch (error) {}
+
+  try {
+    installTitleReporter();
+  } catch (error) {}
+
+  try {
+    installVisibilityTracking();
   } catch (error) {}
 
   try {

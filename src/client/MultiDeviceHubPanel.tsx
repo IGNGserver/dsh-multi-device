@@ -37,6 +37,7 @@ import {
   Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import React, { useEffect, useId, useState } from 'react'
+import { copyText } from './clipboard.ts'
 import { DshSelect } from './DshSelect.tsx'
 import {
   type DeviceId,
@@ -724,11 +725,11 @@ export function MultiDeviceHubPanel({
    * so the failure path tells the user to select the visible <pre> instead.
    */
   const copyDiagnosticsText = async (value: MultiDeviceDiagnostics): Promise<void> => {
-    try {
-      await navigator.clipboard.writeText(JSON.stringify(value, null, 2))
+    const copied = await copyText(JSON.stringify(value, null, 2))
+    if (copied) {
       setDiagnosticsCopied(true)
       pushToast(t('diagnosticsCopied'), 'success')
-    } catch {
+    } else {
       pushToast(t('diagnosticsCopyFailed'), 'error')
     }
   }

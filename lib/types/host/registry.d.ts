@@ -73,7 +73,7 @@ export declare class DeviceRegistry {
     private readonly authStates;
     /** Durable mirror of each device catalog (see {@link DeviceCatalogCache}). */
     private readonly catalogs;
-    /** Injected Native Pane bridge lifecycle and last page selection per device. */
+    /** Injected Native Pane bridge lifecycle, last page selection/title, and visibility per device. */
     private readonly nativePanes;
     /** Previous connection state per device, so workspace rows are recomputed on a real transition. */
     private readonly lastDeviceStates;
@@ -197,8 +197,20 @@ export declare class DeviceRegistry {
      * still lands on the right conversation.
      */
     private publishNativePaneSession;
+    /** Ask the native frame on the active remote Session's device to open it. */
+    private openActiveRemoteSessionInNative;
     private setNativePaneState;
     private setNativePaneSelection;
+    /** Persist the framed page's own document title for window chrome. */
+    private setNativePaneTitle;
+    /**
+     * Track whether any framed page for this device is actually on screen.
+     * Read clearing and "currently viewed" detection must not treat a hidden
+     * keep-alive page as if the user were reading it.
+     */
+    private setNativePaneVisibility;
+    /** Persist the actually-bound native proxy port so the origin stays stable. */
+    private persistNativeProxyPort;
     private withNativePane;
     /** Scope `session/modelCatalog` to the Session currently shown on the right. */
     activeSessionScope(): ActiveSessionScope;
