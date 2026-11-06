@@ -212,13 +212,17 @@ declare class MultiDeviceClientStore {
         error?: string;
     }>;
     /**
-     * Point a logical workspace at another device and restart the New Session on
-     * it. The blank conversation is re-created on the target device by the Host;
-     * the previous device keeps its blank session (DSH reuses it later), so an
-     * unsent draft is never copied or destroyed here.
+     * Point a logical workspace at another device and open the New Session there.
+     *
+     * The Host registers the workspace path on a device that does not own it yet
+     * (nothing is copied) and creates that Session itself. A device that already
+     * owns the workspace only stores the preference; DSH's `startSession` then
+     * creates through the aggregated gateway. The previous device keeps its blank
+     * session, so an unsent draft is never copied or destroyed here.
      */
     switchNewSessionDevice(uiWorkspace: {
         startSession?: (workspaceId?: string) => void;
+        openSession?: (sessionId: string) => void;
     } | undefined, logicalWorkspaceId: string, deviceId: DeviceId): Promise<{
         ok: boolean;
         error?: string;

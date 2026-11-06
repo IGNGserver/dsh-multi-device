@@ -119,6 +119,18 @@ export interface UpsertDeviceInput {
   readonly keepNativeAlive?: boolean
 }
 
+/**
+ * Create the next blank Session of one logical workspace on a chosen device.
+ *
+ * A device that does not already own the workspace gets that workspace's path
+ * registered there first; nothing is copied. The choice is also stored as the
+ * workspace's preferred device.
+ */
+export interface NewSessionOnDeviceInput {
+  readonly logicalWorkspaceId: string
+  readonly deviceId: DeviceId
+}
+
 /** Explicitly create a Session on one remote device (per-conversation device choice). */
 export interface RemoteSessionCreateInput {
   readonly deviceId: DeviceId

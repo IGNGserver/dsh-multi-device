@@ -399,6 +399,9 @@ export function SessionDeviceChip({
                         <span className="dsh-md-device-target-name">{target.name}</span>
                         <span className="dsh-md-device-target-path" title={target.path}>
                           {target.path}
+                          {workspace.members.some(member => member.deviceId === target.deviceId)
+                            ? ''
+                            : ` · ${t('deviceTargetWillRegister')}`}
                         </span>
                         <span className="dsh-md-device-target-meta">
                           {pending

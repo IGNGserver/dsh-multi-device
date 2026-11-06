@@ -125,9 +125,10 @@ export declare const zh: {
     readonly deviceChipSwitchHint: "可在下方重新连接，或切换到在线设备新建会话。";
     readonly deviceHeroChipLabel: "新建于";
     readonly deviceTargetTitle: "选择新建会话的设备";
-    readonly deviceTargetSubtitle: "只列出拥有该工作区的设备；离线设备需先重新连接。";
+    readonly deviceTargetSubtitle: "可在任意已连接的设备上新建；该设备还没有这个工作区时，会用同一路径注册，不复制文件。";
     readonly deviceTargetNeedsWorkspace: "先在左侧选择一个工作区，再选择承接设备。";
-    readonly deviceTargetSingleDevice: "该工作区只存在于一台设备上，无法切换。";
+    readonly deviceTargetWillRegister: "将在该设备注册此路径";
+    readonly deviceTargetSingleDevice: "没有其它已启用的设备可供选择。";
     readonly deviceSwitchKeepsBlank: "切换后原设备会保留空白会话，不会迁移或丢失草稿。";
     readonly deviceSwitchPending: "切换中…";
     readonly deviceSwitchUnavailable: "当前 DSH 版本不支持在此切换设备，请到多设备设置中调整。";

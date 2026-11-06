@@ -28,6 +28,7 @@ import {
 } from '../contract.ts'
 import type { ControlPlaneRequest, DiagnosticsClientReport, MultiDeviceDiagnostics } from '../runtime.ts'
 import { readNativeBarMetrics } from './barMetrics.ts'
+import { getClientServices } from './clientServices.ts'
 
 export type HubTabId = 'native' | 'devices' | 'git'
 
@@ -867,18 +868,43 @@ class MultiDeviceClientStore {
   }
 
   /**
-   * Point a logical workspace at another device and restart the New Session on
-   * it. The blank conversation is re-created on the target device by the Host;
-   * the previous device keeps its blank session (DSH reuses it later), so an
-   * unsent draft is never copied or destroyed here.
+   * Point a logical workspace at another device and open the New Session there.
+   *
+   * The Host registers the workspace path on a device that does not own it yet
+   * (nothing is copied) and creates that Session itself. A device that already
+   * owns the workspace only stores the preference; DSH's `startSession` then
+   * creates through the aggregated gateway. The previous device keeps its blank
+   * session, so an unsent draft is never copied or destroyed here.
    */
   async switchNewSessionDevice(
-    uiWorkspace: { startSession?: (workspaceId?: string) => void } | undefined,
+    uiWorkspace: { startSession?: (workspaceId?: string) => void; openSession?: (sessionId: string) => void } | undefined,
     logicalWorkspaceId: string,
     deviceId: DeviceId,
   ): Promise<{ ok: boolean; error?: string }> {
-    const saved = await this.setPreferredDevice(logicalWorkspaceId, deviceId)
-    if (!saved.ok) return saved
+    const res = await this.callControlPlane<{
+      mode: 'member' | 'registered'
+      sessionId?: string
+      snapshot: MultiDeviceSnapshot
+    }>({
+      action: 'startSessionOnDevice',
+      payload: { logicalWorkspaceId, deviceId },
+    })
+    if (!res.ok) return { ok: false, error: res.error }
+    this.applyIncomingSnapshot(res.value.snapshot)
+    if (res.value.mode === 'registered' && res.value.sessionId !== undefined) {
+      try {
+        await getClientServices().sessions?.refresh?.()
+      } catch {
+        // The Host already replayed the new summary; opening still works when
+        // the list already contains it.
+      }
+      try {
+        uiWorkspace?.openSession?.(res.value.sessionId)
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : 'openSession-failed' }
+      }
+      return { ok: true }
+    }
     if (typeof uiWorkspace?.startSession !== 'function') {
       return { ok: false, error: 'startSession-unavailable' }
     }

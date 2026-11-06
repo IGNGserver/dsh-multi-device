@@ -250,6 +250,7 @@ export class DeviceRegistry {
   private gitMatchRunner: GitMatchRunner | undefined
   private gitMatchRun: GitMatchRun = createIdleGitMatch()
   private localWorkspaceCreator: ((path: string) => Promise<void>) | undefined
+  private localSessionCreator: ((cwd: string) => Promise<string>) | undefined
   private aggregatedGatewayActive = false
   private aggregatedGatewayError: string | undefined
   private nativeProxyActive = true
@@ -1126,6 +1127,64 @@ export class DeviceRegistry {
   }
 
   /**
+   * Create the next blank Session of a logical workspace on one chosen device.
+   *
+   * A device that already owns the workspace is only recorded as the preferred
+   * target; DSH's own `startSession` then creates through the aggregated
+   * gateway. A device without the workspace gets the workspace path registered
+   * there first (nothing is copied), and the new Session is created against
+   * that registration directly.
+   */
+  async startSessionOnDevice(
+    logicalWorkspaceId: string,
+    deviceId: DeviceId,
+  ): Promise<{ ok: true; mode: 'member' | 'registered'; sessionId?: string } | { ok: false; error: string }> {
+    const workspace = this.snapshot().logicalWorkspaces.find(
+      candidate => candidate.logicalWorkspaceId === logicalWorkspaceId,
+    )
+    if (workspace === undefined) return { ok: false, error: 'Workspace is not in the aggregated view' }
+    const path = workspace.targetPath.trim()
+    if (path === '') return { ok: false, error: 'Workspace path is empty' }
+
+    const member = workspace.members.find(candidate => candidate.deviceId === deviceId)
+    if (member !== undefined) {
+      this.aggregator.setPreferredDevice(logicalWorkspaceId, deviceId)
+      this.saveToDisk()
+      this.refreshWorkspaceView()
+      return { ok: true, mode: 'member' }
+    }
+
+    if (deviceId === LOCAL_DEVICE_ID) {
+      if (this.localWorkspaceCreator === undefined || this.localSessionCreator === undefined) {
+        return { ok: false, error: 'Local workspace creation is unavailable' }
+      }
+      try {
+        await this.localWorkspaceCreator(path)
+        const sessionId = await this.localSessionCreator(path)
+        this.aggregator.setPreferredDevice(logicalWorkspaceId, deviceId)
+        this.saveToDisk()
+        this.refreshWorkspaceView()
+        return { ok: true, mode: 'registered', sessionId }
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) }
+      }
+    }
+
+    const registered = await this.createRemoteWorkspace({ deviceId, path })
+    if (!registered.ok) return registered
+    const registeredId = workspaceIdFromCreate(registered.workspace)
+    const created = await this.createRemoteSession({
+      deviceId,
+      ...(registeredId !== undefined ? { workspaceId: registeredId } : { cwd: path }),
+    })
+    if (!created.ok) return created
+    this.aggregator.setPreferredDevice(logicalWorkspaceId, deviceId)
+    this.saveToDisk()
+    this.refreshWorkspaceView()
+    return { ok: true, mode: 'registered', sessionId: created.sessionId }
+  }
+
+  /**
    * Create a Session directly on an explicitly chosen remote device. The
    * returned ID is namespaced exactly like a Session discovered by polling, so
    * the official Session view can open it immediately.
@@ -1329,6 +1388,15 @@ export class DeviceRegistry {
   /** Wire the local Workspace controller so a match can register local folders. */
   setLocalWorkspaceCreator(creator: (path: string) => Promise<void>): void {
     this.localWorkspaceCreator = creator
+  }
+
+  /**
+   * Wire local Session creation for a device that does not own the workspace
+   * yet. Registering the folder is not enough: the logical workspace id still
+   * points at the previous device until aggregation recomputes.
+   */
+  setLocalSessionCreator(creator: (cwd: string) => Promise<string>): void {
+    this.localSessionCreator = creator
   }
 
   /** Latest manual Git match state (running progress or the last outcome). */
@@ -1953,6 +2021,15 @@ export class DeviceRegistry {
       try { unlinkSync(tmp) } catch { /* sibling may not exist if the write failed */ }
     }
   }
+}
+
+/** The workspace id returned by a remote `workspace/create`, when the body has one. */
+function workspaceIdFromCreate(created: unknown): string | undefined {
+  if (typeof created !== 'object' || created === null) return undefined
+  const body = created as { workspace?: { workspaceId?: unknown }; workspaceId?: unknown }
+  const nested = body.workspace?.workspaceId
+  if (typeof nested === 'string' && nested !== '') return nested
+  return typeof body.workspaceId === 'string' && body.workspaceId !== '' ? body.workspaceId : undefined
 }
 
 const CATALOG_SESSION_LIMIT = 2_000

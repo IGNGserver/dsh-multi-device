@@ -1511,6 +1511,19 @@ async function* multiplexRemoteEventsStream(
     queue.push(item)
   }
 
+  const pushRemoteSessionSummaries = (): void => {
+    if (!registry.isAggregatedMode()) return
+    for (const client of registry.clientList()) {
+      for (const summary of client.sessionSummaries()) {
+        push({
+          type: 'emit',
+          event: 'api-session/added',
+          args: [client.namespaceSummary(summary)],
+        })
+      }
+    }
+  }
+
   const pushPendingRemoteWaterfalls = (): void => {
     if (!registry.isAggregatedMode()) return
     // Deliver remote approval/question waterfalls to the local UI. Called on
@@ -1542,6 +1555,10 @@ async function* multiplexRemoteEventsStream(
   })
   const offMode = registry.onDisplayModeChanged((mode) => {
     if (!readySent || mode !== 'aggregated') return
+    // Returning from Native Mode does not reconnect `$events`, and the sidebar
+    // hides every workspace session id that has no summary. Replay the catalogs
+    // the same way the opening `ready` frame does.
+    pushRemoteSessionSummaries()
     pushPendingRemoteWaterfalls()
   })
 
@@ -1560,15 +1577,7 @@ async function* multiplexRemoteEventsStream(
             // finished connecting. Replay every known remote summary into this
             // generation; without it, workspace rows point at Session ids the
             // sidebar has no summary for and silently hides those rows.
-            for (const client of registry.clientList()) {
-              for (const summary of client.sessionSummaries()) {
-                push({
-                  type: 'emit',
-                  event: 'api-session/added',
-                  args: [client.namespaceSummary(summary)],
-                })
-              }
-            }
+            pushRemoteSessionSummaries()
             // A fresh browser generation starts with the local model catalog
             // cached; make it refetch the active remote Session's catalog.
             if (registry.activeSessionScope().kind === 'remote') {

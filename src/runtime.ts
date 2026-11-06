@@ -132,6 +132,7 @@ export interface ControlPlaneRequest {
     | 'authenticateDevice'
     | 'testDevice'
     | 'listSshKeys'
+    | 'startSessionOnDevice'
     | 'createSession'
     | 'createRemoteWorkspace'
     | 'updateAggregationConfig'
@@ -382,6 +383,17 @@ export class MultiDeviceControlPlane {
 
         case 'listSshKeys':
           return { ok: true, value: { keys: this.registry.listSshKeys() } }
+
+        case 'startSessionOnDevice': {
+          const logicalWorkspaceId = String(payload.logicalWorkspaceId ?? '')
+          const deviceId = String(payload.deviceId ?? '') as DeviceId
+          if (logicalWorkspaceId === '' || deviceId === '') {
+            return { ok: false, error: 'Workspace and device are required' }
+          }
+          const res = await this.registry.startSessionOnDevice(logicalWorkspaceId, deviceId)
+          if (!res.ok) return res
+          return { ok: true, value: { ...res, snapshot: this.registry.snapshot() } }
+        }
 
         case 'createSession': {
           const input = payload as unknown as RemoteSessionCreateInput

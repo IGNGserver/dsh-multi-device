@@ -99,6 +99,7 @@ import {
 import {
   deviceTargetsForWorkspace,
   effectiveTargetOf,
+  memberTargetsForWorkspace,
   resolveSessionDevice,
   resolveSessionLogicalWorkspace,
 } from '../src/client/sessionDevice.ts'
@@ -1081,16 +1082,32 @@ describe('4b. Offline-aware target selection & session ownership', () => {
       logicalWorkspaces: [lws],
       allPhysicalWorkspaces: lws.members,
     })
-    const targets = deviceTargetsForWorkspace(snapshot, lws, '本机')
-    expect(targets).toHaveLength(2)
-    expect(targets[1]?.state).toBe('reconnecting')
-    expect(targets[1]?.online).toBe(false)
-    expect(targets[0]?.preferred).toBe(true)
+    const members = memberTargetsForWorkspace(snapshot, lws, '本机')
+    expect(members).toHaveLength(2)
+    expect(members[1]?.state).toBe('reconnecting')
+    expect(members[1]?.online).toBe(false)
+    expect(members[0]?.preferred).toBe(true)
+
+    // New Session may start on any enabled device, including one that has not
+    // registered this workspace yet. Settings keeps the member-only list above.
+    const mac = DeviceId('dev-mac')
+    const withExtra = snapshotFixture({
+      devices: [
+        deviceView(ubuntu, 'ubuntu-dev', 'connected'),
+        deviceView(mac, 'mac-mini', 'connected'),
+        { ...deviceView(DeviceId('dev-off'), 'parked', 'disabled'), enabled: false },
+      ],
+      logicalWorkspaces: [lws],
+      allPhysicalWorkspaces: lws.members,
+    })
+    const choices = deviceTargetsForWorkspace(withExtra, lws, '本机')
+    expect(choices.map(target => target.deviceId)).toEqual([LOCAL_DEVICE_ID, ubuntu, mac])
+    expect(choices.find(target => target.deviceId === mac)?.path).toBe(lws.targetPath)
   })
 })
 
 describe('4c. New Session device switching', () => {
-  it('persists the chosen target device and restarts the New Session on it', async () => {
+  it('persists the chosen member device and restarts the New Session on it', async () => {
     const { clientStore } = await import('../src/client/state.ts')
     const calls: Array<string | undefined> = []
     const ui = { startSession: (workspaceId?: string): void => { calls.push(workspaceId) } }
@@ -1099,7 +1116,10 @@ describe('4c. New Session device switching', () => {
     const requested: unknown[] = []
     globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
       requested.push(init?.body === undefined ? undefined : JSON.parse(String(init.body)))
-      return new Response(JSON.stringify({ ok: true, value: snapshot }), { status: 200 })
+      return new Response(JSON.stringify({
+        ok: true,
+        value: { mode: 'member', snapshot },
+      }), { status: 200 })
     }) as typeof fetch
     try {
       const logicalId = encodeLogicalWorkspaceId('git', 'github.com/acme/platform')
@@ -1107,9 +1127,35 @@ describe('4c. New Session device switching', () => {
       expect(result.ok).toBe(true)
       expect(calls).toEqual([logicalId])
       expect(requested).toContainEqual({
-        action: 'setPreferredDevice',
+        action: 'startSessionOnDevice',
         payload: { logicalWorkspaceId: logicalId, deviceId: 'dev-ubuntu' },
       })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('opens the Session the Host created on a device that did not own the workspace', async () => {
+    const { clientStore } = await import('../src/client/state.ts')
+    const opened: string[] = []
+    const ui = {
+      startSession: (): void => { throw new Error('member path must not run') },
+      openSession: (sessionId: string): void => { opened.push(sessionId) },
+    }
+    const originalFetch = globalThis.fetch
+    const snapshot = clientStore.getSnapshot().snapshot
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      ok: true,
+      value: { mode: 'registered', sessionId: 'md~dev-mac~s-new', snapshot },
+    }), { status: 200 })) as typeof fetch
+    try {
+      const result = await clientStore.switchNewSessionDevice(
+        ui,
+        encodeLogicalWorkspaceId('git', 'github.com/acme/platform'),
+        DeviceId('dev-mac'),
+      )
+      expect(result.ok).toBe(true)
+      expect(opened).toEqual(['md~dev-mac~s-new'])
     } finally {
       globalThis.fetch = originalFetch
     }
@@ -1119,8 +1165,10 @@ describe('4c. New Session device switching', () => {
     const { clientStore } = await import('../src/client/state.ts')
     const originalFetch = globalThis.fetch
     const snapshot = clientStore.getSnapshot().snapshot
-    globalThis.fetch = (async () =>
-      new Response(JSON.stringify({ ok: true, value: snapshot }), { status: 200 })) as typeof fetch
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      ok: true,
+      value: { mode: 'member', snapshot },
+    }), { status: 200 })) as typeof fetch
     try {
       const result = await clientStore.switchNewSessionDevice(
         undefined,
@@ -1813,6 +1861,8 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
 
       // 1e) The browser event generation receives remote Sessions that loaded
       // after its initial `session.list`, otherwise their workspace rows vanish.
+      // The same generation stays open across a Native round-trip, so returning
+      // to Aggregated Mode must replay those summaries again.
       const eventsAbort = new AbortController()
       const eventsTimer = setTimeout(() => eventsAbort.abort(), 1_500)
       const replayStream = await mockGateway.wireStream.open(
@@ -1823,18 +1873,24 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
         eventsAbort.signal,
       )
       const replayed: Record<string, unknown>[] = []
-      try {
-        for await (const rawFrame of replayStream) {
+      const replayIterator = replayStream[Symbol.asyncIterator]()
+      const readReplay = async (): Promise<void> => {
+        for (;;) {
+          const next = await replayIterator.next()
+          if (next.done) return
+          const rawFrame = next.value
           if (typeof rawFrame !== 'object' || rawFrame === null || Array.isArray(rawFrame)) continue
           const frame = rawFrame as Record<string, unknown>
           replayed.push(frame)
-          if (frame.type === 'emit' && frame.event === 'api-session/added') break
+          if (frame.type === 'emit' && frame.event === 'api-session/added') return
         }
+      }
+      try {
+        await readReplay()
       } catch {
         // Abort after the expected frame.
       } finally {
         clearTimeout(eventsTimer)
-        eventsAbort.abort()
       }
       expect(replayed.some(frame =>
         frame.type === 'emit' &&
@@ -2001,6 +2057,26 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
         encodeRemoteSessionId(devId, 'rsess-1'),
         'lsess-1',
       ])
+
+      // The event generation opened above is still the browser's. Without a
+      // replay here its session store only knows the local blank created while
+      // Native Mode was active, and the remote rows stay invisible.
+      replayed.length = 0
+      const returnTimer = setTimeout(() => eventsAbort.abort(), 1_500)
+      try {
+        await readReplay()
+      } catch {
+        // Abort after the expected frame.
+      } finally {
+        clearTimeout(returnTimer)
+        eventsAbort.abort()
+      }
+      expect(replayed.some(frame =>
+        frame.type === 'emit' &&
+        frame.event === 'api-session/added' &&
+        Array.isArray(frame.args) &&
+        (frame.args[0] as { sessionId?: string } | undefined)?.sessionId === remoteSessionId,
+      )).toBe(true)
 
       const aggregatedAbort = new AbortController()
       const aggregatedBaseline = await readBaseline(mockWorkspaceController.follow(aggregatedAbort.signal))

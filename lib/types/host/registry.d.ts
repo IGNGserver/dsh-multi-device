@@ -67,6 +67,7 @@ export declare class DeviceRegistry {
     private gitMatchRunner;
     private gitMatchRun;
     private localWorkspaceCreator;
+    private localSessionCreator;
     private aggregatedGatewayActive;
     private aggregatedGatewayError;
     private nativeProxyActive;
@@ -260,6 +261,23 @@ export declare class DeviceRegistry {
     /** List local private-key candidates for the add/edit device form. */
     listSshKeys(): SshKeyEntry[];
     /**
+     * Create the next blank Session of a logical workspace on one chosen device.
+     *
+     * A device that already owns the workspace is only recorded as the preferred
+     * target; DSH's own `startSession` then creates through the aggregated
+     * gateway. A device without the workspace gets the workspace path registered
+     * there first (nothing is copied), and the new Session is created against
+     * that registration directly.
+     */
+    startSessionOnDevice(logicalWorkspaceId: string, deviceId: DeviceId): Promise<{
+        ok: true;
+        mode: 'member' | 'registered';
+        sessionId?: string;
+    } | {
+        ok: false;
+        error: string;
+    }>;
+    /**
      * Create a Session directly on an explicitly chosen remote device. The
      * returned ID is namespaced exactly like a Session discovered by polling, so
      * the official Session view can open it immediately.
@@ -293,6 +311,12 @@ export declare class DeviceRegistry {
     updateAggregationConfig(patch: Partial<WorkspaceAggregationConfig>): WorkspaceAggregationConfig;
     /** Wire the local Workspace controller so a match can register local folders. */
     setLocalWorkspaceCreator(creator: (path: string) => Promise<void>): void;
+    /**
+     * Wire local Session creation for a device that does not own the workspace
+     * yet. Registering the folder is not enough: the logical workspace id still
+     * points at the previous device until aggregation recomputes.
+     */
+    setLocalSessionCreator(creator: (cwd: string) => Promise<string>): void;
     /** Latest manual Git match state (running progress or the last outcome). */
     gitMatch(): GitMatchRun;
     /**
