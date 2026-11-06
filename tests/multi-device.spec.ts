@@ -2715,8 +2715,8 @@ describe('8. Native Settings UI & Streamlined Client State Helpers', () => {
       expect(overlayEmptyHtml).not.toContain('dsh-md-overlay-bar')
       expect(overlayEmptyHtml).not.toContain('dsh-md-native-bar')
 
-      // Native Mode has a persistent [本机][device] strip and no "Back to
-      // Aggregated" control.
+      // Native Mode has a persistent [本机][device] strip whose rightmost
+      // action switches back to Aggregated Mode (the Host still owns the mode).
       const baseSnapshot = clientStore.getSnapshot().snapshot
       const nativeSnapshot = {
         ...baseSnapshot,
@@ -2750,10 +2750,15 @@ describe('8. Native Settings UI & Streamlined Client State Helpers', () => {
       expect(nativeHtml).toContain('dsh-md-native-bar')
       expect(nativeHtml).toContain(zh.nativeLocalTab)
       expect(nativeHtml).toContain('Dev A')
-      expect(nativeHtml).not.toContain('返回聚合模式')
-      expect(nativeHtml).not.toContain('Back to Aggregated')
+      expect(nativeHtml).toContain('dsh-md-native-mode-switch')
+      expect(nativeHtml).toContain(zh.modeAggregated)
+      expect(nativeHtml).toContain(zh.switchToAggregated)
       nextSnapshot = { ...nativeSnapshot, revision: nativeSnapshot.revision + 1, displayMode: 'aggregated' }
+      // The rightmost button drives the same Host RPC as the Settings switch:
+      // Aggregated Mode clears the selected device tab and restores merger rows.
       await clientStore.setDisplayMode('aggregated')
+      expect(clientStore.getSnapshot().displayMode).toBe('aggregated')
+      expect(clientStore.getSnapshot().activeNativeDeviceId).toBeUndefined()
 
       // DshSelect renders compliant trigger and options
       const { DshSelect } = await import('../src/client/DshSelect.tsx')

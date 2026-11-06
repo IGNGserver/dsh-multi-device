@@ -12,9 +12,10 @@ export declare const zh: {
     readonly pluginSummary: "连接多台远端 DSH 开发机，支持跨机工作区聚合与原生界面标签页。";
     readonly close: "关闭";
     readonly modeRowTitle: "界面模式";
-    readonly modeRowDesc: "聚合模式在侧边栏合并所有设备的会话，首页不提供设备入口；原生模式顶部常驻标签页，本机仅显示本地数据。";
+    readonly modeRowDesc: "聚合模式在侧边栏合并所有设备的会话，首页不提供设备入口；原生模式顶部常驻标签页，本机仅显示本地数据，最右侧的「聚合模式」按钮可直接切回。";
     readonly modeAggregated: "聚合模式";
     readonly modeNative: "原生模式";
+    readonly switchToAggregated: "切换到聚合模式";
     readonly nativeLocalTab: "本机";
     readonly nativeTabsLabel: "原生模式设备标签页";
     readonly gitAutoTitle: "自动聚合相同 Git 仓库";

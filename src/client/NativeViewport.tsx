@@ -4,8 +4,9 @@
  * Native Mode is a tab strip that never disappears:
  * - 本机 (leftmost) reveals the unmodified local DSH page; it is not an iframe.
  * - Every configured remote device opens its complete remote DSH Web UI below
- *   the same strip. There is deliberately no "Back to Aggregated" control;
- *   the mode is switched from Settings.
+ *   the same strip.
+ * - The rightmost action switches back to Aggregated Mode, so the two surfaces
+ *   stay one click apart without opening Settings. The Host still owns the mode.
  *
  * Keep-Alive:
  * - Every device in `keepAliveDeviceIds` stays mounted in the DOM.
@@ -19,6 +20,7 @@
  */
 import {
   Button,
+  IconChevronLeftOutlineRegular,
   IconCloseOutlineRegular,
   IconGlobeOutlineRegular,
   IconRefreshOutlineRegular,
@@ -26,6 +28,7 @@ import {
   IconSettingsOutlineRegular,
   Pill,
   StateDot,
+  Toast,
   Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
@@ -196,10 +199,30 @@ export function NativeTabBar({
 }): React.ReactElement | null {
   const state = useMultiDeviceState()
   const { devices } = state.snapshot
+  const [switching, setSwitching] = useState(false)
+  const [switchFailure, setSwitchFailure] = useState<{ seq: number; message: string } | null>(null)
+  const failureSeq = useRef(0)
   if (state.displayMode !== 'native') return null
 
   const activeDevice = devices.find(device => device.id === state.activeNativeDeviceId)
   const localActive = activeDevice === undefined
+
+  // The Host owns the mode; this only asks it to stop merging and applies the
+  // snapshot it returns. A failed RPC is surfaced instead of leaving the user
+  // in Native Mode with no visible reaction to the click.
+  const switchToAggregated = (): void => {
+    if (switching) return
+    setSwitching(true)
+    void clientStore.setDisplayMode('aggregated').then((res) => {
+      setSwitching(false)
+      if (res.ok) return
+      failureSeq.current += 1
+      setSwitchFailure({
+        seq: failureSeq.current,
+        message: `${t('actionFailed')}: ${res.error ?? ''}`,
+      })
+    })
+  }
 
   return (
     <div className="dsh-md-native-bar">
@@ -299,6 +322,34 @@ export function NativeTabBar({
           <IconSettingsOutlineRegular size={14} />
         </Button>
       </Tooltip>
+
+      <span className="dsh-md-native-bar-sep" aria-hidden="true" />
+
+      {/* Rightmost action: Aggregated Mode is one click away, never buried in
+          Settings. The Host persists the switch and re-merges remote rows. */}
+      <Tooltip label={t('switchToAggregated')} side="bottom" align="end">
+        <Button
+          variant="outline"
+          size="sm"
+          className="dsh-md-native-mode-switch"
+          icon={<IconChevronLeftOutlineRegular size={12} />}
+          aria-label={t('switchToAggregated')}
+          aria-busy={switching || undefined}
+          disabled={switching}
+          onClick={switchToAggregated}
+        >
+          {t('modeAggregated')}
+        </Button>
+      </Tooltip>
+
+      {switchFailure !== null && (
+        <Toast
+          key={switchFailure.seq}
+          text={switchFailure.message}
+          tone="error"
+          onDone={() => setSwitchFailure(null)}
+        />
+      )}
     </div>
   )
 }
