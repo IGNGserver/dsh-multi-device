@@ -4,12 +4,13 @@
  * Contributes strictly to official DSH 0.2 UI extension slots:
  * 1. `settings.section` (`id: 'multi-device'`): Native top-level Settings section
  *    for managing remote SSH devices, display mode, and Git repository auto-aggregation.
- *    This is the only place the mode is switched; Aggregated Mode has no device
- *    navigation, and Native Mode has no "back to aggregated" control.
+ *    The mode can be switched here or from the rightmost button of the Native Mode
+ *    tab bar; Aggregated Mode has no device navigation.
  * 2. `plugins.bundle.config` (`key: 'dsh-multi-device'`): Companion configuration surface
  *    inside DSH's Plugin Manager bundle detail view.
  * 3. `shell.overlay` (`id: 'multi-device-switcher'`): persistent Native Mode tab bar
- *    (本机 + remote devices) and Keep-Alive remote viewports.
+ *    (本机 + remote devices), its rightmost "Aggregated" switch, and Keep-Alive
+ *    remote viewports.
  * 4. `conversation.input.right`, `conversation.session.header.utilities`, and
  *    `sidebar.session.row.hover`: report the active Session to the Host, show
  *    its owning device (本机 included) as a chip on the conversation page with a

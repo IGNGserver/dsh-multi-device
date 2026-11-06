@@ -842,6 +842,20 @@ html[data-platform='darwin'] .dsh-md-native-bar {
   flex: none;
 }
 
+/* Separates the device actions from the rightmost mode switch. */
+.dsh-md-native-bar-sep {
+  width: 1px;
+  height: 18px;
+  flex: none;
+  background: var(--dsw-alias-border-l2);
+}
+
+/* Rightmost Native Mode action: back to Aggregated Mode in one click. */
+.dsh-md-native-mode-switch {
+  flex: none;
+  white-space: nowrap;
+}
+
 .dsh-md-native-tab-item {
   display: inline-flex;
   align-items: center;

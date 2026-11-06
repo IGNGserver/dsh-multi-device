@@ -6,8 +6,8 @@
  *      `[本机][device…]` bar plus the remote keep-alive viewports.
  *    - In Aggregated Mode it renders no chrome and no device navigation; remote
  *      viewports may stay mounted but hidden so Keep-Alive survives a switch.
- *    - The mode itself is switched only from Settings. There is no sidebar
- *      entry and no "back to aggregated" control here.
+ *    - The mode is switched from Settings or from the tab bar's rightmost
+ *      "Aggregated" button; there is no sidebar device navigation.
  * 2. `ActiveSessionReporter` and `SessionRowHoverDeviceSection`:
  *    - Official DSH 0.2 slot contributions for `conversation.input.right` and
  *      `sidebar.session.row.hover`.
