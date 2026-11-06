@@ -279,6 +279,9 @@ export class MultiDeviceControlPlane {
             ...(typeof payload.sessionRowDeviceDot === 'boolean'
               ? { sessionRowDeviceDot: payload.sessionRowDeviceDot }
               : {}),
+            ...(typeof payload.nativePane === 'boolean'
+              ? { nativePane: payload.nativePane }
+              : {}),
           })
           return { ok: true, value: this.registry.snapshot() }
         }

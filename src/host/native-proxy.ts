@@ -30,8 +30,16 @@ import {
 } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import type { Duplex } from 'node:stream'
-import type { DeviceConfig, DeviceId } from '../contract.ts'
+import { brotliDecompressSync, gunzipSync, inflateSync } from 'node:zlib'
+import { WebSocket, WebSocketServer } from 'ws'
+import type { DeviceConfig, DeviceId, NativePaneState } from '../contract.ts'
 import { DeviceAuthManager, resolveRemoteAuthority } from './auth.ts'
+import {
+  injectNativeBridge,
+  isNativeBridgeScriptPath,
+  isNativeBridgeSocketPath,
+  NATIVE_BRIDGE_SCRIPT,
+} from './native-bridge.ts'
 
 const PROXY_TOKEN_QUERY = 'md_token'
 const PROXY_COOKIE_NAME = 'dsh-md-native'
@@ -88,14 +96,42 @@ export function buildForwardHeaders(
   return out
 }
 
-export interface NativeProxyAuthHooks {
+/** Messages the framed page's bridge can send to the proxy. */
+type NativeBridgeInbound =
+  | { readonly type: 'ready'; readonly deviceId?: string }
+  | { readonly type: 'failed'; readonly error?: string }
+  | { readonly type: 'selection'; readonly sessionId?: string | null }
+
+/** Commands the proxy sends into the framed page's bridge. */
+type NativeBridgeOutbound =
+  | { readonly type: 'open-session'; readonly sessionId: string }
+  | { readonly type: 'refresh' }
+  | { readonly type: 'set-embedded'; readonly enabled: boolean }
+
+export interface NativeProxyHooks {
   /** Report the credential state observed while proxying a device. */
   readonly onAuthState?: (
     deviceId: DeviceId,
     state: 'ok' | 'required' | 'error',
     error?: string,
   ) => void
+  /** Report the injected Native Pane bridge lifecycle for one device. */
+  readonly onBridgeState?: (
+    deviceId: DeviceId,
+    state: NativePaneState,
+    error?: string,
+  ) => void
+  /** Report the raw remote Session the framed page currently shows. */
+  readonly onBridgeSelection?: (deviceId: DeviceId, sessionId: string | undefined) => void
 }
+
+/** Backwards-compatible alias for callers that only cared about auth hooks. */
+export type NativeProxyAuthHooks = NativeProxyHooks
+
+/** Upper bound for an HTML document held for bridge injection. */
+const MAX_INJECTABLE_HTML_BYTES = 20 * 1024 * 1024
+/** How long a framed page may take to report bridge readiness. */
+const BRIDGE_READY_TIMEOUT_MS = 15_000
 
 export class NativeDeviceProxy {
   private server: Server | undefined
@@ -105,13 +141,22 @@ export class NativeDeviceProxy {
   private lastAuthAttemptAt = 0
   private lastAuthRecoveryAt = 0
   private readonly token = randomUUID().replaceAll('-', '')
+  private bridgeServer: WebSocketServer | undefined
+  private readonly bridgeClients = new Set<WebSocket>()
+  private bridgeState: NativePaneState = 'idle'
+  private bridgeError: string | undefined
+  private bridgeSessionId: string | undefined
+  private bridgeReadyTimer: ReturnType<typeof setTimeout> | undefined
+  private pendingOpenSession: string | undefined
+  /** Pane mode hides the remote sidebar; native full mode restores it. */
+  private bridgeEmbedded = false
 
   constructor(
     private device: DeviceConfig,
     private readonly getUpstreamBaseUrl: () => string | undefined,
     private readonly authManager: DeviceAuthManager,
     private readonly localOrigin?: () => string | undefined,
-    private readonly hooks: NativeProxyAuthHooks = {},
+    private readonly hooks: NativeProxyHooks = {},
   ) {}
 
   updateDevice(device: DeviceConfig): void {
@@ -137,6 +182,11 @@ export class NativeDeviceProxy {
       void this.handleHttp(req, res)
     })
     server.on('upgrade', (req, socket, head) => {
+      const parsed = parseOriginForm(req.url)
+      if (parsed !== undefined && isNativeBridgeSocketPath(parsed.pathname)) {
+        this.handleBridgeUpgrade(req, socket, head)
+        return
+      }
       this.handleUpgrade(req, socket, head)
     })
     server.on('connection', (socket) => {
@@ -153,11 +203,19 @@ export class NativeDeviceProxy {
     if (addr !== null && typeof addr === 'object') {
       this.localPort = addr.port
     }
+    this.bridgeServer = new WebSocketServer({ noServer: true })
     this.server = server
   }
 
   stop(): void {
     this.stopped = true
+    this.clearBridgeTimer()
+    for (const client of this.bridgeClients) {
+      try { client.close() } catch { /* ignore */ }
+    }
+    this.bridgeClients.clear()
+    this.bridgeServer?.close()
+    this.bridgeServer = undefined
     for (const socket of this.sockets) {
       try { socket.destroy() } catch { /* ignore */ }
     }
@@ -165,6 +223,77 @@ export class NativeDeviceProxy {
     this.server?.close()
     this.server = undefined
     this.localPort = undefined
+    this.setBridgeState('idle')
+  }
+
+  /** Current bridge lifecycle, for the Host snapshot. */
+  bridgeSnapshot(): { state: NativePaneState; error?: string; sessionId?: string } {
+    return {
+      state: this.bridgeState,
+      ...(this.bridgeError !== undefined ? { error: this.bridgeError } : {}),
+      ...(this.bridgeSessionId !== undefined ? { sessionId: this.bridgeSessionId } : {}),
+    }
+  }
+
+  /**
+   * Ask the framed page to open one raw remote Session. The command is held
+   * until the bridge reports readiness so a not-yet-loaded frame still lands on
+   * the Session the aggregated sidebar selected.
+   */
+  openSession(sessionId: string): void {
+    this.pendingOpenSession = sessionId
+    this.sendToBridge({ type: 'open-session', sessionId })
+  }
+
+  /** Ask the framed page to refresh its own Session list (after fork/create). */
+  requestRefresh(): void {
+    this.sendToBridge({ type: 'refresh' })
+  }
+
+  /** Switch the same framed page between embedded pane and full native mode. */
+  setEmbedded(enabled: boolean): void {
+    if (this.bridgeEmbedded === enabled) return
+    this.bridgeEmbedded = enabled
+    this.sendToBridge({ type: 'set-embedded', enabled })
+  }
+
+  /** Reset the cached bridge command target (device switched away). */
+  clearPendingSession(): void {
+    this.pendingOpenSession = undefined
+  }
+
+  private sendToBridge(message: NativeBridgeOutbound): void {
+    const data = JSON.stringify(message)
+    for (const client of this.bridgeClients) {
+      if (client.readyState !== WebSocket.OPEN) continue
+      try { client.send(data) } catch { /* ignore */ }
+    }
+  }
+
+  private setBridgeState(state: NativePaneState, error?: string): void {
+    const nextError = error?.trim() === '' ? undefined : error
+    if (this.bridgeState === state && this.bridgeError === nextError) return
+    this.bridgeState = state
+    this.bridgeError = nextError
+    this.hooks.onBridgeState?.(this.device.id, state, nextError)
+  }
+
+  private clearBridgeTimer(): void {
+    if (this.bridgeReadyTimer !== undefined) {
+      clearTimeout(this.bridgeReadyTimer)
+      this.bridgeReadyTimer = undefined
+    }
+  }
+
+  private armBridgeTimer(): void {
+    this.clearBridgeTimer()
+    const timer = setTimeout(() => {
+      this.bridgeReadyTimer = undefined
+      if (this.bridgeState === 'ready') return
+      this.setBridgeState('failed', 'the framed page never reported a ready bridge')
+    }, BRIDGE_READY_TIMEOUT_MS)
+    timer.unref?.()
+    this.bridgeReadyTimer = timer
   }
 
   private async handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -215,6 +344,16 @@ export class NativeDeviceProxy {
       return
     }
 
+    if (isNativeBridgeScriptPath(requestUrl.pathname) && (req.method ?? 'GET') === 'GET') {
+      res.writeHead(200, {
+        'content-type': 'application/javascript; charset=utf-8',
+        'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff',
+      })
+      res.end(NATIVE_BRIDGE_SCRIPT)
+      return
+    }
+
     void this.ensureAuthenticated(upstreamBase)
 
     const upstream = splitUpstreamBase(upstreamBase)
@@ -226,6 +365,7 @@ export class NativeDeviceProxy {
       ? this.device.transport.rejectUnauthorized !== false
       : true
     const method = req.method ?? 'GET'
+    const injectHtml = isHtmlNavigation(req)
 
     const forward = (retried: boolean): void => {
       const authHeaders = this.authManager.getAuthHeaders(this.device)
@@ -237,6 +377,14 @@ export class NativeDeviceProxy {
         cookie: authHeaders['Cookie'],
         authorization: authHeaders['Authorization'],
       })
+      if (injectHtml) {
+        // Keep the document uncompressed so the bridge tag can be inserted
+        // without a second encoding pass; DSH itself has no CSP that would
+        // forbid the same-origin script.
+        for (const key of Object.keys(outHeaders)) {
+          if (key.toLowerCase() === 'accept-encoding') delete outHeaders[key]
+        }
+      }
 
       const proxyReq = reqFn(
         upstream.url,
@@ -320,6 +468,19 @@ export class NativeDeviceProxy {
             }
             resHeaders[key] = val
           }
+
+          const contentType = proxyRes.headers['content-type']
+          const shouldInject = injectHtml
+            && status === 200
+            && typeof contentType === 'string'
+            && contentType.toLowerCase().includes('text/html')
+          if (shouldInject) {
+            this.setBridgeState('loading')
+            this.armBridgeTimer()
+            this.streamInjectedHtml(proxyRes, res, status, resHeaders)
+            return
+          }
+
           res.writeHead(status, resHeaders)
           proxyRes.pipe(res)
         },
@@ -342,6 +503,171 @@ export class NativeDeviceProxy {
     }
 
     forward(false)
+  }
+
+  /**
+   * Buffer one HTML document, inject the bridge script and forward it.
+   *
+   * The response is held only for documents (the SPA shell); assets keep the
+   * streaming path. Compression is normally already removed by
+   * `accept-encoding: identity`, but a proxy in front of DSH may still compress,
+   * so gzip/deflate/br are decoded before injection.
+   */
+  private streamInjectedHtml(
+    proxyRes: IncomingMessage,
+    res: ServerResponse,
+    status: number,
+    baseHeaders: Record<string, string | string[]>,
+  ): void {
+    const chunks: Buffer[] = []
+    let size = 0
+    let tooLarge = false
+    proxyRes.on('data', (chunk: Buffer) => {
+      size += chunk.byteLength
+      if (size > MAX_INJECTABLE_HTML_BYTES) {
+        tooLarge = true
+        return
+      }
+      chunks.push(chunk)
+    })
+    proxyRes.on('error', () => {
+      if (!res.headersSent) res.destroy()
+    })
+    proxyRes.on('aborted', () => {
+      if (!res.headersSent) res.destroy()
+    })
+    proxyRes.on('end', () => {
+      if (res.destroyed) return
+      if (tooLarge) {
+        // The buffered prefix is not a valid document; never send a truncated
+        // body as if it were the page. The pane falls back to the local mirror.
+        this.clearBridgeTimer()
+        this.resetBridgeSelection()
+        this.setBridgeState('failed', 'the remote HTML document was too large to inject the native bridge')
+        res.writeHead(502, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+        res.end(renderUnavailableHtml(this.device.name, 'The remote page is too large to inject the native bridge.'))
+        return
+      }
+      const raw = Buffer.concat(chunks)
+      const headers = { ...baseHeaders }
+      const encoding = headerValueOf(proxyRes.headers, 'content-encoding')
+      let body = raw
+      let injected = false
+      const decoded = decodeHtmlBody(raw, encoding)
+      if (decoded !== undefined) {
+        body = Buffer.from(injectNativeBridge(decoded.toString('utf8'), { deviceId: this.device.id }), 'utf8')
+        removeHeader(headers, 'content-encoding')
+        injected = true
+      }
+      if (!injected) {
+        this.clearBridgeTimer()
+        this.resetBridgeSelection()
+        this.setBridgeState(
+          'failed',
+          `the remote HTML document used an unsupported content-encoding (${encoding ?? 'unknown'})`,
+        )
+      }
+      removeHeader(headers, 'content-length')
+      // Node framed the upstream body as chunked; we now own a fixed-length
+      // buffer, and sending both is an HTTP/1.1 protocol violation.
+      removeHeader(headers, 'transfer-encoding')
+      removeHeader(headers, 'connection')
+      removeHeader(headers, 'keep-alive')
+      removeHeader(headers, 'etag')
+      removeHeader(headers, 'last-modified')
+      headers['cache-control'] = 'no-store'
+      headers['content-length'] = String(body.byteLength)
+      res.writeHead(status, headers)
+      res.end(body)
+    })
+  }
+
+  /** Validate one same-origin bridge upgrade and hand it to the WebSocket server. */
+  private handleBridgeUpgrade(req: IncomingMessage, clientSocket: Duplex, head: Buffer): void {
+    const parsed = parseOriginForm(req.url)
+    const proxyOrigin = this.proxyOrigin()
+    const cookieToken = readCookie(req.headers.cookie, PROXY_COOKIE_NAME)
+    if (parsed === undefined || proxyOrigin === undefined || cookieToken !== this.token) {
+      clientSocket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+      return
+    }
+    if (req.headers['sec-fetch-site'] === 'cross-site') {
+      clientSocket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+      return
+    }
+    const origin = req.headers.origin
+    if (origin !== undefined && origin !== proxyOrigin && origin !== this.localOrigin?.()) {
+      clientSocket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+      return
+    }
+    const bridgeServer = this.bridgeServer
+    if (bridgeServer === undefined) {
+      clientSocket.destroy()
+      return
+    }
+    bridgeServer.handleUpgrade(req, clientSocket, head, (ws) => {
+      this.attachBridge(ws)
+    })
+  }
+
+  /** Own one framed page's bridge socket, its readiness and its selection reports. */
+  private attachBridge(ws: WebSocket): void {
+    this.bridgeClients.add(ws)
+    this.resetBridgeSelection()
+    this.setBridgeState('loading')
+    this.armBridgeTimer()
+
+    ws.on('message', (raw) => {
+      let message: NativeBridgeInbound
+      try {
+        const parsed: unknown = JSON.parse(raw.toString())
+        if (typeof parsed !== 'object' || parsed === null) return
+        message = parsed as NativeBridgeInbound
+      } catch {
+        return
+      }
+      if (message.type === 'ready') {
+        this.clearBridgeTimer()
+        this.setBridgeState('ready')
+        this.sendToBridge({ type: 'set-embedded', enabled: this.bridgeEmbedded })
+        if (this.pendingOpenSession !== undefined) {
+          this.sendToBridge({ type: 'open-session', sessionId: this.pendingOpenSession })
+        }
+        return
+      }
+      if (message.type === 'failed') {
+        this.clearBridgeTimer()
+        this.setBridgeState('failed', message.error ?? 'the framed page could not start the native bridge')
+        return
+      }
+      if (message.type === 'selection') {
+        const sessionId = typeof message.sessionId === 'string' && message.sessionId !== ''
+          ? message.sessionId
+          : undefined
+        if (sessionId === this.bridgeSessionId) return
+        this.bridgeSessionId = sessionId
+        this.hooks.onBridgeSelection?.(this.device.id, sessionId)
+      }
+    })
+
+    ws.on('close', () => {
+      this.bridgeClients.delete(ws)
+      if (this.bridgeClients.size > 0) return
+      this.clearBridgeTimer()
+      this.resetBridgeSelection()
+      if (this.bridgeState === 'ready' || this.bridgeState === 'loading') {
+        this.setBridgeState('idle')
+      }
+    })
+    ws.on('error', () => {
+      try { ws.close() } catch { /* ignore */ }
+    })
+  }
+
+  private resetBridgeSelection(): void {
+    if (this.bridgeSessionId === undefined) return
+    this.bridgeSessionId = undefined
+    this.hooks.onBridgeSelection?.(this.device.id, undefined)
   }
 
   private async ensureAuthenticated(upstreamBase: string): Promise<void> {
@@ -482,7 +808,7 @@ export class NativeProxyManager {
   constructor(
     private readonly authManager: DeviceAuthManager,
     private readonly localOrigin?: () => string | undefined,
-    private readonly hooks: NativeProxyAuthHooks = {},
+    private readonly hooks: NativeProxyHooks = {},
   ) {}
 
   async ensureProxy(
@@ -515,6 +841,32 @@ export class NativeProxyManager {
     return this.proxies.get(deviceId)?.proxyUrl()
   }
 
+  /** Current injected-bridge lifecycle for one device. */
+  bridgeSnapshot(deviceId: DeviceId): { state: NativePaneState; error?: string; sessionId?: string } {
+    return this.proxies.get(deviceId)?.bridgeSnapshot() ?? { state: 'idle' }
+  }
+
+  /** Navigate the framed page to one raw remote Session (queued until ready). */
+  openSession(deviceId: DeviceId, sessionId: string): boolean {
+    const proxy = this.proxies.get(deviceId)
+    if (proxy === undefined) return false
+    proxy.openSession(sessionId)
+    return true
+  }
+
+  /** Ask the framed page to refresh its own Session catalog. */
+  requestRefresh(deviceId: DeviceId): boolean {
+    const proxy = this.proxies.get(deviceId)
+    if (proxy === undefined) return false
+    proxy.requestRefresh()
+    return true
+  }
+
+  /** Toggle the remote sidebar for pane vs full native rendering. */
+  setEmbedded(deviceId: DeviceId, enabled: boolean): void {
+    this.proxies.get(deviceId)?.setEmbedded(enabled)
+  }
+
   removeProxy(deviceId: DeviceId): void {
     const proxy = this.proxies.get(deviceId)
     if (proxy !== undefined) {
@@ -527,6 +879,45 @@ export class NativeProxyManager {
     for (const proxy of this.proxies.values()) proxy.stop()
     this.proxies.clear()
   }
+}
+
+const NAVIGATION_DESTINATIONS = new Set(['document', 'iframe', 'frame', 'embed', 'object'])
+
+/** Whether one proxied request is the framed page's HTML document. */
+function isHtmlNavigation(req: IncomingMessage): boolean {
+  const destination = req.headers['sec-fetch-dest']
+  if (typeof destination === 'string' && NAVIGATION_DESTINATIONS.has(destination)) return true
+  const accept = req.headers.accept
+  return typeof accept === 'string' && accept.toLowerCase().includes('text/html')
+}
+
+/** Read one response header as a scalar; the proxy only injects documents. */
+function headerValueOf(headers: IncomingMessage['headers'], name: string): string | undefined {
+  const value = headers[name]
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) return value.join(', ')
+  return undefined
+}
+
+/** Delete a header regardless of the casing the upstream used. */
+function removeHeader(headers: Record<string, string | string[]>, name: string): void {
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === name) delete headers[key]
+  }
+}
+
+/** Decode a compressed HTML body, or undefined for an encoding we do not own. */
+function decodeHtmlBody(raw: Buffer, encoding: string | undefined): Buffer | undefined {
+  const normalized = (encoding ?? '').trim().toLowerCase()
+  if (normalized === '' || normalized === 'identity') return raw
+  try {
+    if (normalized === 'gzip' || normalized === 'x-gzip') return gunzipSync(raw)
+    if (normalized === 'deflate') return inflateSync(raw)
+    if (normalized === 'br') return brotliDecompressSync(raw)
+  } catch {
+    return undefined
+  }
+  return undefined
 }
 
 function parseOriginForm(raw: string | undefined): { pathname: string; search: string } | undefined {

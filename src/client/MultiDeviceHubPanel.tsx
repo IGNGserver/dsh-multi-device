@@ -765,6 +765,22 @@ export function MultiDeviceHubPanel({
 
         <div className="dsh-md-pref-row">
           <div>
+            <div className="dsh-md-pref-title">{t('nativePaneTitle')}</div>
+            <div className="dsh-md-pref-desc">{t('nativePaneDesc')}</div>
+          </div>
+          <Switch
+            checked={snapshot.ui?.nativePane !== false}
+            label={t('nativePaneTitle')}
+            onChange={(enabled) => {
+              void clientStore.setUiPreferences({ nativePane: enabled }).then((res) => {
+                if (!res.ok) pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
+              })
+            }}
+          />
+        </div>
+
+        <div className="dsh-md-pref-row">
+          <div>
             <div className="dsh-md-pref-title">{t('rowDeviceDotTitle')}</div>
             <div className="dsh-md-pref-desc">{t('rowDeviceDotDesc')}</div>
           </div>

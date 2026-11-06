@@ -140,6 +140,15 @@ export type DeviceConnectionState =
 /**Detected remote DSH wire protocol generation. */
 export type RemoteProtocolVersion = '0.2' | '0.1' | 'unknown'
 
+/**
+ * Lifecycle of the injected Native Pane bridge for one device.
+ *
+ * `loading` means the framed remote page was served and the bridge socket has
+ * not reported readiness yet; `failed` is a version/CSP incompatibility (the
+ * client then falls back to the local mirror), not a device outage.
+ */
+export type NativePaneState = 'idle' | 'loading' | 'ready' | 'failed'
+
 /** Live runtime telemetry and status of a device. */
 export type DeviceAuthState = 'unknown' | 'ok' | 'required' | 'error'
 
@@ -201,6 +210,15 @@ export interface DeviceView {
   readonly lastSyncedAt?: number
   /** True while `sessions`/`workspaces` come from the persisted catalog cache (no live baseline yet). */
   readonly catalogStale?: boolean
+  /**
+   * Injected Native Pane bridge state. `ready` means the framed remote page
+   * captured its own `uiWorkspace` service and can navigate to a Session.
+   */
+  readonly nativePaneState?: NativePaneState
+  /** Why the bridge failed (version/CSP), never a device transport error. */
+  readonly nativePaneError?: string
+  /** Raw remote Session the framed page currently shows, for no-flash switching. */
+  readonly nativePaneSessionId?: string
 }
 
 /** One cached remote Session summary; projections are never persisted. */
@@ -433,6 +451,14 @@ export interface MultiDeviceUiPreferences {
    * mode only). Default false: rows stay visually identical to local rows.
    */
   readonly sessionRowDeviceDot: boolean
+  /**
+   * Render a remote Session's conversation with the device's own DSH page
+   * (injected Native Pane bridge) instead of the local mirror. Default true:
+   * the native page is the source of truth for chat, models, approvals, files
+   * and the remote composer. Falls back to the mirror when the bridge cannot
+   * start (older remote, CSP, future client internals).
+   */
+  readonly nativePane: boolean
 }
 
 /** Complete Hub snapshot returned to the Client UI. */

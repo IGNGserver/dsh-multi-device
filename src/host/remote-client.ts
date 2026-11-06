@@ -195,7 +195,9 @@ export class RemoteDeviceClient {
   }
 
   toView(): DeviceView {
-    const runningCount = this.summaries.filter(s => s.running).length
+    // A hydrated catalog is not a live claim: never show a spinner for a
+    // Session whose Host has not been reachable since this process started.
+    const runningCount = this.sessionSummaries().filter(s => s.running).length
     return {
       id: this.config.id,
       name: this.config.name,
@@ -238,7 +240,7 @@ export class RemoteDeviceClient {
       reconnectAttempt: this.reconnectAttempt,
       sessionCount: this.summaries.length,
       runningSessionCount: runningCount,
-      pendingApprovalCount: this.pendingInteractions.size,
+      pendingApprovalCount: this.catalogStale ? 0 : this.pendingInteractions.size,
       workspaceCount: this.workspaces.length,
       ...(this.lastSyncedAt !== undefined ? { lastSyncedAt: this.lastSyncedAt } : {}),
       ...(this.catalogStale ? { catalogStale: true } : {}),
@@ -337,7 +339,10 @@ export class RemoteDeviceClient {
   }
 
   sessionSummaries(): readonly RemoteSessionSummary[] {
-    return this.summaries
+    if (!this.catalogStale) return this.summaries
+    return this.summaries.map(summary =>
+      summary.running ? { ...summary, running: false, agentAvailable: false } : summary,
+    )
   }
 
   workspaceItems(): readonly RemoteWorkspaceItem[] {
@@ -357,6 +362,9 @@ export class RemoteDeviceClient {
   }
 
   pendingInteractionList(): readonly RemotePendingInteraction[] {
+    // The persisted catalog never stores interactions; a stale row cannot
+    // truthfully claim a pending approval either.
+    if (this.catalogStale) return []
     return [...this.pendingInteractions.values()]
   }
 
@@ -382,7 +390,64 @@ export class RemoteDeviceClient {
     this.tunnel?.stop()
     this.tunnel = undefined
     this.state = this.config.enabled ? 'error' : 'disabled'
+    if (!this.config.enabled) this.clearPendingInteractions()
+    this.markDisconnected()
     this.callbacks.onStateChanged(this.id)
+  }
+
+  /**
+   * A transport generation ended. The last catalog remains visible, but a
+   * Session that was running cannot still be running on an unreachable Host:
+   * report the transition so the sidebar spinner stops and completion becomes
+   * detectable. Pending waterfalls are cancelled in the local UI but kept so a
+   * reconnect can replay them (the remote may still be waiting for an answer).
+   */
+  private markDisconnected(): void {
+    this.catalogStale = true
+    const running = this.summaries.filter(summary => summary.running)
+    if (running.length > 0) {
+      this.summaries = this.summaries.map(summary =>
+        summary.running ? { ...summary, running: false, agentAvailable: false } : summary,
+      )
+      for (const summary of running) {
+        this.callbacks.onRemoteEventFrame(this.id, {
+          type: 'emit',
+          event: 'api-session/status',
+          args: [encodeRemoteSessionId(this.id, summary.sessionId), false],
+        })
+      }
+    }
+    for (const pending of this.pendingInteractions.values()) {
+      this.callbacks.onRemoteEventFrame(this.id, {
+        type: 'cancel',
+        eventId: pending.namespacedEventId,
+      })
+    }
+  }
+
+  /** Drop every pending waterfall and close its local card (device removed/disabled). */
+  private clearPendingInteractions(): void {
+    if (this.pendingInteractions.size === 0) return
+    for (const pending of this.pendingInteractions.values()) {
+      this.callbacks.onRemoteEventFrame(this.id, {
+        type: 'cancel',
+        eventId: pending.namespacedEventId,
+      })
+    }
+    this.pendingInteractions.clear()
+  }
+
+  /** Re-deliver still-pending waterfalls after the `$events` stream comes back. */
+  private replayPendingInteractions(): void {
+    for (const pending of this.pendingInteractions.values()) {
+      this.callbacks.onRemoteEventFrame(this.id, {
+        type: 'waterfall',
+        event: pending.eventName,
+        eventId: pending.namespacedEventId,
+        agentId: pending.namespacedSessionId,
+        request: pending.request,
+      })
+    }
   }
 
   updateConfig(next: DeviceConfig): void {
@@ -624,6 +689,7 @@ export class RemoteDeviceClient {
         this.lastError = error instanceof Error ? error.message : String(error)
         this.state = 'error'
         this.closeMuxSocket()
+        this.markDisconnected()
         this.callbacks.onStateChanged(this.id)
       } finally {
         iterAbort.abort()
@@ -781,6 +847,10 @@ export class RemoteDeviceClient {
           this.remoteHome = item.host.home
           this.callbacks.onStateChanged(this.id)
         }
+        // A reconnect starts a fresh `$events` client id. Re-show waterfalls
+        // that were cancelled locally while the device was away so the user can
+        // still answer a request the remote Host is still waiting on.
+        this.replayPendingInteractions()
         continue
       }
 
@@ -1161,7 +1231,13 @@ export class RemoteDeviceClient {
         old.blank === summary.blank &&
         old.agentAvailable === summary.agentAvailable &&
         old.parentSessionId === summary.parentSessionId &&
-        old.cwd === summary.cwd
+        old.origin === summary.origin &&
+        old.cwd === summary.cwd &&
+        // Projections carry the title, model, queue and other list-surface
+        // facts. A rename made while this Host was offline changes only this
+        // block, so it must invalidate the summary or the reconnect keeps the
+        // stale title forever.
+        projectionsEqual(old.projections, summary.projections)
       ) {
         continue
       }
@@ -1309,6 +1385,20 @@ export class RemoteDeviceClient {
         },
       }
     }
+  }
+}
+
+/** Compare the optional list-surface projection hint block without sharing identity. */
+function projectionsEqual(
+  left: RemoteSessionSummary['projections'],
+  right: RemoteSessionSummary['projections'],
+): boolean {
+  if (left === right) return true
+  if (left === undefined || right === undefined) return false
+  try {
+    return JSON.stringify(left) === JSON.stringify(right)
+  } catch {
+    return false
   }
 }
 

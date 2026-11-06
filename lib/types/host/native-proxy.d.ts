@@ -1,5 +1,5 @@
 import { type IncomingMessage } from 'node:http';
-import type { DeviceConfig, DeviceId } from '../contract.ts';
+import type { DeviceConfig, DeviceId, NativePaneState } from '../contract.ts';
 import { DeviceAuthManager } from './auth.ts';
 /**
  * Copy a client request onto the upstream connection.
@@ -13,10 +13,16 @@ export declare function buildForwardHeaders(incoming: IncomingMessage['headers']
     readonly cookie?: string;
     readonly authorization?: string;
 }): Record<string, string | string[]>;
-export interface NativeProxyAuthHooks {
+export interface NativeProxyHooks {
     /** Report the credential state observed while proxying a device. */
     readonly onAuthState?: (deviceId: DeviceId, state: 'ok' | 'required' | 'error', error?: string) => void;
+    /** Report the injected Native Pane bridge lifecycle for one device. */
+    readonly onBridgeState?: (deviceId: DeviceId, state: NativePaneState, error?: string) => void;
+    /** Report the raw remote Session the framed page currently shows. */
+    readonly onBridgeSelection?: (deviceId: DeviceId, sessionId: string | undefined) => void;
 }
+/** Backwards-compatible alias for callers that only cared about auth hooks. */
+export type NativeProxyAuthHooks = NativeProxyHooks;
 export declare class NativeDeviceProxy {
     private device;
     private readonly getUpstreamBaseUrl;
@@ -30,14 +36,59 @@ export declare class NativeDeviceProxy {
     private lastAuthAttemptAt;
     private lastAuthRecoveryAt;
     private readonly token;
-    constructor(device: DeviceConfig, getUpstreamBaseUrl: () => string | undefined, authManager: DeviceAuthManager, localOrigin?: (() => string | undefined) | undefined, hooks?: NativeProxyAuthHooks);
+    private bridgeServer;
+    private readonly bridgeClients;
+    private bridgeState;
+    private bridgeError;
+    private bridgeSessionId;
+    private bridgeReadyTimer;
+    private pendingOpenSession;
+    /** Pane mode hides the remote sidebar; native full mode restores it. */
+    private bridgeEmbedded;
+    constructor(device: DeviceConfig, getUpstreamBaseUrl: () => string | undefined, authManager: DeviceAuthManager, localOrigin?: (() => string | undefined) | undefined, hooks?: NativeProxyHooks);
     updateDevice(device: DeviceConfig): void;
     proxyUrl(): string | undefined;
     private proxyOrigin;
     port(): number | undefined;
     start(): Promise<void>;
     stop(): void;
+    /** Current bridge lifecycle, for the Host snapshot. */
+    bridgeSnapshot(): {
+        state: NativePaneState;
+        error?: string;
+        sessionId?: string;
+    };
+    /**
+     * Ask the framed page to open one raw remote Session. The command is held
+     * until the bridge reports readiness so a not-yet-loaded frame still lands on
+     * the Session the aggregated sidebar selected.
+     */
+    openSession(sessionId: string): void;
+    /** Ask the framed page to refresh its own Session list (after fork/create). */
+    requestRefresh(): void;
+    /** Switch the same framed page between embedded pane and full native mode. */
+    setEmbedded(enabled: boolean): void;
+    /** Reset the cached bridge command target (device switched away). */
+    clearPendingSession(): void;
+    private sendToBridge;
+    private setBridgeState;
+    private clearBridgeTimer;
+    private armBridgeTimer;
     private handleHttp;
+    /**
+     * Buffer one HTML document, inject the bridge script and forward it.
+     *
+     * The response is held only for documents (the SPA shell); assets keep the
+     * streaming path. Compression is normally already removed by
+     * `accept-encoding: identity`, but a proxy in front of DSH may still compress,
+     * so gzip/deflate/br are decoded before injection.
+     */
+    private streamInjectedHtml;
+    /** Validate one same-origin bridge upgrade and hand it to the WebSocket server. */
+    private handleBridgeUpgrade;
+    /** Own one framed page's bridge socket, its readiness and its selection reports. */
+    private attachBridge;
+    private resetBridgeSelection;
     private ensureAuthenticated;
     private recoverAuthentication;
     private respondAuthRequired;
@@ -48,9 +99,21 @@ export declare class NativeProxyManager {
     private readonly localOrigin?;
     private readonly hooks;
     private readonly proxies;
-    constructor(authManager: DeviceAuthManager, localOrigin?: (() => string | undefined) | undefined, hooks?: NativeProxyAuthHooks);
+    constructor(authManager: DeviceAuthManager, localOrigin?: (() => string | undefined) | undefined, hooks?: NativeProxyHooks);
     ensureProxy(device: DeviceConfig, getUpstreamBaseUrl: () => string | undefined): Promise<string | undefined>;
     proxyUrl(deviceId: DeviceId): string | undefined;
+    /** Current injected-bridge lifecycle for one device. */
+    bridgeSnapshot(deviceId: DeviceId): {
+        state: NativePaneState;
+        error?: string;
+        sessionId?: string;
+    };
+    /** Navigate the framed page to one raw remote Session (queued until ready). */
+    openSession(deviceId: DeviceId, sessionId: string): boolean;
+    /** Ask the framed page to refresh its own Session catalog. */
+    requestRefresh(deviceId: DeviceId): boolean;
+    /** Toggle the remote sidebar for pane vs full native rendering. */
+    setEmbedded(deviceId: DeviceId, enabled: boolean): void;
     removeProxy(deviceId: DeviceId): void;
     dispose(): void;
 }

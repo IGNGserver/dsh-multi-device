@@ -271,3 +271,16 @@ export declare function installAggregatedGateway02(registry: DeviceRegistry, ses
  * id must fall back instead of being sent to the parent's remote host.
  */
 export declare function isSameDeviceChildSession(parentDeviceId: DeviceId, childSessionId: string): boolean;
+/**
+ * Whether a failed remote `session/follow` should end the Host stream normally
+ * (so the DSH client retries the carrier) instead of surfacing a terminal
+ * error. Never recover before the opening snapshot: the client would then see
+ * an "ended before opening" protocol failure.
+ */
+export declare function shouldEndFollowStream(error: unknown, yielded: boolean, connected: boolean): boolean;
+/**
+ * The raw blank Session to reuse only when it belongs to the device the new
+ * conversation is actually being created on. A namespaced blank from another
+ * device must be dropped, not forwarded across machines.
+ */
+export declare function reusableSessionIdFor(sessionId: string | undefined, deviceId: DeviceId): string | undefined;

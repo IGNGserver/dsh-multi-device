@@ -127,6 +127,10 @@ export declare const zh: {
     readonly back: "返回";
     readonly rowDeviceDotTitle: "在会话行显示设备标记";
     readonly rowDeviceDotDesc: "聚合模式下在会话行左侧显示设备首字母，离线时带红点；运行/审批状态仍优先显示。默认关闭。";
+    readonly nativePaneTitle: "聚合模式使用远端原生窗格";
+    readonly nativePaneDesc: "选中远端会话时，右侧直接显示该设备的 DSH 页面（原生模型、审批、文件与输入框），聚合侧栏仍然可用。桥接不可用时自动回退兼容渲染。默认开启。";
+    readonly nativePaneLabel: "原生界面";
+    readonly nativePaneOpenFull: "完整远端界面";
     readonly newOnOtherDevice: "在其它设备新建…";
     readonly newOnOtherDeviceTitle: "在其它设备新建会话";
     readonly newOnOtherDeviceDesc: "从该设备已有的工作区创建会话，不复制或修改任何文件。";

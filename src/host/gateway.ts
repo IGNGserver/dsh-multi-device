@@ -433,10 +433,12 @@ export function installAggregatedGateway02(
         const targetPath = lws.effectiveTargetPath ?? lws.targetPath
         if (targetDeviceId === LOCAL_DEVICE_ID) {
           const localMember = lws.members.find(m => m.deviceId === LOCAL_DEVICE_ID)
+          const reusable = reusableSessionIdFor(request.sessionId, LOCAL_DEVICE_ID)
           return origSessionCreate({
             ...(localMember !== undefined
               ? { workspaceId: localMember.remoteWorkspaceId }
               : { cwd: targetPath }),
+            ...(reusable !== undefined ? { sessionId: reusable } : {}),
             ...(request.agentPreset !== undefined ? { agentPreset: request.agentPreset } : {}),
           })
         }
@@ -444,11 +446,13 @@ export function installAggregatedGateway02(
         const remoteMember = lws.members.find(m => m.deviceId === targetDeviceId)
         if (remoteClient !== undefined) {
           requireConnected(remoteClient)
+          const reusable = reusableSessionIdFor(request.sessionId, remoteClient.id)
           const created = (await remoteClient.invokeUnary('session', 'create', {
             request: {
               ...(remoteMember !== undefined
                 ? { workspaceId: remoteMember.remoteWorkspaceId }
                 : { cwd: targetPath }),
+              ...(reusable !== undefined ? { sessionId: reusable } : {}),
               ...(request.agentPreset !== undefined ? { agentPreset: request.agentPreset } : {}),
             },
           })) as { sessionId: string; agentPreset?: string }
@@ -467,9 +471,11 @@ export function installAggregatedGateway02(
         const remoteClient = registry.client(decodedWs.deviceId)
         if (remoteClient !== undefined) {
           requireConnected(remoteClient)
+          const reusable = reusableSessionIdFor(request.sessionId, remoteClient.id)
           const created = (await remoteClient.invokeUnary('session', 'create', {
             request: {
               workspaceId: decodedWs.rawWorkspaceId,
+              ...(reusable !== undefined ? { sessionId: reusable } : {}),
               ...(request.agentPreset !== undefined ? { agentPreset: request.agentPreset } : {}),
             },
           })) as { sessionId: string; agentPreset?: string }
@@ -648,24 +654,36 @@ export function installAggregatedGateway02(
     if (routed === undefined) return origSessionFollow(request, signal)
     return (async function* () {
       await waitForClient(routed.client, signal)
-      const stream = routed.client.openStream(
-        'session/follow',
-        { request: { ...request, address: routed.rawAddress } },
-        signal,
-      )
-      for await (const rawFrame of stream) {
-        if (isRecord(rawFrame) && rawFrame.type === 'snapshot' && isRecord(rawFrame.header)) {
-          const header = {
-            ...rawFrame.header,
-            id: encodeRemoteSessionId(routed.client.id, String(rawFrame.header.id ?? '')),
-            ...(typeof rawFrame.header.parentSession === 'string'
-              ? { parentSession: encodeRemoteSessionId(routed.client.id, rawFrame.header.parentSession) }
-              : {}),
+      let yielded = false
+      try {
+        const stream = routed.client.openStream(
+          'session/follow',
+          { request: { ...request, address: routed.rawAddress } },
+          signal,
+        )
+        for await (const rawFrame of stream) {
+          yielded = true
+          if (isRecord(rawFrame) && rawFrame.type === 'snapshot' && isRecord(rawFrame.header)) {
+            const header = {
+              ...rawFrame.header,
+              id: encodeRemoteSessionId(routed.client.id, String(rawFrame.header.id ?? '')),
+              ...(typeof rawFrame.header.parentSession === 'string'
+                ? { parentSession: encodeRemoteSessionId(routed.client.id, rawFrame.header.parentSession) }
+                : {}),
+            }
+            yield { ...rawFrame, header }
+          } else {
+            yield rawFrame as Record<string, unknown>
           }
-          yield { ...rawFrame, header }
-        } else {
-          yield rawFrame as Record<string, unknown>
         }
+      } catch (error) {
+        // The framed remote page is the default source of truth, but the local
+        // mirror still must survive a tunnel blip. Ending this Host stream
+        // normally makes the DSH client classify it as a carrier failure and
+        // reopen the follow (a new remote snapshot replaces the window). A
+        // domain error before the opening frame stays an error.
+        if (shouldEndFollowStream(error, yielded, routed.client.isConnected())) return
+        throw error
       }
     })()
   })
@@ -980,6 +998,38 @@ export function installAggregatedGateway02(
 export function isSameDeviceChildSession(parentDeviceId: DeviceId, childSessionId: string): boolean {
   const child = decodeSessionId(childSessionId)
   return child.isRemote && child.deviceId === parentDeviceId
+}
+
+/**
+ * Whether a failed remote `session/follow` should end the Host stream normally
+ * (so the DSH client retries the carrier) instead of surfacing a terminal
+ * error. Never recover before the opening snapshot: the client would then see
+ * an "ended before opening" protocol failure.
+ */
+export function shouldEndFollowStream(
+  error: unknown,
+  yielded: boolean,
+  connected: boolean,
+): boolean {
+  if (!yielded) return false
+  if (!connected) return true
+  if (typeof error !== 'object' || error === null) return false
+  const code = (error as { code?: unknown }).code
+  return code === 'gateway/cancelled' || code === 'transport' || code === 'dsh-md/device-offline'
+}
+
+/**
+ * The raw blank Session to reuse only when it belongs to the device the new
+ * conversation is actually being created on. A namespaced blank from another
+ * device must be dropped, not forwarded across machines.
+ */
+export function reusableSessionIdFor(
+  sessionId: string | undefined,
+  deviceId: DeviceId,
+): string | undefined {
+  if (sessionId === undefined || sessionId === '') return undefined
+  const decoded = decodeSessionId(sessionId)
+  return decoded.deviceId === deviceId ? decoded.rawSessionId : undefined
 }
 
 function routeSessionAddress(

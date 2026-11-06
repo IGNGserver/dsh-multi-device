@@ -225,15 +225,26 @@ function installModeSideEffects(ctx: ClientContextLike): () => void {
   })
 
   const unsubscribeSessions = ctx.sessions?.list.subscribe?.(() => {
-    if (clientStore.getSnapshot().displayMode !== 'native' || guarding) return
     const list = ctx.sessions?.list.getSnapshot()
     const current = list === undefined ? undefined : currentMainSessionId(list)
+    if (current !== undefined) {
+      // The Native Pane and the Host model-catalog scope both need the active
+      // Session even when the slot that normally reports it never mounts (for
+      // example when the hidden mirror conversation failed to open). This is a
+      // deduped fallback, not a second source of truth.
+      void clientStore.setActiveSession(current)
+    }
+    if (clientStore.getSnapshot().displayMode !== 'native' || guarding) return
     if (current === undefined || !decodeSessionId(current).isRemote) return
     guarding = true
     void ensureNativeLocalSelection(ctx).finally(() => {
       guarding = false
     })
   })
+
+  const initialMain = ctx.sessions?.list.getSnapshot()
+  const initialSession = initialMain === undefined ? undefined : currentMainSessionId(initialMain)
+  if (initialSession !== undefined) void clientStore.setActiveSession(initialSession)
 
   if (clientStore.getSnapshot().displayMode === 'native') void reconcile('native')
 

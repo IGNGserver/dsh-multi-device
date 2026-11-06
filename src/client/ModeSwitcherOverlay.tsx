@@ -23,6 +23,7 @@ import React, { useEffect, useLayoutEffect, useRef } from 'react'
 import { decodeSessionId } from '../contract.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
 import { MultiDeviceHubPanel } from './MultiDeviceHubPanel.tsx'
+import { nativePaneTarget } from './nativePane.ts'
 import { NativeTabBar, NativeViewport } from './NativeViewport.tsx'
 import { clientStore, deviceStateToDotState, useMultiDeviceState } from './state.ts'
 
@@ -44,6 +45,9 @@ export function ModeSwitcherOverlay({
 }): React.ReactElement {
   const state = useMultiDeviceState()
   const isNative = state.displayMode === 'native'
+  const paneTarget = state.snapshot.ui?.nativePane === false || !state.snapshot.hostStatus.nativeProxyActive
+    ? undefined
+    : nativePaneTarget(state.displayMode, state.activeSessionId)
   const layerRef = useRef<HTMLDivElement | null>(null)
 
   // Reserve the 42px strip *inside the host frame* so the tab bar never covers
@@ -64,7 +68,7 @@ export function ModeSwitcherOverlay({
     <>
       <div ref={layerRef} className="dsh-md-native-layer" data-native={isNative ? 'true' : 'false'}>
         {isNative && <NativeTabBar t={t} onOpenSettings={onOpenSettings} />}
-        {(isNative || state.keepAliveDeviceIds.length > 0) && (
+        {(isNative || state.keepAliveDeviceIds.length > 0 || paneTarget !== undefined) && (
           <NativeViewport t={t} onOpenSettings={onOpenSettings} />
         )}
       </div>

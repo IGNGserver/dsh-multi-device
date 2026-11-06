@@ -26,6 +26,7 @@ import {
   type GitMatchRun,
   LOCAL_DEVICE_ID,
   type MultiDeviceSnapshot,
+  type NativePaneState,
   normalizeWorkspacePath,
   type MultiDeviceUiPreferences,
   type RemoteSessionCreateInput,
@@ -124,7 +125,10 @@ interface PersistedRegistryDocument {
   readonly ui?: MultiDeviceUiPreferences
 }
 
-const DEFAULT_UI_PREFERENCES: MultiDeviceUiPreferences = { sessionRowDeviceDot: false }
+const DEFAULT_UI_PREFERENCES: MultiDeviceUiPreferences = {
+  sessionRowDeviceDot: false,
+  nativePane: true,
+}
 
 export interface LocalHostProvider {
   /** Local webserver port, used for self-loop prevention. */
@@ -177,6 +181,9 @@ export class DeviceRegistry {
   private activeSessionClientId: string | undefined
   private activeSessionIsRemote = false
   private activeSessionDeviceId: DeviceId | undefined
+  private activeSessionId: string | undefined
+  /** The one framed device currently rendered as the aggregated pane. */
+  private paneEmbeddedDeviceId: DeviceId | undefined
 
   private revision = 1
   private displayMode: DisplayMode = 'aggregated'
@@ -189,6 +196,10 @@ export class DeviceRegistry {
   private readonly authStates = new Map<DeviceId, { state: DeviceAuthState; error?: string }>()
   /** Durable mirror of each device catalog (see {@link DeviceCatalogCache}). */
   private readonly catalogs = new Map<DeviceId, DeviceCatalogCache>()
+  /** Injected Native Pane bridge lifecycle and last page selection per device. */
+  private readonly nativePanes = new Map<DeviceId, { state: NativePaneState; error?: string; sessionId?: string }>()
+  /** Previous connection state per device, so workspace rows are recomputed on a real transition. */
+  private readonly lastDeviceStates = new Map<DeviceId, DeviceConnectionState>()
   private uiPreferences: MultiDeviceUiPreferences = { ...DEFAULT_UI_PREFERENCES }
   private catalogPersistTimer: ReturnType<typeof setTimeout> | undefined
 
@@ -210,6 +221,12 @@ export class DeviceRegistry {
       {
         onAuthState: (deviceId, state, error) => {
           this.setAuthState(deviceId, state, error)
+        },
+        onBridgeState: (deviceId, state, error) => {
+          this.setNativePaneState(deviceId, state, error)
+        },
+        onBridgeSelection: (deviceId, sessionId) => {
+          this.setNativePaneSelection(deviceId, sessionId)
         },
       },
     )
@@ -285,6 +302,7 @@ export class DeviceRegistry {
     const previousDeviceId = this.activeSessionDeviceId
     const next = sessionId === undefined || sessionId === '' ? undefined : sessionId
     const decoded = next !== undefined ? decodeSessionId(next) : undefined
+    this.activeSessionId = next
     this.activeSessionIsRemote = decoded?.isRemote === true
     this.activeSessionDeviceId = decoded?.isRemote === true ? decoded.deviceId : undefined
 
@@ -292,7 +310,99 @@ export class DeviceRegistry {
       previousKind !== (this.activeSessionIsRemote ? 'remote' : 'local') ||
       previousDeviceId !== this.activeSessionDeviceId
     if (changed) this.notifyModelCatalogChanged()
+    if (this.activeSessionIsRemote && this.activeSessionDeviceId !== undefined) {
+      this.publishNativePaneSession(this.activeSessionDeviceId)
+    }
+    this.syncNativePaneEmbedding()
     return changed
+  }
+
+  /**
+   * Keep exactly one device frame in embedded mode (remote sidebar hidden) and
+   * restore every other frame's sidebar for full native rendering.
+   */
+  private syncNativePaneEmbedding(): void {
+    const next = this.displayMode === 'aggregated' &&
+      this.uiPreferences.nativePane &&
+      this.activeSessionIsRemote &&
+      this.activeSessionDeviceId !== undefined
+      ? this.activeSessionDeviceId
+      : undefined
+    if (next === this.paneEmbeddedDeviceId) return
+    const previous = this.paneEmbeddedDeviceId
+    this.paneEmbeddedDeviceId = next
+    if (previous !== undefined && previous !== next) {
+      this.nativeProxyManager.setEmbedded(previous, false)
+    }
+    if (next !== undefined) this.nativeProxyManager.setEmbedded(next, true)
+  }
+
+  /**
+   * Ask the framed page of the active remote device to show the selected
+   * Session. Called on every selection and when a bridge becomes ready; the
+   * proxy queues the command until then, so an iframe that is still loading
+   * still lands on the right conversation.
+   */
+  private publishNativePaneSession(deviceId: DeviceId): void {
+    if (this.displayMode !== 'aggregated') return
+    if (!this.uiPreferences.nativePane) return
+    if (this.activeSessionDeviceId !== deviceId || this.activeSessionId === undefined) return
+    const decoded = decodeSessionId(this.activeSessionId)
+    if (!decoded.isRemote || decoded.deviceId !== deviceId) return
+    this.nativeProxyManager.openSession(deviceId, decoded.rawSessionId)
+  }
+
+  private setNativePaneState(
+    deviceId: DeviceId,
+    state: NativePaneState,
+    error?: string,
+  ): void {
+    const previous = this.nativePanes.get(deviceId)
+    const nextError = error?.trim() === '' ? undefined : error
+    const nextSessionId = state === 'ready' ? previous?.sessionId : undefined
+    if (
+      previous?.state === state &&
+      previous.error === nextError &&
+      previous.sessionId === nextSessionId
+    ) {
+      return
+    }
+    this.nativePanes.set(deviceId, {
+      state,
+      ...(nextError !== undefined ? { error: nextError } : {}),
+      ...(nextSessionId !== undefined ? { sessionId: nextSessionId } : {}),
+    })
+    this.bumpRevision()
+    if (state === 'ready') {
+      this.publishNativePaneSession(deviceId)
+      // The proxy may have started after the selection; replay the pane mode
+      // so the remote sidebar is hidden for the aggregated pane.
+      if (this.paneEmbeddedDeviceId === deviceId) {
+        this.nativeProxyManager.setEmbedded(deviceId, true)
+      }
+    }
+  }
+
+  private setNativePaneSelection(deviceId: DeviceId, sessionId: string | undefined): void {
+    const previous = this.nativePanes.get(deviceId)
+    if (previous?.sessionId === sessionId) return
+    this.nativePanes.set(deviceId, {
+      state: previous?.state ?? 'idle',
+      ...(previous?.error !== undefined ? { error: previous.error } : {}),
+      ...(sessionId !== undefined ? { sessionId } : {}),
+    })
+    this.bumpRevision()
+  }
+
+  private withNativePane(view: DeviceView): DeviceView {
+    const pane = this.nativePanes.get(view.id)
+    if (pane === undefined) return view
+    return {
+      ...view,
+      nativePaneState: pane.state,
+      ...(pane.error !== undefined ? { nativePaneError: pane.error } : {}),
+      ...(pane.sessionId !== undefined ? { nativePaneSessionId: pane.sessionId } : {}),
+    }
   }
 
   /** Scope `session/modelCatalog` to the Session currently shown on the right. */
@@ -341,6 +451,7 @@ export class DeviceRegistry {
     this.saveToDisk()
     this.bumpRevision()
     this.notifyWorkspacesChanged()
+    this.syncNativePaneEmbedding()
     for (const listener of this.modeListeners) {
       try { listener(mode) } catch { /* ignore */ }
     }
@@ -434,7 +545,7 @@ export class DeviceRegistry {
     const client = await this.mountClient(sanitized)
     this.bumpRevision()
     this.notifyWorkspacesChanged()
-    return { ok: true, device: this.withAuthState(client.toView()) }
+    return { ok: true, device: this.withNativePane(this.withAuthState(client.toView())) }
   }
 
   removeDevice(deviceId: DeviceId): boolean {
@@ -450,6 +561,9 @@ export class DeviceRegistry {
     this.authManager.removeDevice(deviceId)
     this.authStates.delete(deviceId)
     this.catalogs.delete(deviceId)
+    this.nativePanes.delete(deviceId)
+    this.lastDeviceStates.delete(deviceId)
+    if (this.paneEmbeddedDeviceId === deviceId) this.paneEmbeddedDeviceId = undefined
     this.saveToDisk()
     this.bumpRevision()
     this.notifyWorkspacesChanged()
@@ -917,7 +1031,7 @@ export class DeviceRegistry {
         ...(this.aggregatedGatewayError !== undefined ? { aggregatedGatewayError: this.aggregatedGatewayError } : {}),
         nativeProxyActive: this.nativeProxyActive,
       },
-      devices: [...this.clients.values()].map(c => this.withAuthState(c.toView())),
+      devices: [...this.clients.values()].map(c => this.withNativePane(this.withAuthState(c.toView()))),
       sshConfigHosts: listSshConfigHosts(),
       aggregationConfig: this.aggregator.getConfig(),
       logicalWorkspaces,
@@ -939,9 +1053,13 @@ export class DeviceRegistry {
       sessionRowDeviceDot: patch.sessionRowDeviceDot === undefined
         ? this.uiPreferences.sessionRowDeviceDot
         : patch.sessionRowDeviceDot === true,
+      nativePane: patch.nativePane === undefined
+        ? this.uiPreferences.nativePane
+        : patch.nativePane === true,
     }
     this.saveToDisk()
     this.bumpRevision()
+    this.syncNativePaneEmbedding()
     return this.uiPreferences
   }
 
@@ -998,6 +1116,16 @@ export class DeviceRegistry {
       onStateChanged: (deviceId) => {
         this.bumpRevision()
         this.scheduleCatalogPersist()
+        // A device going offline/online changes which physical member is the
+        // effective "+ New Session" target, so the workspace projection must be
+        // recomputed (not only the JSON snapshot). Without this wake, the
+        // logical workspace keeps its old path and device until an unrelated
+        // workspace event happens to arrive.
+        const state = this.clients.get(deviceId)?.connectionState
+        if (state !== undefined && this.lastDeviceStates.get(deviceId) !== state) {
+          this.lastDeviceStates.set(deviceId, state)
+          this.notifyWorkspacesChanged()
+        }
         // Connecting/disconnecting the device that owns the open Session also
         // changes which catalog is authoritative for that conversation.
         if (
@@ -1129,6 +1257,8 @@ export class DeviceRegistry {
       if (raw.ui && typeof raw.ui === 'object') {
         this.uiPreferences = {
           sessionRowDeviceDot: raw.ui.sessionRowDeviceDot === true,
+          // Older documents predate the preference; the pane is the default.
+          nativePane: raw.ui.nativePane !== false,
         }
       }
       if (raw.displayMode === 'native') this.displayMode = 'native'
