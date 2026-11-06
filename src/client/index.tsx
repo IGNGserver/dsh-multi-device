@@ -35,6 +35,7 @@ import { MultiDeviceHubPanel } from './MultiDeviceHubPanel.tsx'
 import { OfflineDeviceBanner } from './OfflineDeviceBanner.tsx'
 import { installProjectDeviceBadges } from './projectBadges.ts'
 import { SessionDeviceChip } from './SessionDeviceChip.tsx'
+import { SessionRowDeviceMarker } from './SessionRowDeviceMarker.tsx'
 import { clientStore, useMultiDeviceState } from './state.ts'
 import { adoptMultiDeviceStyles } from './styles.ts'
 
@@ -440,6 +441,23 @@ export function apply(ctx: ClientContextLike): void {
         locale: LOCALE_NS,
       },
       SessionOfflineBanner,
+    ),
+  )
+
+  // 6e. Optional device marker in the Session row's leading cell. Off by
+  //     default; the Host persists `ui.sessionRowDeviceDot` and the local
+  //     Native Mode page never renders aggregated decorations.
+  ctx.slots.inject('sidebar.session.row.leading', () =>
+    ctx.slots.register(
+      {
+        name: 'sidebar.session.row.leading',
+        id: 'multi-device-row-device',
+        order: 10,
+        locale: LOCALE_NS,
+      },
+      (props: { sessionId: string; t?: (k: MultiDeviceLocaleKey) => string }) => (
+        <SessionRowDeviceMarker sessionId={props.sessionId} t={props.t ?? getTranslate()} />
+      ),
     ),
   )
 

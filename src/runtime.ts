@@ -141,6 +141,7 @@ export interface ControlPlaneRequest {
     | 'startGitMatch'
     | 'cancelGitMatch'
     | 'setActiveSession'
+    | 'setUiPreferences'
   readonly payload?: Record<string, unknown>
 }
 
@@ -270,6 +271,15 @@ export class MultiDeviceControlPlane {
           } catch (error) {
             return { ok: false, error: error instanceof Error ? error.message : String(error) }
           }
+          return { ok: true, value: this.registry.snapshot() }
+        }
+
+        case 'setUiPreferences': {
+          this.registry.updateUiPreferences({
+            ...(typeof payload.sessionRowDeviceDot === 'boolean'
+              ? { sessionRowDeviceDot: payload.sessionRowDeviceDot }
+              : {}),
+          })
           return { ok: true, value: this.registry.snapshot() }
         }
 

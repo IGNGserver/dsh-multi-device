@@ -27,6 +27,7 @@ import {
   LOCAL_DEVICE_ID,
   type MultiDeviceSnapshot,
   normalizeWorkspacePath,
+  type MultiDeviceUiPreferences,
   type RemoteSessionCreateInput,
   type RemoteWorkspaceCreateInput,
   type SessionOriginMetadata,
@@ -119,7 +120,11 @@ interface PersistedRegistryDocument {
   readonly gitMatch?: GitMatchRun
   /** Last-known catalogs, keyed by device id, so offline devices keep their sidebar rows. */
   readonly catalogs?: Record<string, DeviceCatalogCache>
+  /** Persisted display preferences. */
+  readonly ui?: MultiDeviceUiPreferences
 }
+
+const DEFAULT_UI_PREFERENCES: MultiDeviceUiPreferences = { sessionRowDeviceDot: false }
 
 export interface LocalHostProvider {
   /** Local webserver port, used for self-loop prevention. */
@@ -184,6 +189,7 @@ export class DeviceRegistry {
   private readonly authStates = new Map<DeviceId, { state: DeviceAuthState; error?: string }>()
   /** Durable mirror of each device catalog (see {@link DeviceCatalogCache}). */
   private readonly catalogs = new Map<DeviceId, DeviceCatalogCache>()
+  private uiPreferences: MultiDeviceUiPreferences = { ...DEFAULT_UI_PREFERENCES }
   private catalogPersistTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(
@@ -918,7 +924,25 @@ export class DeviceRegistry {
       allPhysicalWorkspaces,
       sessionOrigins,
       gitMatch: this.gitMatchRun,
+      ui: this.uiPreferences,
     }
+  }
+
+  /** Persisted display preferences (Snapshot also carries them under `ui`). */
+  ui(): MultiDeviceUiPreferences {
+    return this.uiPreferences
+  }
+
+  /** Update and persist display preferences; unknown keys are ignored by the type. */
+  updateUiPreferences(patch: Partial<MultiDeviceUiPreferences>): MultiDeviceUiPreferences {
+    this.uiPreferences = {
+      sessionRowDeviceDot: patch.sessionRowDeviceDot === undefined
+        ? this.uiPreferences.sessionRowDeviceDot
+        : patch.sessionRowDeviceDot === true,
+    }
+    this.saveToDisk()
+    this.bumpRevision()
+    return this.uiPreferences
   }
 
   /**
@@ -1102,6 +1126,11 @@ export class DeviceRegistry {
       if (raw.aggregation && typeof raw.aggregation === 'object') {
         this.aggregator.setConfig({ ...DEFAULT_AGGREGATION_CONFIG, ...raw.aggregation })
       }
+      if (raw.ui && typeof raw.ui === 'object') {
+        this.uiPreferences = {
+          sessionRowDeviceDot: raw.ui.sessionRowDeviceDot === true,
+        }
+      }
       if (raw.displayMode === 'native') this.displayMode = 'native'
       else if (raw.displayMode === 'aggregated') this.displayMode = 'aggregated'
       if (raw.catalogs && typeof raw.catalogs === 'object') {
@@ -1187,6 +1216,7 @@ export class DeviceRegistry {
       aggregation: this.aggregator.getConfig(),
       displayMode: this.displayMode,
       gitMatch: this.gitMatchRun,
+      ui: this.uiPreferences,
       ...(this.catalogs.size > 0
         ? { catalogs: Object.fromEntries(this.catalogs) }
         : {}),

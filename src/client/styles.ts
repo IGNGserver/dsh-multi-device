@@ -1210,6 +1210,45 @@ html[data-platform='darwin'] .dsh-md-native-bar {
   color: var(--dsw-alias-state-success-primary);
 }
 
+/* Optional device marker in a Session row's leading cell */
+.dsh-md-row-device {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: 999px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 9px;
+  line-height: 1;
+  font-weight: 600;
+  flex: none;
+  user-select: none;
+}
+
+.dsh-md-row-device[data-state='error'],
+.dsh-md-row-device[data-state='disabled'] {
+  color: var(--dsw-alias-label-tertiary);
+  border-color: var(--dsw-alias-border-l3);
+}
+
+.dsh-md-row-device-badge {
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--dsw-alias-state-warn-primary);
+}
+
+.dsh-md-row-device[data-state='error'] .dsh-md-row-device-badge,
+.dsh-md-row-device[data-state='disabled'] .dsh-md-row-device-badge {
+  background: var(--dsw-alias-label-tertiary);
+}
+
 .dsh-md-offline-banner {
   display: flex;
   align-items: flex-start;
@@ -1252,6 +1291,117 @@ html[data-platform='darwin'] .dsh-md-native-bar {
   white-space: nowrap;
   color: var(--dsw-alias-state-error-primary);
   font-size: 11px;
+}
+
+.dsh-md-device-other {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dsh-md-device-other-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dsh-md-device-other-back {
+  margin-left: auto;
+  padding: 2px 8px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.dsh-md-device-other-back:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.dsh-md-device-other-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.dsh-md-device-other-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.dsh-md-device-other-device {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.dsh-md-device-other-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsh-md-device-other-state {
+  margin-left: auto;
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.dsh-md-device-other-workspace {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 8px;
+  border: 0.5px solid transparent;
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dsh-md-device-other-workspace:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.dsh-md-device-other-workspace:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.dsh-md-device-other-title {
+  flex: none;
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsh-md-device-other-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--ds-font-family-code);
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
 }
 
 .dsh-md-offline-banner-actions {

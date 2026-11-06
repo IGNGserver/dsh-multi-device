@@ -763,6 +763,22 @@ export function MultiDeviceHubPanel({
           />
         </div>
 
+        <div className="dsh-md-pref-row">
+          <div>
+            <div className="dsh-md-pref-title">{t('rowDeviceDotTitle')}</div>
+            <div className="dsh-md-pref-desc">{t('rowDeviceDotDesc')}</div>
+          </div>
+          <Switch
+            checked={snapshot.ui?.sessionRowDeviceDot === true}
+            label={t('rowDeviceDotTitle')}
+            onChange={(enabled) => {
+              void clientStore.setUiPreferences({ sessionRowDeviceDot: enabled }).then((res) => {
+                if (!res.ok) pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
+              })
+            }}
+          />
+        </div>
+
         <div className="dsh-md-gitmatch">
           <div className="dsh-md-gitmatch-head">
             <div>

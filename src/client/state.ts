@@ -17,6 +17,7 @@ import {
   type DisplayMode,
   type ManualWorkspaceRule,
   type MultiDeviceSnapshot,
+  type MultiDeviceUiPreferences,
   type RemoteSessionCreateInput,
   type RemoteWorkspaceCreateInput,
   type SshKeyEntry,
@@ -172,6 +173,7 @@ const EMPTY_SNAPSHOT: MultiDeviceSnapshot = {
   logicalWorkspaces: [],
   allPhysicalWorkspaces: [],
   sessionOrigins: {},
+  ui: { sessionRowDeviceDot: false },
   gitMatch: {
     status: 'idle',
     totalDevices: 0,
@@ -644,6 +646,19 @@ class MultiDeviceClientStore {
   async cancelGitMatch(): Promise<boolean> {
     const res = await this.callControlPlane<{ cancelled: boolean }>({ action: 'cancelGitMatch' })
     return res.ok ? res.value.cancelled : false
+  }
+
+  /** Persist a display preference; the Host echoes the full snapshot back. */
+  async setUiPreferences(patch: Partial<MultiDeviceUiPreferences>): Promise<{ ok: boolean; error?: string }> {
+    const res = await this.callControlPlane<MultiDeviceSnapshot>({
+      action: 'setUiPreferences',
+      payload: patch as Record<string, unknown>,
+    })
+    if (res.ok) {
+      this.applyIncomingSnapshot(res.value)
+      return { ok: true }
+    }
+    return { ok: false, error: res.error }
   }
 
   async setPreferredDevice(

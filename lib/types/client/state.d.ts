@@ -10,7 +10,7 @@
  * @module dsh-multi-device/client/state
  */
 import type { StateDotState } from '@deepseek-ai/dsh-client-ui-primitives';
-import { type DeviceConnectionState, type DeviceId, type DisplayMode, type ManualWorkspaceRule, type MultiDeviceSnapshot, type RemoteSessionCreateInput, type RemoteWorkspaceCreateInput, type SshKeyEntry, type UpsertDeviceInput, type WorkspaceAggregationConfig } from '../contract.ts';
+import { type DeviceConnectionState, type DeviceId, type DisplayMode, type ManualWorkspaceRule, type MultiDeviceSnapshot, type MultiDeviceUiPreferences, type RemoteSessionCreateInput, type RemoteWorkspaceCreateInput, type SshKeyEntry, type UpsertDeviceInput, type WorkspaceAggregationConfig } from '../contract.ts';
 import type { ControlPlaneRequest } from '../runtime.ts';
 export type HubTabId = 'native' | 'devices' | 'git';
 /** Map device connection lifecycle states to official DSH `StateDot` states. */
@@ -160,6 +160,11 @@ declare class MultiDeviceClientStore {
         error?: string;
     }>;
     cancelGitMatch(): Promise<boolean>;
+    /** Persist a display preference; the Host echoes the full snapshot back. */
+    setUiPreferences(patch: Partial<MultiDeviceUiPreferences>): Promise<{
+        ok: boolean;
+        error?: string;
+    }>;
     setPreferredDevice(logicalWorkspaceId: string, deviceId: DeviceId): Promise<{
         ok: boolean;
         error?: string;

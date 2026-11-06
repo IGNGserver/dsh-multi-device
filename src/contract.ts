@@ -426,6 +426,15 @@ export interface GitMatchRun {
   readonly error?: string
 }
 
+/** Display preferences persisted by the Host (not aggregation semantics). */
+export interface MultiDeviceUiPreferences {
+  /**
+   * Draw a small device marker in the Session row's leading cell (aggregated
+   * mode only). Default false: rows stay visually identical to local rows.
+   */
+  readonly sessionRowDeviceDot: boolean
+}
+
 /** Complete Hub snapshot returned to the Client UI. */
 export interface MultiDeviceSnapshot {
   readonly revision: number
@@ -448,6 +457,8 @@ export interface MultiDeviceSnapshot {
   readonly sessionOrigins: Readonly<Record<string, SessionOriginMetadata>>
   /** Manual Git match progress and last outcome (never triggered automatically). */
   readonly gitMatch: GitMatchRun
+  /** Persisted display preferences; optional so older Hosts still parse. */
+  readonly ui?: MultiDeviceUiPreferences
 }
 
 // ============================================================================
