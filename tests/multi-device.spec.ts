@@ -69,6 +69,7 @@ import {
   titleFromPath,
 } from '../src/host/git-match.ts'
 import {
+  deviceOfflineError,
   installAggregatedGateway02,
   isSameDeviceChildSession,
   supportsWorkspaceReplaceFrames,
@@ -105,6 +106,7 @@ import {
   classifyRemoteProtocol,
   pendingInteractionKind,
   protocolGeneration,
+  RemoteDeviceClient,
   resolveProbedProtocol,
 } from '../src/host/remote-client.ts'
 import { BoundedStreamQueue } from '../src/host/stream-queue.ts'
@@ -860,6 +862,146 @@ describe('4c. New Session device switching', () => {
     } finally {
       globalThis.fetch = originalFetch
     }
+  })
+})
+
+describe('4d. Offline catalog cache & reconnect waiting', () => {
+  function silentCallbacks(): ConstructorParameters<typeof RemoteDeviceClient>[2] {
+    return {
+      onStateChanged: () => {},
+      onRemoteEventFrame: () => {},
+      onControlProjectionFrame: () => {},
+      onWorkspacesChanged: () => {},
+      onGitRemotesDiscovered: () => {},
+      onModelCatalogChanged: () => {},
+    }
+  }
+
+  function directConfig(id: string): ConstructorParameters<typeof RemoteDeviceClient>[0] {
+    return {
+      id: DeviceId(id),
+      name: id,
+      enabled: false,
+      transport: { kind: 'direct', baseUrl: 'http://127.0.0.1:9' },
+      auth: { mode: 'none' },
+    }
+  }
+
+  const cachedCatalog = {
+    deviceId: DeviceId('dev-cache'),
+    syncedAt: 1_760_000_000_000,
+    protocolVersion: '0.2' as const,
+    sessions: [
+      { sessionId: 's-1', updatedAt: 10, agentAvailable: true, running: false, blank: false, cwd: '/srv/app' },
+      { sessionId: 's-2', updatedAt: 20, agentAvailable: true, running: true, blank: true },
+    ],
+    workspaces: [
+      {
+        workspaceId: 'ws-1',
+        path: '/srv/app',
+        title: 'app',
+        sessionIds: ['s-1'],
+        createdAt: '2026-10-01T00:00:00.000Z',
+        updatedAt: '2026-10-02T00:00:00.000Z',
+      },
+    ],
+    archivedSessionIds: ['s-old'],
+    pinnedSessionIds: ['s-1'],
+  }
+
+  it('hydrates an offline client from the persisted catalog and reports it as stale', async () => {
+    const auth = new DeviceAuthManager(join(makeTempDir('dsh-md-cache-'), 'secrets.json'))
+    const client = new RemoteDeviceClient(directConfig('dev-cache'), auth, silentCallbacks())
+    client.hydrateCatalog(cachedCatalog)
+
+    expect(client.sessionSummaries().map(session => session.sessionId)).toEqual(['s-1', 's-2'])
+    expect(client.workspaceItems().map(workspace => workspace.workspaceId)).toEqual(['ws-1'])
+    expect(client.archivedIds()).toEqual(['s-old'])
+    expect(client.pinnedIds()).toEqual(['s-1'])
+
+    const view = client.toView()
+    expect(view.lastSyncedAt).toBe(cachedCatalog.syncedAt)
+    expect(view.catalogStale).toBe(true)
+    expect(view.sessionCount).toBe(2)
+    expect(view.workspaceCount).toBe(1)
+
+    // Round-trips through the durable shape (projections never survive).
+    const snapshot = client.catalogSnapshot()
+    expect(snapshot.sessions).toEqual(cachedCatalog.sessions)
+    expect(snapshot.workspaces).toEqual(cachedCatalog.workspaces)
+    expect(snapshot.syncedAt).toBe(cachedCatalog.syncedAt)
+
+    const controller = new AbortController()
+    await expect(client.waitForConnected(controller.signal, 30)).resolves.toBe(false)
+  })
+
+  it('persists catalogs across a registry restart and keeps cached sessions in the snapshot', async () => {
+    const dir = makeTempDir('dsh-md-registry-cache-')
+    const dataFile = join(dir, 'registry.json')
+    const secretsFile = join(dir, 'secrets.json')
+    const localHost = {
+      localPort: () => 3080,
+      localWorkspaces: () => [],
+      localSessionUpdatedAt: () => new Map<string, number>(),
+    }
+    const options = { allowDirectTransport: true, enableNativeProxy: false as const }
+
+    const first = new DeviceRegistry(dataFile, secretsFile, localHost, options)
+    const added = await first.upsertDevice({
+      id: 'dev-cache',
+      name: 'cache-dev',
+      enabled: false,
+      transport: { kind: 'direct', baseUrl: 'http://127.0.0.1:9' },
+      auth: { mode: 'none' },
+    })
+    expect(added.ok).toBe(true)
+    first.setDeviceCatalog(cachedCatalog)
+    first.saveToDisk()
+    first.dispose()
+
+    const persisted = JSON.parse(readFileSync(dataFile, 'utf8')) as {
+      catalogs?: Record<string, { syncedAt: number }>
+    }
+    expect(persisted.catalogs?.['dev-cache']?.syncedAt).toBe(cachedCatalog.syncedAt)
+
+    const second = new DeviceRegistry(dataFile, secretsFile, localHost, options)
+    expect(second.deviceCatalog(DeviceId('dev-cache'))?.sessions).toHaveLength(2)
+    second.startAll()
+    const client = second.client(DeviceId('dev-cache'))!
+    expect(client.toView().lastSyncedAt).toBe(cachedCatalog.syncedAt)
+    expect(client.toView().catalogStale).toBe(true)
+
+    const snapshot = second.snapshot()
+    expect(snapshot.logicalWorkspaces.length).toBeGreaterThan(0)
+    expect(snapshot.sessionOrigins[encodeRemoteSessionId(DeviceId('dev-cache'), 's-1')]?.deviceName)
+      .toBe('cache-dev')
+    expect(snapshot.sessionOrigins[encodeRemoteSessionId(DeviceId('dev-cache'), 's-1')]?.deviceState)
+      .not.toBe('connected')
+    second.dispose()
+  })
+
+  it('builds a wire-compatible offline failure and refuses to wait on an unconfigured device', async () => {
+    const error = deviceOfflineError('ubuntu-dev', 'reconnect attempt 3') as Error & {
+      code: string
+      details: Record<string, unknown>
+      isDSHRemoteError: boolean
+    }
+    expect(error.isDSHRemoteError).toBe(true)
+    expect(error.code).toBe('dsh-md/device-offline')
+    expect(error.message).toContain('ubuntu-dev')
+    expect(error.details).toEqual({ deviceName: 'ubuntu-dev' })
+
+    const dir = makeTempDir('dsh-md-registry-wait-')
+    const registry = new DeviceRegistry(
+      join(dir, 'registry.json'),
+      join(dir, 'secrets.json'),
+      { localPort: () => 3080, localWorkspaces: () => [], localSessionUpdatedAt: () => new Map() },
+      { allowDirectTransport: true, enableNativeProxy: false },
+    )
+    const controller = new AbortController()
+    await expect(registry.waitForDeviceConnected(LOCAL_DEVICE_ID, controller.signal, 10)).resolves.toBe(true)
+    await expect(registry.waitForDeviceConnected(DeviceId('missing'), controller.signal, 10)).resolves.toBe(false)
+    registry.dispose()
   })
 })
 

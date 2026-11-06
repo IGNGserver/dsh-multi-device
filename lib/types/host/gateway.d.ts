@@ -235,6 +235,13 @@ export interface AggregatedGatewayOptions {
      * resurrect it. `replace` swaps the whole projection without tombstones.
      */
     readonly workspaceReplaceFrames?: boolean | (() => boolean);
+    /**
+     * How long `session.page` / `session.follow` wait for a reconnecting device
+     * before surfacing an offline error. Opening a conversation on a device that
+     * is still coming back up should show the session, not a red transport error.
+     * Defaults to 60s; `0` fails immediately.
+     */
+    readonly offlineWaitMs?: number;
 }
 /**
  * Whether the bundled Client WorkspaceModel understands an incremental
@@ -245,6 +252,14 @@ export interface AggregatedGatewayOptions {
  * @returns true when emitting `replace` after `baseline` is safe.
  */
 export declare function supportsWorkspaceReplaceFrames(version: string | undefined): boolean;
+/**
+ * Build a wire-compatible remote failure for an unreachable device.
+ *
+ * `isDSHRemoteError`/`code`/`details` are exactly what the Host RPC serializer
+ * reads, so the browser receives this code and message instead of
+ * `gateway/internal`, and the conversation's error line stays actionable.
+ */
+export declare function deviceOfflineError(deviceName: string, detail?: string): Error;
 /**
  * Install the DSH 0.2 Aggregated Mode service wrappers and return a disposer
  * that restores all original methods.

@@ -29,6 +29,10 @@ export interface SessionDeviceView {
   readonly isLocal: boolean
   /** Present for remote Sessions that the Host has seen in a device catalog. */
   readonly origin?: SessionOriginMetadata
+  /** Epoch ms of the device's last successful catalog sync (cached rows included). */
+  readonly lastSyncedAt?: number
+  /** Current reconnect attempt, for an actionable offline hint. */
+  readonly reconnectAttempt?: number
 }
 
 /** One device that could host a new Session in a logical workspace. */
@@ -71,6 +75,8 @@ export function resolveSessionDevice(
     state: origin?.deviceState ?? device?.state ?? 'disabled',
     isLocal: false,
     ...(origin !== undefined ? { origin } : {}),
+    ...(device?.lastSyncedAt !== undefined ? { lastSyncedAt: device.lastSyncedAt } : {}),
+    ...(device?.reconnectAttempt !== undefined ? { reconnectAttempt: device.reconnectAttempt } : {}),
   }
 }
 

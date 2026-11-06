@@ -1210,6 +1210,72 @@ html[data-platform='darwin'] .dsh-md-native-bar {
   color: var(--dsw-alias-state-success-primary);
 }
 
+.dsh-md-offline-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.dsh-md-offline-banner > :first-child {
+  margin-top: 4px;
+  flex: none;
+}
+
+.dsh-md-offline-banner-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.dsh-md-offline-banner-title {
+  color: var(--dsw-alias-label-primary);
+  font-weight: 500;
+}
+
+.dsh-md-offline-banner-desc {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsh-md-offline-banner-error {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 11px;
+}
+
+.dsh-md-offline-banner-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+}
+
+.dsh-md-offline-banner-action {
+  padding: 3px 10px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.dsh-md-offline-banner-action:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
 .dsh-md-fallback-modal {
   width: min(740px, 100%);
 }

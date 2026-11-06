@@ -1,4 +1,4 @@
-import { type DeviceAuthState, type DeviceConfig, DeviceId, type DeviceView, type DisplayMode, type GitMatchRun, type MultiDeviceSnapshot, type RemoteSessionCreateInput, type RemoteWorkspaceCreateInput, type SshKeyEntry, type UpsertDeviceInput, type WorkspaceAggregationConfig } from '../contract.ts';
+import { type DeviceAuthState, type DeviceCatalogCache, type DeviceConfig, DeviceId, type DeviceView, type DisplayMode, type GitMatchRun, type MultiDeviceSnapshot, type RemoteSessionCreateInput, type RemoteWorkspaceCreateInput, type SshKeyEntry, type UpsertDeviceInput, type WorkspaceAggregationConfig } from '../contract.ts';
 import { DeviceAuthManager } from './auth.ts';
 import { type PhysicalWorkspaceInput, WorkspaceAggregator } from './git-aggregator.ts';
 import { NativeProxyManager } from './native-proxy.ts';
@@ -57,6 +57,9 @@ export declare class DeviceRegistry {
     private aggregatedGatewayError;
     private nativeProxyActive;
     private readonly authStates;
+    /** Durable mirror of each device catalog (see {@link DeviceCatalogCache}). */
+    private readonly catalogs;
+    private catalogPersistTimer;
     constructor(dataFilePath: string, secretsFilePath: string, localHost: LocalHostProvider, options?: {
         enableTunnels?: boolean;
         enableNativeProxy?: boolean;
@@ -198,6 +201,14 @@ export declare class DeviceRegistry {
     private scanRemoteRepos;
     /** Build the complete snapshot for the Client UI and Aggregated Gateway. */
     snapshot(): MultiDeviceSnapshot;
+    /**
+     * Wait for a device to become reachable, bounded by `timeoutMs`.
+     *
+     * The local machine is always reachable; an unconfigured or disabled device
+     * answers false immediately. Callers use this before opening a Session so a
+     * tunnel that is still coming back up does not surface as a transport error.
+     */
+    waitForDeviceConnected(deviceId: DeviceId, signal: AbortSignal, timeoutMs: number): Promise<boolean>;
     /** Resolve which remote client owns a given namespaced session ID. */
     resolveSessionOwner(sessionId: string): {
         client: RemoteDeviceClient;
@@ -216,5 +227,20 @@ export declare class DeviceRegistry {
     private bumpRevision;
     private notifyWorkspacesChanged;
     private loadFromDisk;
+    /** Persisted catalog of one device (hydrated cache or the last capture). */
+    deviceCatalog(deviceId: DeviceId): DeviceCatalogCache | undefined;
+    /**
+     * Replace the persisted catalog of one device. Used for hydration and by
+     * tests; live clients are captured through {@link scheduleCatalogPersist}.
+     */
+    setDeviceCatalog(cache: DeviceCatalogCache): void;
+    /**
+     * Capture every live client's catalog and write it to disk. Debounced: the
+     * session/workspace streams can burst many changes per turn, and the file is
+     * rewritten atomically on each save.
+     */
+    private scheduleCatalogPersist;
+    /** Copy each client's current catalog into the durable map. */
+    private flushCatalogCache;
     saveToDisk(): void;
 }

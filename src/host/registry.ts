@@ -15,6 +15,7 @@ import { homedir } from 'node:os'
 import { dirname } from 'node:path'
 import {
   type DeviceAuthState,
+  type DeviceCatalogCache,
   type DeviceConfig,
   type DeviceConnectionState,
   DeviceId,
@@ -116,6 +117,8 @@ interface PersistedRegistryDocument {
   readonly displayMode?: DisplayMode
   /** Last manual Git match outcome, so the panel can show it after a reload. */
   readonly gitMatch?: GitMatchRun
+  /** Last-known catalogs, keyed by device id, so offline devices keep their sidebar rows. */
+  readonly catalogs?: Record<string, DeviceCatalogCache>
 }
 
 export interface LocalHostProvider {
@@ -179,6 +182,9 @@ export class DeviceRegistry {
   private aggregatedGatewayError: string | undefined
   private nativeProxyActive = true
   private readonly authStates = new Map<DeviceId, { state: DeviceAuthState; error?: string }>()
+  /** Durable mirror of each device catalog (see {@link DeviceCatalogCache}). */
+  private readonly catalogs = new Map<DeviceId, DeviceCatalogCache>()
+  private catalogPersistTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(
     private readonly dataFilePath: string,
@@ -341,10 +347,21 @@ export class DeviceRegistry {
   }
 
   dispose(): void {
+    // Persist the last captured catalogs before the timers are torn down.
+    try {
+      this.flushCatalogCache()
+      this.saveToDisk()
+    } catch {
+      // Shutdown must stay best-effort.
+    }
     for (const client of this.clients.values()) {
       client.stop()
     }
     this.clients.clear()
+    if (this.catalogPersistTimer !== undefined) {
+      clearTimeout(this.catalogPersistTimer)
+      this.catalogPersistTimer = undefined
+    }
     this.nativeProxyManager.dispose()
   }
 
@@ -426,6 +443,7 @@ export class DeviceRegistry {
     this.nativeProxyManager.removeProxy(deviceId)
     this.authManager.removeDevice(deviceId)
     this.authStates.delete(deviceId)
+    this.catalogs.delete(deviceId)
     this.saveToDisk()
     this.bumpRevision()
     this.notifyWorkspacesChanged()
@@ -903,6 +921,26 @@ export class DeviceRegistry {
     }
   }
 
+  /**
+   * Wait for a device to become reachable, bounded by `timeoutMs`.
+   *
+   * The local machine is always reachable; an unconfigured or disabled device
+   * answers false immediately. Callers use this before opening a Session so a
+   * tunnel that is still coming back up does not surface as a transport error.
+   */
+  async waitForDeviceConnected(
+    deviceId: DeviceId,
+    signal: AbortSignal,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    if (deviceId === LOCAL_DEVICE_ID) return true
+    const client = this.clients.get(deviceId)
+    if (client === undefined) return false
+    if (client.isConnected()) return true
+    if (!client.deviceConfig.enabled) return false
+    return client.waitForConnected(signal, timeoutMs)
+  }
+
   /** Resolve which remote client owns a given namespaced session ID. */
   resolveSessionOwner(sessionId: string): { client: RemoteDeviceClient; rawSessionId: string } | undefined {
     const decoded = decodeSessionId(sessionId)
@@ -935,6 +973,7 @@ export class DeviceRegistry {
     const callbacks: RemoteDeviceCallbacks = {
       onStateChanged: (deviceId) => {
         this.bumpRevision()
+        this.scheduleCatalogPersist()
         // Connecting/disconnecting the device that owns the open Session also
         // changes which catalog is authoritative for that conversation.
         if (
@@ -961,6 +1000,7 @@ export class DeviceRegistry {
       onWorkspacesChanged: () => {
         this.bumpRevision()
         this.notifyWorkspacesChanged()
+        this.scheduleCatalogPersist()
       },
       onGitRemotesDiscovered: (deviceId, remotesByPath) => {
         for (const [path, rawUrl] of remotesByPath.entries()) {
@@ -972,6 +1012,7 @@ export class DeviceRegistry {
 
     if (client === undefined) {
       client = new RemoteDeviceClient(config, this.authManager, callbacks)
+      client.hydrateCatalog(this.catalogs.get(config.id))
       this.clients.set(config.id, client)
     } else {
       client.updateConfig(config)
@@ -1063,6 +1104,13 @@ export class DeviceRegistry {
       }
       if (raw.displayMode === 'native') this.displayMode = 'native'
       else if (raw.displayMode === 'aggregated') this.displayMode = 'aggregated'
+      if (raw.catalogs && typeof raw.catalogs === 'object') {
+        for (const [deviceId, catalog] of Object.entries(raw.catalogs)) {
+          if (this.configs.has(DeviceId(deviceId))) {
+            this.catalogs.set(DeviceId(deviceId), catalog)
+          }
+        }
+      }
       if (raw.gitMatch && typeof raw.gitMatch === 'object') {
         const restored = raw.gitMatch as GitMatchRun
         // A run cannot survive the process that was driving it.
@@ -1084,6 +1132,51 @@ export class DeviceRegistry {
     }
   }
 
+  /** Persisted catalog of one device (hydrated cache or the last capture). */
+  deviceCatalog(deviceId: DeviceId): DeviceCatalogCache | undefined {
+    return this.catalogs.get(deviceId)
+  }
+
+  /**
+   * Replace the persisted catalog of one device. Used for hydration and by
+   * tests; live clients are captured through {@link scheduleCatalogPersist}.
+   */
+  setDeviceCatalog(cache: DeviceCatalogCache): void {
+    this.catalogs.set(cache.deviceId, trimCatalog(cache))
+  }
+
+  /**
+   * Capture every live client's catalog and write it to disk. Debounced: the
+   * session/workspace streams can burst many changes per turn, and the file is
+   * rewritten atomically on each save.
+   */
+  private scheduleCatalogPersist(): void {
+    if (this.catalogPersistTimer !== undefined) return
+    this.catalogPersistTimer = setTimeout(() => {
+      this.catalogPersistTimer = undefined
+      try {
+        this.flushCatalogCache()
+        this.saveToDisk()
+      } catch {
+        // Persisting the catalog must never break the live aggregation.
+      }
+    }, 3_000)
+    // Do not keep the Host process alive just for this timer.
+    if (typeof this.catalogPersistTimer === 'object' && this.catalogPersistTimer !== null) {
+      const timer = this.catalogPersistTimer as { unref?: () => void }
+      timer.unref?.()
+    }
+  }
+
+  /** Copy each client's current catalog into the durable map. */
+  private flushCatalogCache(): void {
+    for (const [deviceId, client] of this.clients.entries()) {
+      const snapshot = client.catalogSnapshot()
+      if (snapshot.syncedAt === 0 && snapshot.sessions.length === 0 && snapshot.workspaces.length === 0) continue
+      this.catalogs.set(deviceId, trimCatalog(snapshot))
+    }
+  }
+
   saveToDisk(): void {
     const dir = dirname(this.dataFilePath)
     mkdirSync(dir, { recursive: true })
@@ -1094,6 +1187,9 @@ export class DeviceRegistry {
       aggregation: this.aggregator.getConfig(),
       displayMode: this.displayMode,
       gitMatch: this.gitMatchRun,
+      ...(this.catalogs.size > 0
+        ? { catalogs: Object.fromEntries(this.catalogs) }
+        : {}),
     }
     try {
       writeFileSync(tmp, JSON.stringify(doc, null, 2), { mode: 0o600 })
@@ -1103,6 +1199,32 @@ export class DeviceRegistry {
     } finally {
       try { unlinkSync(tmp) } catch { /* sibling may not exist if the write failed */ }
     }
+  }
+}
+
+const CATALOG_SESSION_LIMIT = 2_000
+const CATALOG_WORKSPACE_LIMIT = 300
+const CATALOG_ID_LIMIT = 5_000
+
+/**
+ * Bound one device's persisted catalog. A device with thousands of Sessions
+ * (long-lived dev boxes) must not turn the plugin data file into a choke point;
+ * the newest Sessions are the ones the sidebar actually shows.
+ */
+function trimCatalog(cache: DeviceCatalogCache): DeviceCatalogCache {
+  const sessions = cache.sessions.length > CATALOG_SESSION_LIMIT
+    ? [...cache.sessions]
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, CATALOG_SESSION_LIMIT)
+    : cache.sessions
+  return {
+    ...cache,
+    sessions,
+    workspaces: cache.workspaces.length > CATALOG_WORKSPACE_LIMIT
+      ? cache.workspaces.slice(0, CATALOG_WORKSPACE_LIMIT)
+      : cache.workspaces,
+    archivedSessionIds: cache.archivedSessionIds.slice(0, CATALOG_ID_LIMIT),
+    pinnedSessionIds: cache.pinnedSessionIds.slice(0, CATALOG_ID_LIMIT),
   }
 }
 

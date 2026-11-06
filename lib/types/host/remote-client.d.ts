@@ -1,4 +1,4 @@
-import { type DeviceConfig, type DeviceId, type DeviceView, type PendingInteractionKind } from '../contract.ts';
+import { type DeviceCatalogCache, type DeviceConfig, type DeviceConnectionState, type DeviceId, type DeviceView, type PendingInteractionKind } from '../contract.ts';
 import { DeviceAuthManager } from './auth.ts';
 /** Map a remote waterfall event name to the pending kind shown in the UI. */
 export declare function pendingInteractionKind(event: string): PendingInteractionKind | undefined;
@@ -78,6 +78,10 @@ export declare class RemoteDeviceClient {
     private lastError;
     private reconnectAttempt;
     private nativeProxyUrl;
+    /** Epoch ms of the last successful catalog sync (live or hydrated from disk). */
+    private lastSyncedAt;
+    /** True while the catalog rows predate a live baseline (hydrated cache). */
+    private catalogStale;
     private summaries;
     private workspaces;
     private archivedSessionIds;
@@ -99,6 +103,24 @@ export declare class RemoteDeviceClient {
     effectiveBaseUrl(): string | undefined;
     targetSummary(): string;
     toView(): DeviceView;
+    /** Current lifecycle state, read through a getter so callers never narrow a stale value. */
+    get connectionState(): DeviceConnectionState;
+    /** True while this device has a live baseline and can answer RPCs. */
+    isConnected(): boolean;
+    /**
+     * Seed the in-memory catalog from the persisted cache before the first
+     * connection attempt, so an offline device keeps its sidebar rows after a
+     * Host restart. A later live baseline replaces everything.
+     */
+    hydrateCatalog(cache: DeviceCatalogCache | undefined): void;
+    /** Durable mirror of the current catalog; projections and secrets stay out. */
+    catalogSnapshot(): DeviceCatalogCache;
+    /**
+     * Wait until the device reaches `connected`, for a Session that is opened
+     * while the tunnel is still coming up. Polling keeps this free of extra
+     * listener lifecycles; the wait is bounded by the caller's timeout.
+     */
+    waitForConnected(signal: AbortSignal, timeoutMs: number): Promise<boolean>;
     sessionSummaries(): readonly RemoteSessionSummary[];
     workspaceItems(): readonly RemoteWorkspaceItem[];
     archivedIds(): readonly string[];

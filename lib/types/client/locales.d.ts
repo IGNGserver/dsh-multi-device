@@ -106,6 +106,13 @@ export declare const zh: {
     readonly deviceChipWorkspace: "工作区";
     readonly deviceChipCwd: "会话路径";
     readonly deviceChipOpenSettings: "多设备设置";
+    readonly deviceChipLastSynced: "上次同步";
+    readonly offlineBannerTitle: "设备 {name} 当前离线";
+    readonly offlineBannerReconnecting: "正在自动重连（第 {count} 次）…";
+    readonly offlineBannerHint: "会话内容会在设备恢复后自动加载；发送、审批等操作暂时不可用。";
+    readonly offlineBannerError: "错误：{error}";
+    readonly offlineBannerRetry: "立即重连";
+    readonly offlineBannerSettings: "设备设置";
     readonly deviceChipOfflineHint: "该设备当前不可达；展示的是上次同步的数据。";
     readonly deviceChipSwitchHint: "可在下方重新连接，或切换到在线设备新建会话。";
     readonly deviceHeroChipLabel: "新建于";

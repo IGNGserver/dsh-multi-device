@@ -166,6 +166,13 @@ export interface AggregatedGatewayOptions {
    * resurrect it. `replace` swaps the whole projection without tombstones.
    */
   readonly workspaceReplaceFrames?: boolean | (() => boolean)
+  /**
+   * How long `session.page` / `session.follow` wait for a reconnecting device
+   * before surfacing an offline error. Opening a conversation on a device that
+   * is still coming back up should show the session, not a red transport error.
+   * Defaults to 60s; `0` fails immediately.
+   */
+  readonly offlineWaitMs?: number
 }
 
 /** One workspace row carried by the aggregated follow stream. */
@@ -210,6 +217,28 @@ export function supportsWorkspaceReplaceFrames(version: string | undefined): boo
 }
 
 /**
+ * Build a wire-compatible remote failure for an unreachable device.
+ *
+ * `isDSHRemoteError`/`code`/`details` are exactly what the Host RPC serializer
+ * reads, so the browser receives this code and message instead of
+ * `gateway/internal`, and the conversation's error line stays actionable.
+ */
+export function deviceOfflineError(deviceName: string, detail?: string): Error {
+  const error = new Error(
+    `Device "${deviceName}" is offline${detail === undefined || detail === '' ? '' : ` (${detail})`}. Reconnect it and retry.`,
+  ) as Error & {
+    code: string
+    details: Record<string, unknown>
+    isDSHRemoteError: boolean
+  }
+  error.name = 'RemoteError'
+  error.code = 'dsh-md/device-offline'
+  error.details = { deviceName }
+  error.isDSHRemoteError = true
+  return error
+}
+
+/**
  * Install the DSH 0.2 Aggregated Mode service wrappers and return a disposer
  * that restores all original methods.
  */
@@ -226,6 +255,26 @@ export function installAggregatedGateway02(
     typeof options.workspaceReplaceFrames === 'function'
       ? options.workspaceReplaceFrames()
       : options.workspaceReplaceFrames === true
+
+  const offlineWaitMs = options.offlineWaitMs ?? 60_000
+  /** Fail fast with the shared offline code when the device has no live baseline. */
+  const requireConnected = (client: { isConnected(): boolean; deviceConfig: { name: string } }): void => {
+    if (!client.isConnected()) throw deviceOfflineError(client.deviceConfig.name)
+  }
+  /**
+   * Hold a Session open across a reconnect: the browser shows the normal
+   * skeleton plus the localized offline banner instead of a red error line.
+   */
+  const waitForClient = async (
+    client: { id: DeviceId; isConnected(): boolean; deviceConfig: { name: string }; toView(): { reconnectAttempt: number } },
+    signal: AbortSignal,
+  ): Promise<void> => {
+    if (client.isConnected()) return
+    const reachable = await registry.waitForDeviceConnected(client.id, signal, offlineWaitMs)
+    if (!reachable) {
+      throw deviceOfflineError(client.deviceConfig.name, `reconnect attempt ${String(client.toView().reconnectAttempt)}`)
+    }
+  }
 
   const patchMethod = <T extends object, K extends keyof T>(target: T, key: K, replacement: T[K]): void => {
     const original = target[key]
@@ -355,6 +404,7 @@ export function installAggregatedGateway02(
           : undefined
         const targetDeviceId = requestedLws?.effectiveTargetDeviceId ?? requestedLws?.targetDeviceId
         if (requestedLws === undefined || targetDeviceId === owner.client.id) {
+          requireConnected(owner.client)
           const rawWorkspaceId = request.workspaceId ? resolveRemoteWorkspaceIdForDevice(registry, request.workspaceId, owner.client.id) : undefined
           const created = (await owner.client.invokeUnary('session', 'create', {
             request: {
@@ -393,6 +443,7 @@ export function installAggregatedGateway02(
         const remoteClient = registry.client(targetDeviceId)
         const remoteMember = lws.members.find(m => m.deviceId === targetDeviceId)
         if (remoteClient !== undefined) {
+          requireConnected(remoteClient)
           const created = (await remoteClient.invokeUnary('session', 'create', {
             request: {
               ...(remoteMember !== undefined
@@ -415,6 +466,7 @@ export function installAggregatedGateway02(
       if (decodedWs.isRemote) {
         const remoteClient = registry.client(decodedWs.deviceId)
         if (remoteClient !== undefined) {
+          requireConnected(remoteClient)
           const created = (await remoteClient.invokeUnary('session', 'create', {
             request: {
               workspaceId: decodedWs.rawWorkspaceId,
@@ -437,6 +489,7 @@ export function installAggregatedGateway02(
     if (!registry.isAggregatedMode()) return origSessionSelectModel(request)
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner === undefined) return origSessionSelectModel(request)
+    requireConnected(owner.client)
     return (await owner.client.invokeUnary('session', 'selectModel', {
       request: {
         ...request,
@@ -480,6 +533,7 @@ export function installAggregatedGateway02(
     if (!registry.isAggregatedMode()) return origSessionRename(request)
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner === undefined) return origSessionRename(request)
+    requireConnected(owner.client)
     return (await owner.client.invokeUnary('session', 'rename', {
       request: { sessionId: owner.rawSessionId, title: request.title },
     })) as { title: string; seq: number }
@@ -489,6 +543,7 @@ export function installAggregatedGateway02(
     if (!registry.isAggregatedMode()) return origSessionFork(request)
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner === undefined) return origSessionFork(request)
+    requireConnected(owner.client)
     const res = (await owner.client.invokeUnary('session', 'fork', {
       request: {
         sessionId: owner.rawSessionId,
@@ -502,6 +557,7 @@ export function installAggregatedGateway02(
     if (!registry.isAggregatedMode()) return origSessionPrompt(request, signal)
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner === undefined) return origSessionPrompt(request, signal)
+    requireConnected(owner.client)
     return (await owner.client.invokeUnary(
       'session',
       'prompt',
@@ -514,6 +570,7 @@ export function installAggregatedGateway02(
     if (!registry.isAggregatedMode()) return origSessionAttachment(request)
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner === undefined) return origSessionAttachment(request)
+    requireConnected(owner.client)
     return (await owner.client.invokeUnary('session', 'attachment', {
       request: { ...request, sessionId: owner.rawSessionId },
     })) as Record<string, unknown>
@@ -523,6 +580,7 @@ export function installAggregatedGateway02(
     if (!registry.isAggregatedMode()) return origSessionUpdateQueue(request)
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner === undefined) return origSessionUpdateQueue(request)
+    requireConnected(owner.client)
     return (await owner.client.invokeUnary('session', 'updateQueue', {
       request: { ...request, sessionId: owner.rawSessionId },
     })) as { accepted: true }
@@ -532,6 +590,9 @@ export function installAggregatedGateway02(
     if (!registry.isAggregatedMode()) return origSessionCancel(request)
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner === undefined) return origSessionCancel(request)
+    // This one is synchronous by contract: reject instead of throwing so the
+    // RPC layer reports the failure exactly like an async method would.
+    if (!owner.client.isConnected()) return Promise.reject(deviceOfflineError(owner.client.deviceConfig.name))
     return owner.client.invokeUnary('session', 'cancel', {
       request: { sessionId: owner.rawSessionId },
     }) as Promise<{ accepted: true }>
@@ -541,6 +602,7 @@ export function installAggregatedGateway02(
     if (!registry.isAggregatedMode()) return origSessionProjections(request, signal)
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner === undefined) return origSessionProjections(request, signal)
+    requireConnected(owner.client)
     return (await owner.client.invokeUnary(
       'session',
       'projections',
@@ -571,6 +633,7 @@ export function installAggregatedGateway02(
     if (!registry.isAggregatedMode()) return origSessionPage(request, signal)
     const routed = routeSessionAddress(registry, request.address as Record<string, unknown> | undefined)
     if (routed === undefined) return origSessionPage(request, signal)
+    await waitForClient(routed.client, signal)
     return (await routed.client.invokeUnary(
       'session',
       'page',
@@ -584,6 +647,7 @@ export function installAggregatedGateway02(
     const routed = routeSessionAddress(registry, request.address as Record<string, unknown> | undefined)
     if (routed === undefined) return origSessionFollow(request, signal)
     return (async function* () {
+      await waitForClient(routed.client, signal)
       const stream = routed.client.openStream(
         'session/follow',
         { request: { ...request, address: routed.rawAddress } },
@@ -733,6 +797,7 @@ export function installAggregatedGateway02(
       const client = registry.client(decodedRemote.deviceId)
       const owner = registry.resolveSessionOwner(request.sessionId)
       if (client !== undefined && owner !== undefined) {
+        requireConnected(client)
         const res = (await client.invokeUnary('workspace', 'insertSessionBefore', {
           request: {
             workspaceId: decodedRemote.rawWorkspaceId,
@@ -760,6 +825,7 @@ export function installAggregatedGateway02(
     }
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner !== undefined) {
+      requireConnected(owner.client)
       await owner.client.invokeUnary('workspace', 'archiveSession', {
         request: {
           sessionId: owner.rawSessionId,
@@ -781,6 +847,7 @@ export function installAggregatedGateway02(
     }
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner !== undefined) {
+      requireConnected(owner.client)
       await owner.client.invokeUnary('workspace', 'unarchiveSession', {
         request: { sessionId: owner.rawSessionId },
       })
@@ -799,6 +866,7 @@ export function installAggregatedGateway02(
     }
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner !== undefined) {
+      requireConnected(owner.client)
       await owner.client.invokeUnary('workspace', 'pinSession', {
         request: { sessionId: owner.rawSessionId },
       })
@@ -817,6 +885,7 @@ export function installAggregatedGateway02(
     }
     const owner = registry.resolveSessionOwner(request.sessionId)
     if (owner !== undefined) {
+      requireConnected(owner.client)
       await owner.client.invokeUnary('workspace', 'unpinSession', {
         request: { sessionId: owner.rawSessionId },
       })
