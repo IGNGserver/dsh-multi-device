@@ -270,6 +270,12 @@ const CSS_TEXT = `
   text-overflow: ellipsis;
 }
 
+.dsh-md-merged-repo-hint {
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-state-warn-label);
+}
+
 .dsh-md-devices-block {
   display: flex;
   flex-direction: column;
@@ -965,22 +971,163 @@ html[data-platform='darwin'] .dsh-md-native-bar {
   line-height: 18px;
 }
 
-/* Owning-device label on the right side of an opened remote Session header */
-.dsh-md-session-device {
+/* Owning-device chip on the conversation page (header + New Session row) */
+.dsh-md-device-chip-wrap {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.dsh-md-device-chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
-  max-width: 180px;
+  max-width: 220px;
+  padding: 3px 8px;
+  border: 0.5px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.dsh-md-device-chip:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.dsh-md-device-chip[data-state='error'] {
+  border-color: var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsh-md-device-chip[data-state='disabled'],
+.dsh-md-device-chip[data-state='connecting'],
+.dsh-md-device-chip[data-state='reconnecting'] {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsh-md-device-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsh-md-device-chip-offline {
+  flex: none;
+  padding: 0 5px;
+  border-radius: var(--dsw-radius-xs);
+  background: var(--dsw-alias-interactive-bg-hover-solid);
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.dsh-md-device-chip-chevron {
+  flex: none;
+  opacity: 0.55;
+}
+
+.dsh-md-device-chip-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+}
+
+.dsh-md-device-popover {
+  position: fixed;
+  z-index: 2147483001;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 300px;
+  max-width: calc(100vw - 16px);
+  padding: 12px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-lg);
+  background: var(--dsw-alias-bg-layer-1);
+  box-shadow: var(--dsw-elevation-panel);
   color: var(--dsw-alias-label-secondary);
   font-size: 12px;
   line-height: 18px;
 }
 
-.dsh-md-session-device-name {
+.dsh-md-device-popover-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.dsh-md-device-popover-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.dsh-md-device-popover-state {
+  margin-left: auto;
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+}
+
+.dsh-md-device-popover-rows {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 10px;
+  margin: 0;
+}
+
+.dsh-md-device-popover-rows dt {
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap;
+}
+
+.dsh-md-device-popover-rows dd {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.dsh-md-device-popover-hint,
+.dsh-md-device-popover-error {
+  margin: 0;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.dsh-md-device-popover-error {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.dsh-md-device-popover-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.dsh-md-device-popover-action {
+  padding: 4px 10px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.dsh-md-device-popover-action:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
 }
 
 .dsh-md-fallback-modal {

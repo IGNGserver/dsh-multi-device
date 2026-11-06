@@ -12,8 +12,9 @@
  *    (本机 + remote devices) and Keep-Alive remote viewports.
  * 4. `conversation.input.right`, `conversation.session.header.utilities`, and
  *    `sidebar.session.row.hover`: report the active Session to the Host, show
- *    its owning device on the opened conversation header, and keep hover
- *    metadata. These are labels/scope hints, never device navigation entries.
+ *    its owning device (本机 included) as a chip on the conversation page with a
+ *    details popover, and keep hover metadata. These are labels/scope hints,
+ *    never device navigation entries.
  *
  * @module dsh-multi-device/client
  */

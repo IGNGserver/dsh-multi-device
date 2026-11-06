@@ -16,6 +16,7 @@ import { dirname } from 'node:path'
 import {
   type DeviceAuthState,
   type DeviceConfig,
+  type DeviceConnectionState,
   DeviceId,
   type DeviceView,
   type DisplayMode,
@@ -857,9 +858,17 @@ export class DeviceRegistry {
       }
     }
 
+    const deviceStates = new Map<DeviceId, DeviceConnectionState>([
+      [LOCAL_DEVICE_ID, 'connected'],
+    ])
+    for (const [deviceId, client] of this.clients.entries()) {
+      deviceStates.set(deviceId, client.toView().state)
+    }
+
     const { logicalWorkspaces, allPhysicalWorkspaces } = this.aggregator.aggregate(
       physicalInputs,
       updatedAtMap,
+      deviceStates,
     )
 
     // Backfill logicalWorkspaceId onto sessionOrigins

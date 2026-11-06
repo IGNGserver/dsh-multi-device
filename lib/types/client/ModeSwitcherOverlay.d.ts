@@ -13,15 +13,6 @@ export declare function ActiveSessionReporter({ sessionId, onScopeReported, }: {
     sessionId: string;
     onScopeReported?: () => void;
 }): null;
-/**
- * Device identity on the right side of an opened Session header
- * (`conversation.session.header.utilities`). Local Sessions show nothing, so
- * only remote conversations carry a device label.
- */
-export declare function SessionHeaderDeviceBadge({ sessionId, t, }: {
-    sessionId: string;
-    t?: (key: MultiDeviceLocaleKey) => string;
-}): React.ReactElement | null;
 /** Device & Git repo metadata inside the Session row HoverCard (`sidebar.session.row.hover`). */
 export declare function SessionRowHoverDeviceSection({ sessionId, t, }: {
     sessionId: string;

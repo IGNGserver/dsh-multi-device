@@ -343,48 +343,61 @@ export function installAggregatedGateway02(
   // 3. session.create
   patchMethod(sessionController, 'create', async (request) => {
     if (!registry.isAggregatedMode()) return origSessionCreate(request)
-    // Case A: Reusing an existing remote blank sessionId
+    // Case A: Reusing an existing remote blank sessionId. In a logical
+    // workspace the reusable blank may live on a device that is no longer the
+    // effective target (device switch, offline preference); reusing it would
+    // silently ignore the user's choice, so fall through to Case B instead.
     if (request.sessionId !== undefined) {
       const owner = registry.resolveSessionOwner(request.sessionId)
       if (owner !== undefined) {
-        const rawWorkspaceId = request.workspaceId ? resolveRemoteWorkspaceIdForDevice(registry, request.workspaceId, owner.client.id) : undefined
-        const created = (await owner.client.invokeUnary('session', 'create', {
-          request: {
-            sessionId: owner.rawSessionId,
-            ...(rawWorkspaceId !== undefined ? { workspaceId: rawWorkspaceId } : {}),
-            ...(request.cwd !== undefined ? { cwd: request.cwd } : {}),
-            ...(request.agentPreset !== undefined ? { agentPreset: request.agentPreset } : {}),
-          },
-        })) as { sessionId: string; agentPreset?: string }
-        return {
-          sessionId: encodeRemoteSessionId(owner.client.id, created.sessionId),
-          ...(created.agentPreset !== undefined ? { agentPreset: created.agentPreset } : {}),
+        const requestedLws = request.workspaceId !== undefined && decodeLogicalWorkspaceId(request.workspaceId) !== undefined
+          ? registry.snapshot().logicalWorkspaces.find(w => w.logicalWorkspaceId === request.workspaceId)
+          : undefined
+        const targetDeviceId = requestedLws?.effectiveTargetDeviceId ?? requestedLws?.targetDeviceId
+        if (requestedLws === undefined || targetDeviceId === owner.client.id) {
+          const rawWorkspaceId = request.workspaceId ? resolveRemoteWorkspaceIdForDevice(registry, request.workspaceId, owner.client.id) : undefined
+          const created = (await owner.client.invokeUnary('session', 'create', {
+            request: {
+              sessionId: owner.rawSessionId,
+              ...(rawWorkspaceId !== undefined ? { workspaceId: rawWorkspaceId } : {}),
+              ...(request.cwd !== undefined ? { cwd: request.cwd } : {}),
+              ...(request.agentPreset !== undefined ? { agentPreset: request.agentPreset } : {}),
+            },
+          })) as { sessionId: string; agentPreset?: string }
+          return {
+            sessionId: encodeRemoteSessionId(owner.client.id, created.sessionId),
+            ...(created.agentPreset !== undefined ? { agentPreset: created.agentPreset } : {}),
+          }
         }
       }
     }
 
-    // Case B: Creating in a Logical Workspace (`md-lws~...`)
+    // Case B: Creating in a Logical Workspace (`md-lws~...`). The effective
+    // target keeps "+ New Session" working while the preferred device is
+    // offline; the fallback member's path is the only valid `cwd`.
     if (request.workspaceId !== undefined && decodeLogicalWorkspaceId(request.workspaceId) !== undefined) {
       const snap = registry.snapshot()
       const lws = snap.logicalWorkspaces.find(w => w.logicalWorkspaceId === request.workspaceId)
       if (lws !== undefined) {
-        if (lws.targetDeviceId === LOCAL_DEVICE_ID) {
+        const targetDeviceId = lws.effectiveTargetDeviceId ?? lws.targetDeviceId
+        const targetPath = lws.effectiveTargetPath ?? lws.targetPath
+        if (targetDeviceId === LOCAL_DEVICE_ID) {
           const localMember = lws.members.find(m => m.deviceId === LOCAL_DEVICE_ID)
           return origSessionCreate({
             ...(localMember !== undefined
               ? { workspaceId: localMember.remoteWorkspaceId }
-              : { cwd: lws.targetPath }),
+              : { cwd: targetPath }),
             ...(request.agentPreset !== undefined ? { agentPreset: request.agentPreset } : {}),
           })
         }
-        const remoteClient = registry.client(lws.targetDeviceId)
-        const remoteMember = lws.members.find(m => m.deviceId === lws.targetDeviceId)
+        const remoteClient = registry.client(targetDeviceId)
+        const remoteMember = lws.members.find(m => m.deviceId === targetDeviceId)
         if (remoteClient !== undefined) {
           const created = (await remoteClient.invokeUnary('session', 'create', {
             request: {
               ...(remoteMember !== undefined
                 ? { workspaceId: remoteMember.remoteWorkspaceId }
-                : { cwd: lws.targetPath }),
+                : { cwd: targetPath }),
               ...(request.agentPreset !== undefined ? { agentPreset: request.agentPreset } : {}),
             },
           })) as { sessionId: string; agentPreset?: string }
@@ -953,6 +966,7 @@ function resolveRemoteWorkspaceIdForDevice(
 function logicalToWorkspaceView(lws: {
   readonly logicalWorkspaceId: string
   readonly targetPath: string
+  readonly effectiveTargetPath?: string
   readonly title: string
   readonly sessionIds: readonly string[]
   readonly createdAt: string
@@ -960,7 +974,9 @@ function logicalToWorkspaceView(lws: {
 }): WorkspaceFollowView {
   return {
     workspaceId: lws.logicalWorkspaceId,
-    path: lws.targetPath,
+    // The merged row's path is where a new Session will run, so blank-session
+    // reuse and the "+ New Session" hint point at the effective device.
+    path: lws.effectiveTargetPath ?? lws.targetPath,
     title: lws.title,
     sessionIds: [...lws.sessionIds],
     createdAt: lws.createdAt,

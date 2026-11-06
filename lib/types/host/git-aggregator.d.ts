@@ -1,4 +1,4 @@
-import { type DeviceId, type LogicalWorkspaceView, type ManualWorkspaceRule, normalizeWorkspacePath, type SshTransportConfig, type WorkspaceAggregationConfig, type WorkspaceMemberRef } from '../contract.ts';
+import { type DeviceConnectionState, type DeviceId, type LogicalWorkspaceView, type ManualWorkspaceRule, normalizeWorkspacePath, type SshTransportConfig, type WorkspaceAggregationConfig, type WorkspaceMemberRef } from '../contract.ts';
 export interface PhysicalWorkspaceInput {
     readonly deviceId: DeviceId;
     readonly deviceName: string;
@@ -56,8 +56,14 @@ export declare class WorkspaceAggregator {
     /**
      * Compute both the `LogicalWorkspaceView[]` and `WorkspaceMemberRef[]` from all physical
      * workspaces across local and remote devices.
+     *
+     * @param physicalList - every workspace known on the local and remote devices.
+     * @param sessionUpdatedAtMap - activity timestamps used to order merged sessions.
+     * @param deviceStates - live connection state per device. A device missing from
+     *   the map is treated as connected so pure aggregation (tests, offline
+     *   catalogs) keeps its historical behavior; the Host always passes real states.
      */
-    aggregate(physicalList: readonly PhysicalWorkspaceInput[], sessionUpdatedAtMap?: ReadonlyMap<string, number>): {
+    aggregate(physicalList: readonly PhysicalWorkspaceInput[], sessionUpdatedAtMap?: ReadonlyMap<string, number>, deviceStates?: ReadonlyMap<DeviceId, DeviceConnectionState>): {
         readonly logicalWorkspaces: LogicalWorkspaceView[];
         readonly allPhysicalWorkspaces: WorkspaceMemberRef[];
     };

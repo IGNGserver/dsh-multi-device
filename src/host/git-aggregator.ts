@@ -17,6 +17,7 @@
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import {
+  type DeviceConnectionState,
   type DeviceId,
   encodeLogicalWorkspaceId,
   encodeRemoteSessionId,
@@ -310,14 +311,23 @@ export class WorkspaceAggregator {
   /**
    * Compute both the `LogicalWorkspaceView[]` and `WorkspaceMemberRef[]` from all physical
    * workspaces across local and remote devices.
+   *
+   * @param physicalList - every workspace known on the local and remote devices.
+   * @param sessionUpdatedAtMap - activity timestamps used to order merged sessions.
+   * @param deviceStates - live connection state per device. A device missing from
+   *   the map is treated as connected so pure aggregation (tests, offline
+   *   catalogs) keeps its historical behavior; the Host always passes real states.
    */
   aggregate(
     physicalList: readonly PhysicalWorkspaceInput[],
     sessionUpdatedAtMap: ReadonlyMap<string, number> = new Map(),
+    deviceStates: ReadonlyMap<DeviceId, DeviceConnectionState> = new Map(),
   ): {
     readonly logicalWorkspaces: LogicalWorkspaceView[]
     readonly allPhysicalWorkspaces: WorkspaceMemberRef[]
   } {
+    const isOnline = (deviceId: DeviceId): boolean =>
+      deviceId === LOCAL_DEVICE_ID || (deviceStates.get(deviceId) ?? 'connected') === 'connected'
     const excludedSet = new Set(this.config.excludedMemberKeys)
 
     const enriched = physicalList.map((item) => {
@@ -376,6 +386,7 @@ export class WorkspaceAggregator {
           ruleGit ?? matched.find(m => m.gitRemote !== undefined)?.gitRemote,
           matched,
           sessionUpdatedAtMap,
+          isOnline,
           rule.preferredDeviceId,
         ),
       )
@@ -411,6 +422,7 @@ export class WorkspaceAggregator {
               gitRemote,
               group,
               sessionUpdatedAtMap,
+              isOnline,
             ),
           )
         }
@@ -435,6 +447,9 @@ export class WorkspaceAggregator {
         ...(entry.gitRemote !== undefined ? { gitRemote: entry.gitRemote } : {}),
         targetDeviceId: entry.input.deviceId,
         targetPath: entry.input.path,
+        effectiveTargetDeviceId: entry.input.deviceId,
+        effectiveTargetPath: entry.input.path,
+        effectiveTargetOnline: isOnline(entry.input.deviceId),
         members: [entry.memberRef],
         sessionIds: entry.namespacedSessionIds,
         createdAt: entry.input.createdAt,
@@ -466,19 +481,30 @@ export class WorkspaceAggregator {
       memberRef: WorkspaceMemberRef
     }[],
     sessionUpdatedAtMap: ReadonlyMap<string, number>,
+    isOnline: (deviceId: DeviceId) => boolean,
     rulePreferredDevice?: DeviceId,
   ): LogicalWorkspaceView {
     const customTitle = this.config.customTitleByLogicalId[logicalId]
     const configuredPreferred =
       this.config.preferredDeviceByLogicalId[logicalId] ?? rulePreferredDevice
 
-    // Choose target device: configuredPreferred -> local (if member) -> first member
+    // Preferred device: configured preference -> local (if member) -> first member.
+    // The preference survives an offline device, so it stays the user's choice.
     const targetMember =
       (configuredPreferred !== undefined
         ? members.find(m => m.input.deviceId === configuredPreferred)
         : undefined) ??
       members.find(m => m.input.deviceId === LOCAL_DEVICE_ID) ??
       members[0]!
+
+    // Effective device: the preferred one while reachable, otherwise stay online:
+    // local member first, then the first reachable member, then the preferred one
+    // (so `effectiveTargetOnline === false` tells the UI a create will fail).
+    const effectiveTargetMember = isOnline(targetMember.input.deviceId)
+      ? targetMember
+      : (members.find(m => m.input.deviceId === LOCAL_DEVICE_ID) ??
+        members.find(m => isOnline(m.input.deviceId)) ??
+        targetMember)
 
     // Merge session IDs across all member workspaces, ordered by recency (newest first)
     const seenSessions = new Set<string>()
@@ -518,6 +544,9 @@ export class WorkspaceAggregator {
       ...(gitRemote !== undefined ? { gitRemote } : {}),
       targetDeviceId: targetMember.input.deviceId,
       targetPath: targetMember.input.path,
+      effectiveTargetDeviceId: effectiveTargetMember.input.deviceId,
+      effectiveTargetPath: effectiveTargetMember.input.path,
+      effectiveTargetOnline: isOnline(effectiveTargetMember.input.deviceId),
       members: members.map(m => m.memberRef),
       sessionIds: mergedSessionIds,
       createdAt: earliestCreated,
