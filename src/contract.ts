@@ -496,6 +496,20 @@ export interface MultiDeviceSnapshot {
    * client and both UI modes agree on read state.
    */
   readonly unreadSessionIds: readonly string[]
+  /**
+   * Sessions archived on their owning device. Local Session IDs are plain;
+   * remote ones are namespaced. DSH hides archived rows by default, so the
+   * unread counters subtract this set instead of reporting reminders the
+   * sidebar cannot show. Optional so a newer Client still parses older Host
+   * snapshots.
+   */
+  readonly archivedSessionIds?: readonly string[]
+  /**
+   * Subagent-origin Sessions. DSH nests them under their parent Session's
+   * catalog instead of rendering standalone rows, so unread counters subtract
+   * them for the same reason as {@link archivedSessionIds}.
+   */
+  readonly subagentSessionIds?: readonly string[]
   /** Manual Git match progress and last outcome (never triggered automatically). */
   readonly gitMatch: GitMatchRun
   /** Persisted display preferences; optional so older Hosts still parse. */

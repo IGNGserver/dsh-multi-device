@@ -15,6 +15,17 @@ export interface LocalHostProvider {
     readonly localWorkspaces: () => PhysicalWorkspaceInput[];
     /** Read current local session summaries. */
     readonly localSessionUpdatedAt: () => Map<string, number>;
+    /**
+     * Local archived Session IDs (`ctx.workspaceRegistry.archivedSessionIds`).
+     * Optional so registries built by older callers and tests keep working;
+     * a missing provider simply means "no local Session is archived".
+     */
+    readonly localArchivedSessionIds?: () => readonly string[];
+    /**
+     * Local subagent-origin Session IDs (`session.header.origin === 'subagent'`).
+     * DSH renders these under their parent, never as standalone sidebar rows.
+     */
+    readonly localSubagentSessionIds?: () => readonly string[];
 }
 /**
  * The model-catalog scope for the Session currently shown in the conversation
@@ -287,6 +298,14 @@ export declare class DeviceRegistry {
     private gitMatchTargets;
     private discoverRemoteOrigins;
     private scanRemoteRepos;
+    /**
+     * Local archived Session IDs. A missing provider (older callers, tests that
+     * do not care) or a stale controller simply means "nothing archived", so a
+     * read failure must never break the whole snapshot.
+     */
+    private localArchivedIds;
+    /** Local subagent-origin Session IDs; same failure policy as {@link localArchivedIds}. */
+    private localSubagentIds;
     /** Build the complete snapshot for the Client UI and Aggregated Gateway. */
     snapshot(): MultiDeviceSnapshot;
     /** Persisted display preferences (Snapshot also carries them under `ui`). */

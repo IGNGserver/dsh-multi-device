@@ -860,6 +860,8 @@ export function installAggregatedGateway02(
   patchMethod(workspaceController, 'archiveSession', async (request) => {
     if (!registry.isAggregatedMode()) {
       const localRes = await origWorkspaceArchive(request)
+      // Wake the unread counters: an archived Session keeps no default row.
+      registry.refreshWorkspaceView()
       return { archivedSessionIds: localRes.archivedSessionIds }
     }
     const owner = registry.resolveSessionOwner(request.sessionId)
@@ -878,6 +880,7 @@ export function installAggregatedGateway02(
       return { archivedSessionIds: collectMergedArchivedIds(registry, workspaceRegistry) }
     }
     const localRes = await origWorkspaceArchive(request)
+    registry.refreshWorkspaceView()
     return {
       archivedSessionIds: collectMergedArchivedIds(registry, workspaceRegistry, localRes.archivedSessionIds),
     }
@@ -886,6 +889,7 @@ export function installAggregatedGateway02(
   patchMethod(workspaceController, 'unarchiveSession', async (request) => {
     if (!registry.isAggregatedMode()) {
       const localRes = await origWorkspaceUnarchive(request)
+      registry.refreshWorkspaceView()
       return { archivedSessionIds: localRes.archivedSessionIds }
     }
     const owner = registry.resolveSessionOwner(request.sessionId)
@@ -901,6 +905,7 @@ export function installAggregatedGateway02(
       return { archivedSessionIds: collectMergedArchivedIds(registry, workspaceRegistry) }
     }
     const localRes = await origWorkspaceUnarchive(request)
+    registry.refreshWorkspaceView()
     return {
       archivedSessionIds: collectMergedArchivedIds(registry, workspaceRegistry, localRes.archivedSessionIds),
     }
