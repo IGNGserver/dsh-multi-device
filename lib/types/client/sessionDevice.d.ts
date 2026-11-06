@@ -51,11 +51,22 @@ export declare function resolveSessionDevice(snapshot: MultiDeviceSnapshot, sess
  */
 export declare function resolveSessionLogicalWorkspace(snapshot: MultiDeviceSnapshot, sessionId: string, cwd?: string): LogicalWorkspaceView | undefined;
 /**
+ * Devices that already own this workspace.
+ *
+ * Settings uses this for the preferred-device picker: a preference is only
+ * meaningful for a member, because the Host creates the next Session on the
+ * member path without registering anything. The local machine is always
+ * online; a remote device's state follows the latest Host snapshot.
+ */
+export declare function memberTargetsForWorkspace(snapshot: MultiDeviceSnapshot, workspace: LogicalWorkspaceView, localName: string): DeviceTargetOption[];
+/**
  * List the devices that can host a new Session in one logical workspace.
  *
- * Members are the only valid choices: a device without this repository's
- * workspace has no directory to create the Session in. The local machine is
- * always online; a remote device's state follows the latest Host snapshot.
+ * Every enabled device is a choice, not only devices that already registered
+ * this repository: picking one that has no member registers the workspace path
+ * there before the blank Session is created. The path shown for a non-member
+ * is the workspace's own path (nothing is copied). The local machine is always
+ * online; a remote device's state follows the latest Host snapshot.
  */
 export declare function deviceTargetsForWorkspace(snapshot: MultiDeviceSnapshot, workspace: LogicalWorkspaceView, localName: string): DeviceTargetOption[];
 /** Effective device for "+ New Session" (falls back while the preferred one is offline). */

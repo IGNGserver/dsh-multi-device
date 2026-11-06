@@ -52,7 +52,7 @@ import {
 import type { MultiDeviceLocaleKey } from './locales.ts'
 import type { MultiDeviceDiagnostics } from '../runtime.ts'
 import { UnreadCountBadge } from './UnreadCountBadge.tsx'
-import { deviceTargetsForWorkspace } from './sessionDevice.ts'
+import { memberTargetsForWorkspace } from './sessionDevice.ts'
 import { countableUnreadIds, unreadCountForDevice } from './unreadCounts.ts'
 import {
   clientStore,
@@ -975,7 +975,7 @@ export function MultiDeviceHubPanel({
             </div>
             <div className="dsh-md-merged-repos-list">
               {mergedWorkspaces.map((lws) => {
-                const targets = deviceTargetsForWorkspace(snapshot, lws, t('nativeLocalTab'))
+                const targets = memberTargetsForWorkspace(snapshot, lws, t('nativeLocalTab'))
                 const selectOptions = targets.map((target) => ({
                   value: target.deviceId,
                   label: target.name,

@@ -338,6 +338,10 @@ export function apply(ctx: Context, config?: Config): void {
             registry.setLocalWorkspaceCreator(async (path) => {
               await workspaceController.create({ path })
             })
+            registry.setLocalSessionCreator(async (cwd) => {
+              const created = await sessionController.create({ cwd })
+              return created.sessionId
+            })
 
             const disposeGateway = installAggregatedGateway02(
               registry,
@@ -354,6 +358,9 @@ export function apply(ctx: Context, config?: Config): void {
             return () => {
               disposeGateway()
               registry.setLocalWorkspaceCreator(async () => {
+                throw new Error('Local workspace creation is unavailable')
+              })
+              registry.setLocalSessionCreator(async () => {
                 throw new Error('Local workspace creation is unavailable')
               })
               registry.setGatewayStatus(false)

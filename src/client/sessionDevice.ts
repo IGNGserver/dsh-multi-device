@@ -121,13 +121,14 @@ export function resolveSessionLogicalWorkspace(
 }
 
 /**
- * List the devices that can host a new Session in one logical workspace.
+ * Devices that already own this workspace.
  *
- * Members are the only valid choices: a device without this repository's
- * workspace has no directory to create the Session in. The local machine is
- * always online; a remote device's state follows the latest Host snapshot.
+ * Settings uses this for the preferred-device picker: a preference is only
+ * meaningful for a member, because the Host creates the next Session on the
+ * member path without registering anything. The local machine is always
+ * online; a remote device's state follows the latest Host snapshot.
  */
-export function deviceTargetsForWorkspace(
+export function memberTargetsForWorkspace(
   snapshot: MultiDeviceSnapshot,
   workspace: LogicalWorkspaceView,
   localName: string,
@@ -148,12 +149,70 @@ export function deviceTargetsForWorkspace(
   })
 }
 
+/**
+ * List the devices that can host a new Session in one logical workspace.
+ *
+ * Every enabled device is a choice, not only devices that already registered
+ * this repository: picking one that has no member registers the workspace path
+ * there before the blank Session is created. The path shown for a non-member
+ * is the workspace's own path (nothing is copied). The local machine is always
+ * online; a remote device's state follows the latest Host snapshot.
+ */
+export function deviceTargetsForWorkspace(
+  snapshot: MultiDeviceSnapshot,
+  workspace: LogicalWorkspaceView,
+  localName: string,
+): DeviceTargetOption[] {
+  const memberByDevice = new Map(workspace.members.map(member => [member.deviceId, member]))
+  const targets: DeviceTargetOption[] = []
+  const seen = new Set<DeviceId>()
+
+  const push = (
+    deviceId: DeviceId,
+    name: string,
+    state: DeviceConnectionState,
+    isLocal: boolean,
+  ): void => {
+    if (seen.has(deviceId)) return
+    seen.add(deviceId)
+    const member = memberByDevice.get(deviceId)
+    targets.push({
+      deviceId,
+      name,
+      path: member?.path ?? workspace.targetPath,
+      state,
+      isLocal,
+      online: state === 'connected',
+      preferred: deviceId === workspace.targetDeviceId,
+    })
+  }
+
+  push(LOCAL_DEVICE_ID, localName, 'connected', true)
+  for (const device of snapshot.devices) {
+    if (!device.enabled) continue
+    push(device.id, device.name, device.state, false)
+  }
+  // A member whose device row is gone (removed mid-session) still belongs in
+  // the list: its workspace already exists, even though it cannot be reached.
+  for (const member of workspace.members) {
+    if (seen.has(member.deviceId)) continue
+    const isLocal = member.deviceId === LOCAL_DEVICE_ID
+    push(
+      member.deviceId,
+      isLocal ? localName : member.deviceName,
+      isLocal ? 'connected' : 'disabled',
+      isLocal,
+    )
+  }
+  return targets
+}
+
 /** Effective device for "+ New Session" (falls back while the preferred one is offline). */
 export function effectiveTargetOf(
   snapshot: MultiDeviceSnapshot,
   workspace: LogicalWorkspaceView,
 ): DeviceTargetOption | undefined {
-  const options = deviceTargetsForWorkspace(snapshot, workspace, '')
+  const options = memberTargetsForWorkspace(snapshot, workspace, '')
   return options.find(option => option.deviceId === workspace.effectiveTargetDeviceId) ?? options[0]
 }
 
