@@ -20,7 +20,9 @@
       "default": "./lib/contract.js"
     },
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
   },
   "dsh": {
     "bundle": {
@@ -49,7 +51,9 @@
     "VERSION",
     "README.md",
     "RELEASE.md",
-    "LICENSE"
+    "LICENSE",
+    "locale/*.json",
+    "icon.svg"
   ],
   "repository": {
     "type": "git",
@@ -64,7 +68,9 @@
     "build": "node build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "check": "pnpm run verify:version && pnpm run build && pnpm run test"
+    "check": "pnpm run verify:version && pnpm run build && pnpm run test",
+    "verify:package": "node scripts/verify-package.mjs",
+    "test:install": "node scripts/smoke-official-install.mjs"
   },
   "engines": {
     "node": "^22.19 || >=24"
@@ -90,7 +96,8 @@
     "@deepseek-ai/dsh-client-ui-slots": ">=0.2.0-rc.2 <0.3.0",
     "@deepseek-ai/dsh-client-ui-workspace": ">=0.2.0-rc.2 <0.3.0",
     "@deepseek-ai/dsh-host-webserver": ">=0.2.0-rc.2 <0.3.0",
-    "react": ">=18.2.0 <19"
+    "react": ">=18.2.0 <19",
+    "ssh2": "^1.17.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -155,14 +162,14 @@
     },
     "react": {
       "optional": true
+    },
+    "ssh2": {
+      "optional": true
     }
   },
   "dependencies": {
     "ws": "^8.21.0",
     "zod": "^4.4.3"
-  },
-  "optionalDependencies": {
-    "ssh2": "^1.17.0"
   },
   "devDependencies": {
     "@types/node": "^22.19.0",
@@ -176,5 +183,6 @@
     "vitest": "^3.0.0",
     "@types/react-test-renderer": "18.3.1",
     "react-test-renderer": "18.3.1"
-  }
+  },
+  "packageManager": "pnpm@10.33.0"
 }

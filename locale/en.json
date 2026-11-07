@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Multi-device workspace",
+    "description": "Connect DSH development machines over system SSH, aggregate registered Git workspaces and sessions, or use each device’s native interface. No project-file synchronization."
+  }
+}

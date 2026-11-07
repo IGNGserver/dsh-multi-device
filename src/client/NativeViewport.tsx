@@ -253,7 +253,7 @@ export function KeepAliveDeviceFrame({
           <StateDot state={deviceStateToDotState(device.state)} size={12} />
           <div className="dsh-md-row-name">{device.name}</div>
           <div className="dsh-md-pref-desc">
-            {embeddingError ?? reconnectError ?? device.lastError ?? device.targetSummary}
+            {embeddingError !== undefined ? t('nativeEmbeddingUnsupported') : reconnectError ?? device.lastError ?? device.targetSummary}
           </div>
           <Button
             variant="primary"

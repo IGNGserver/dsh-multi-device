@@ -23,6 +23,10 @@ on:
       - 'pnpm-lock.yaml'
       - 'tsconfig.json'
       - 'VERSION'
+      - 'locale/**'
+      - 'icon.svg'
+      - 'README.md'
+      - 'RELEASE.md'
   pull_request:
     paths:
       - 'src/**'
@@ -39,6 +43,10 @@ on:
       - 'pnpm-lock.yaml'
       - 'tsconfig.json'
       - 'VERSION'
+      - 'locale/**'
+      - 'icon.svg'
+      - 'README.md'
+      - 'RELEASE.md'
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
@@ -48,6 +56,7 @@ jobs:
   verify:
     name: Verify plugin typecheck, build and tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -81,3 +90,56 @@ jobs:
 
       - name: Run unit and integration tests
         run: pnpm run test
+
+      - name: Pack and verify the actual plugin inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/plugin-artifact"
+          npm pack --json --pack-destination "$RUNNER_TEMP/plugin-artifact" > "$RUNNER_TEMP/pack.json"
+          node scripts/verify-package.mjs "$RUNNER_TEMP/pack.json"
+
+      - name: Keep temporary package for installation qualification
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: plugin-under-test
+          path: ${{ runner.temp }}/plugin-artifact/*.tgz
+          retention-days: 1
+
+  official-install:
+    name: Official install DSH ${{ matrix.dsh }} / pnpm 11
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        dsh: ['0.2.0-rc.2', '0.2.1-rc.5']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+      - name: Download CI-built plugin only
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: plugin-under-test
+          path: ${{ runner.temp }}/plugin-artifact
+      - name: Install exact official DSH runtime
+        env:
+          DSH_TEST_VERSION: ${{ matrix.dsh }}
+        run: npm install --prefix "$RUNNER_TEMP/official-dsh" --no-audit --no-fund "@deepseek-ai/dsh@$DSH_TEST_VERSION" pnpm@11.18.0
+      - name: Qualify official installation and lifecycle
+        env:
+          DSH_SMOKE_ROOT: ${{ runner.temp }}/dsh-install-smoke
+          DSH_SMOKE_CLI: ${{ runner.temp }}/official-dsh/node_modules/@deepseek-ai/dsh/lib/bin.js
+          COREPACK_ENABLE_PROJECT_SPEC: '0'
+          PNPM_MANAGE_PACKAGE_MANAGER_VERSIONS: 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$RUNNER_TEMP/official-dsh/node_modules/.bin:$PATH"
+          export DSH_SMOKE_PACKAGE="$(printf '%s\n' "$RUNNER_TEMP"/plugin-artifact/*.tgz)"
+          node scripts/smoke-official-install.mjs

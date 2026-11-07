@@ -1,11 +1,11 @@
 /**
- * Dual-engine SSH local port-forwarding manager (`system-ssh` + `ssh2` fallback).
+ * System SSH local port-forwarding manager with an explicitly installed `ssh2` compatibility engine.
  *
  * - Default `system-ssh` spawns the OS `ssh` client (`ssh -N -L 127.0.0.1:<localPort>:<remoteBindHost>:<remotePort>`),
  *   which natively honors 100% of `~/.ssh/config` (`Host`, `ProxyJump`, `ProxyCommand`, `ControlMaster`,
  *   macOS Keychain `UseKeychain`, `IdentityAgent`, 1Password SSH Agent, `SSH_AUTH_SOCK`).
- * - Fallback `ssh2` uses the pure-JS/native `ssh2` library in-process when `passphrase` is provided
- *   or when `engine: 'ssh2'` is explicitly selected.
+ * - `ssh2` is used only when `engine: 'ssh2'` is explicitly selected and the user
+ *   installed that optional peer. A stored passphrase never changes engines.
  * - Automatically allocates a free local loopback port, verifies TCP forwarding readiness,
  *   supervises connection health, and reconnects with exponential backoff + jitter.
  *
@@ -25,6 +25,8 @@ import {
 } from './ssh-config.ts'
 
 export type TunnelState = 'connecting' | 'up' | 'error' | 'stopped'
+
+export const SSH2_MISSING_MESSAGE = 'The optional ssh2 engine is not installed. Use system-ssh with an SSH agent, or explicitly install ssh2 in this DSH Profile through dsh plugin and approve only its reported build scripts.'
 
 export interface TunnelStatus {
   readonly state: TunnelState
@@ -160,9 +162,7 @@ export async function execSshCommand(
   timeoutMs = 8_000,
 ): Promise<{ ok: true; stdout: string } | { ok: false; error: string }> {
   const resolved = resolveSshConfigForTransport(transport)
-  const useSsh2 =
-    transport.engine === 'ssh2' ||
-    (transport.passphrase !== undefined && transport.passphrase !== '')
+  const useSsh2 = transport.engine === 'ssh2'
 
   if (useSsh2) {
     if (resolved.proxyJump !== undefined || resolved.proxyCommand !== undefined) {
@@ -239,7 +239,7 @@ async function execViaSsh2(
     const mod = (await import('ssh2')) as unknown as { Client: new () => Ssh2ClientLike }
     ClientCtor = mod.Client
   } catch {
-    return { ok: false, error: 'ssh2 package is not available' }
+    return { ok: false, error: SSH2_MISSING_MESSAGE }
   }
 
   let privateKey: Buffer | undefined
@@ -459,13 +459,11 @@ export class SshTunnel {
       return
     }
 
-    const preferSsh2 =
-      this.transport.engine === 'ssh2' ||
-      (this.transport.passphrase !== undefined && this.transport.passphrase !== '' && this.transport.engine !== 'system-ssh')
+    const preferSsh2 = this.transport.engine === 'ssh2'
 
     if (!preferSsh2) {
-      const ok = await this.openWithSystemSsh(resolved, generation)
-      if (ok || this.stopped || generation !== this.generation || this.transport.engine === 'system-ssh') return
+      await this.openWithSystemSsh(resolved, generation)
+      return
     }
 
     if (resolved.proxyJump !== undefined || resolved.proxyCommand !== undefined) {
@@ -506,9 +504,7 @@ export class SshTunnel {
     try {
       proc = spawn('ssh', args, { stdio: ['ignore', 'ignore', 'pipe'] })
     } catch (error) {
-      if (this.transport.engine === 'system-ssh') {
-        this.fail(`Failed to spawn ssh: ${error instanceof Error ? error.message : String(error)}`, generation)
-      }
+      this.fail(`System OpenSSH is required; install ssh and configure an SSH agent. ${error instanceof Error ? error.message : String(error)}`, generation, false)
       return false
     }
     if (generation !== this.generation || this.stopped) {
@@ -529,12 +525,13 @@ export class SshTunnel {
     }
     if (!readyResult.ok) {
       const detail = stderr.trim() || readyResult.error
-      if (this.transport.engine === 'system-ssh' || !detail.includes('ENOENT')) {
+      if (!detail.includes('ENOENT')) {
         this.fail(`SSH tunnel failed (${resolved.hostName}): ${detail}`, generation)
         return true // Handled via fail+retry
       }
       this.killChild(proc)
       if (this.sshProc === proc) this.sshProc = undefined
+      this.fail('System OpenSSH is required; install ssh and configure an SSH agent. No implicit ssh2 fallback is installed.', generation, false)
       return false
     }
 
@@ -575,7 +572,7 @@ export class SshTunnel {
       const mod = (await import('ssh2')) as unknown as { Client: new () => Ssh2ClientLike }
       ClientCtor = mod.Client
     } catch {
-      this.fail('Neither system ssh nor ssh2 succeeded; check SSH configuration', generation, true)
+      this.fail(SSH2_MISSING_MESSAGE, generation, false)
       return
     }
 
