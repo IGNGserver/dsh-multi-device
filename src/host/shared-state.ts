@@ -5,21 +5,22 @@
  * it. When the same user runs DSH on several machines, each Host has its own
  * data file, so this module lets every Host publish a tiny section into each
  * remote device's DSH home over the existing SSH transport. Sessions IDs and
- * timestamps only; message bodies never leave the device.
+ * timestamps and optional completion cursors only; message bodies never leave
+ * the device. Version 1 remains readable by legacy Hosts.
  *
- * The file is Host-versioned and merges per Session by the newest `at`
- * timestamp (reads win ties), which makes concurrent Hosts converge instead of
- * treating the last writer as authoritative for every Session.
+ * A matching completion read is monotonic, regardless of wall-clock skew.
+ * Independent Hosts mint different UUIDs for the same execution: those tokens
+ * cannot be ordered or used to clear the local current completion. Only legacy
+ * entries without cursors use timestamp LWW. This is not cross-Host exactly-once.
  *
  * @module dsh-multi-device/host/shared-state
  */
 
 import { randomUUID } from 'node:crypto'
+import { mergeSessionReadState, parseSessionReadState } from './read-state.ts'
+import type { SessionReadState } from './read-state.ts'
 
-export interface SharedReadEntry {
-  readonly unread: boolean
-  readonly at: number
-}
+export interface SharedReadEntry extends SessionReadState {}
 
 export interface SharedReadHostSection {
   readonly updatedAt: number
@@ -38,10 +39,9 @@ export const SHARED_READ_HOST_LIMIT = 20
 
 function validEntry(value: unknown): SharedReadEntry | undefined {
   if (typeof value !== 'object' || value === null) return undefined
-  const entry = value as { unread?: unknown; at?: unknown }
-  if (typeof entry.unread !== 'boolean') return undefined
+  const entry = value as { at?: unknown }
   if (typeof entry.at !== 'number' || !Number.isFinite(entry.at)) return undefined
-  return { unread: entry.unread, at: Math.max(0, Math.trunc(entry.at)) }
+  return parseSessionReadState(value)
 }
 
 function validSessions(value: unknown): Record<string, SharedReadEntry> {
@@ -84,7 +84,21 @@ export function parseSharedReadDocument(text: string): SharedReadDocument | unde
       valid = true
       for (const [id, section] of Object.entries(document.hosts)) {
         if (hosts[id] === undefined && Object.keys(hosts).length >= SHARED_READ_HOST_LIMIT) continue
-        if (hosts[id] === undefined || section.updatedAt >= hosts[id].updatedAt) hosts[id] = section
+        const previous = hosts[id]
+        if (previous === undefined) {
+          hosts[id] = section
+        } else {
+          const [older, newer] = section.updatedAt >= previous.updatedAt
+            ? [previous, section] : [section, previous]
+          const sessions: Record<string, SharedReadEntry> = { ...newer.sessions }
+          // Latest section owns its inventory, but a retained same-token read
+          // or tombstone must not be lost through a later wall-clock rewrite.
+          for (const [sessionId, current] of Object.entries(newer.sessions)) {
+            const old = older.sessions[sessionId]
+            if (old !== undefined) sessions[sessionId] = mergeSessionReadState(current, old)
+          }
+          hosts[id] = { updatedAt: newer.updatedAt, sessions }
+        }
       }
     }
     return valid ? { version: 1, hosts } : undefined
@@ -111,10 +125,9 @@ export function parseSharedReadDocument(text: string): SharedReadDocument | unde
 }
 
 /**
- * Merge every Host section into the local Session map.
- *
- * Newest `at` wins; a read at the same instant wins over unread so two Hosts
- * clearing the same completion cannot resurrect the dot.
+ * Merge Host sections, preserving the local completion identity and tombstones.
+ * Same-token read wins even against a later unread; different tokens have no
+ * ordering. Legacy entries retain timestamp LWW until cursorized.
  */
 export function mergeSharedReadEntries(
   local: Readonly<Record<string, SharedReadEntry>>,
@@ -123,14 +136,7 @@ export function mergeSharedReadEntries(
   const merged: Record<string, SharedReadEntry> = { ...local }
   for (const section of Object.values(doc.hosts)) {
     for (const [sessionId, remote] of Object.entries(section.sessions)) {
-      const current = merged[sessionId]
-      if (
-        current === undefined ||
-        remote.at > current.at ||
-        (remote.at === current.at && current.unread && !remote.unread)
-      ) {
-        merged[sessionId] = remote
-      }
+      merged[sessionId] = mergeSessionReadState(merged[sessionId], remote)
     }
   }
   return merged
@@ -159,7 +165,7 @@ export function buildSharedReadDocument(
   const peers = Object.entries(existing?.hosts ?? {})
     .filter(([id]) => id !== hostId)
     .sort((left, right) => right[1].updatedAt - left[1].updatedAt)
-    .slice(0, SHARED_READ_HOST_LIMIT)
+    .slice(0, Math.max(0, SHARED_READ_HOST_LIMIT - 1))
   for (const [id, section] of peers) {
     if (remaining <= 0) break
     const peerSessions: Record<string, SharedReadEntry> = {}

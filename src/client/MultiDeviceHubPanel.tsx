@@ -41,6 +41,7 @@ import React, { useEffect, useId, useState } from 'react'
 import { copyText } from './clipboard.ts'
 import { DshSelect } from './DshSelect.tsx'
 import {
+  decodeSessionId,
   type DeviceId,
   type DeviceView,
   type DisplayMode,
@@ -52,7 +53,8 @@ import {
 } from '../contract.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
 import type { MultiDeviceDiagnostics } from '../runtime.ts'
-import { UnreadCountBadge } from './UnreadCountBadge.tsx'
+import { attentionUnreadIds } from '../attention.ts'
+import { AttentionDetails } from './AttentionDetails.tsx'
 import { memberTargetsForWorkspace } from './sessionDevice.ts'
 import { countableUnreadIds, unreadCountForDevice } from './unreadCounts.ts'
 import {
@@ -648,7 +650,7 @@ export function MultiDeviceHubPanel({
   // Same visibility rules as the sidebar: archived rows and subagent children
   // have no standalone row, and a remote ID missing from every catalog is a
   // deleted Session, so none of them may inflate a device's reminder count.
-  const unread = countableUnreadIds(
+  const unread = snapshot.attentionByDevice !== undefined ? attentionUnreadIds(snapshot.attentionByDevice) : countableUnreadIds(
     snapshot.unreadSessionIds,
     snapshot.archivedSessionIds,
     snapshot.subagentSessionIds,
@@ -1117,9 +1119,16 @@ export function MultiDeviceHubPanel({
                     <div className="dsh-md-row-identity">
                       <StateDot state={deviceStateToDotState(dev.state)} size={8} />
                       <span className="dsh-md-row-name">{dev.name}</span>
-                      <UnreadCountBadge
-                        count={deviceUnread}
+                      <AttentionDetails
+                        view={snapshot.attentionByDevice?.[dev.id]}
+                        deviceName={dev.name}
                         t={t}
+                        fallback={{
+                          runningCount: snapshot.attentionByDevice === undefined ? dev.runningSessionCount : undefined,
+                          pendingCount: snapshot.attentionByDevice === undefined ? dev.pendingApprovalCount : undefined,
+                          unreadSessionIds: [...unread].filter(id => decodeSessionId(id).deviceId === dev.id),
+                          fresh: snapshot.attentionByDevice === undefined && dev.state === 'connected' && dev.catalogStale !== true,
+                        }}
                       />
                       <span className="dsh-md-device-endpoint" title={formatCompactDeviceTarget(dev)}>
                         {formatCompactDeviceTarget(dev)}
@@ -1127,14 +1136,7 @@ export function MultiDeviceHubPanel({
                       {dev.latencyMs !== undefined && dev.state === 'connected' && (
                         <span className="dsh-md-latency-text">{dev.latencyMs}ms</span>
                       )}
-                      {dev.runningSessionCount > 0 && (
-                        <span className="dsh-md-session-count-badge">
-                          {t('runningCount').replace('{count}', String(dev.runningSessionCount))}
-                        </span>
-                      )}
-                      {dev.pendingApprovalCount > 0 && (
-                        <Tag>{t('pendingCount').replace('{count}', String(dev.pendingApprovalCount))}</Tag>
-                      )}
+
                       {dev.authState === 'required' && (
                         <span className="dsh-md-auth-required-tag">{t('authRequired')}</span>
                       )}
