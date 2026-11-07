@@ -105,17 +105,20 @@ export function buildGitScanScript(roots: readonly string[], maxDepth = DEFAULT_
   const rootList = roots.length > 0 ? roots.map(shellQuote).join(' ') : '"$HOME"'
   const prune = [...PRUNED_NAMES].map(name => `-name ${shellQuote(name)}`).join(' -o ')
   return [
+    `set -eu`,
+    `scan_file=$(mktemp) || exit 1`,
+    `trap 'rm -f "$scan_file" "$scan_file.sorted"' EXIT HUP INT TERM`,
     `for root in ${rootList}; do`,
     `  [ -d "$root" ] || continue`,
-    `  find "$root" -mindepth 1 -maxdepth ${String(depth)}`,
-    `    \\( ${prune} \\) -prune -o`,
-    `    -name '.*' ! -name '.git' -prune -o`,
-    `    -type d -name '.git' -print 2>/dev/null`,
-    `done | sort -u | while IFS= read -r g; do`,
+    `  find "$root" -mindepth 1 -maxdepth ${String(depth)} \\( ${prune} \\) -prune -o -name '.*' ! -name '.git' -prune -o -type d -name '.git' -print >> "$scan_file" || exit 1`,
+    `done`,
+    `sort -u "$scan_file" > "$scan_file.sorted" || exit 1`,
+    `trap 'rm -f "$scan_file" "$scan_file.sorted"' EXIT HUP INT TERM`,
+    `while IFS= read -r g; do`,
     `  d=\${g%/.git}`,
     `  u=$(git -C "$d" config --get remote.origin.url 2>/dev/null || true)`,
-    `  [ -n "$u" ] && printf '${SCAN_MARKER}\\t%s\\t%s\\n' "$d" "$u"`,
-    `done`,
+    `  if [ -n "$u" ]; then printf '${SCAN_MARKER}\\t%s\\t%s\\n' "$d" "$u"; fi`,
+    `done < "$scan_file.sorted"`,
   ].join('\n')
 }
 

@@ -37,6 +37,7 @@ import { OfflineDeviceBanner } from './OfflineDeviceBanner.tsx'
 import { installProjectDeviceBadges } from './projectBadges.ts'
 import {
   installReadStateOverlay,
+  existingSessionStatusNotifier,
   type SessionStatusSource,
 } from './readState.ts'
 import { SessionDeviceChip } from './SessionDeviceChip.tsx'
@@ -179,7 +180,8 @@ function currentMainSessionId(list: SessionsListSnapshotLike): string | undefine
  * Prefer another local Session; otherwise open the first local Workspace,
  * which lets the normal DSH navigation create/reuse a local blank.
  */
-async function ensureNativeLocalSelection(ctx: ClientContextLike): Promise<void> {
+async function ensureNativeLocalSelection(ctx: ClientContextLike, isCurrent: () => boolean = () => true): Promise<void> {
+  if (!isCurrent()) return
   const sessions = ctx.sessions
   if (sessions === undefined) return
   const list = sessions.list.getSnapshot()
@@ -205,75 +207,58 @@ async function ensureNativeLocalSelection(ctx: ClientContextLike): Promise<void>
  * the data; this refreshes the local Session catalog and, on entering Native
  * Mode, moves the main conversation off a remote Session.
  */
-function installModeSideEffects(ctx: ClientContextLike): () => void {
+export function installModeSideEffects(ctx: ClientContextLike): () => void {
   let lastMode = clientStore.getSnapshot().displayMode
-  let reconciling = false
-  let reconcileAgain = false
+  let disposed = false
+  let generation = 0
   let guarding = false
+  const waits = new Map<ReturnType<typeof setTimeout>, () => void>()
+  const cancelWaits = (): void => {
+    for (const [timer, resolve] of waits) {
+      clearTimeout(timer)
+      resolve()
+    }
+    waits.clear()
+  }
+  const pause = (): Promise<void> => new Promise(resolve => {
+    const timer = setTimeout(() => { waits.delete(timer); resolve() }, 180)
+    waits.set(timer, resolve)
+  })
+  const isCurrent = (token: number, mode: string): boolean =>
+    !disposed && token === generation && clientStore.getSnapshot().displayMode === mode
 
-  /**
-   * Reopen the remote Session that was visible in Native Mode. The aggregated
-   * catalog is refreshed asynchronously, so the row can appear a beat after the
-   * mode snapshot; retry briefly instead of silently dropping the context.
-   */
-  const restoreAggregatedSession = async (sessionId: string): Promise<void> => {
+  const restoreAggregatedSession = async (sessionId: string, current: () => boolean): Promise<void> => {
     const uiWorkspace = ctx.uiWorkspace
     if (uiWorkspace === undefined) return
-    if (ctx.sessions === undefined) {
-      try {
-        uiWorkspace.openSession(sessionId)
-        void clientStore.setActiveSession(sessionId)
-      } catch { /* ignore */ }
-      return
-    }
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const known = ctx.sessions?.list.getSnapshot().byId[sessionId] !== undefined
+    for (let attempt = 0; attempt < 3 && current(); attempt += 1) {
+      const known = ctx.sessions === undefined || ctx.sessions.list.getSnapshot().byId[sessionId] !== undefined
       if (known || attempt === 2) {
         try {
+          if (!current()) return
           uiWorkspace.openSession(sessionId)
-          void clientStore.setActiveSession(sessionId)
-        } catch {
-          // A disconnected device leaves the previous local Session in place.
-        }
+          if (current()) void clientStore.setActiveSession(sessionId)
+        } catch { /* disconnected device: leave the previous selection in place */ }
         return
       }
-      await new Promise<void>(resolve => {
-        setTimeout(resolve, 180)
-      })
-      try { await ctx.sessions?.refresh() } catch { /* next poll retries */ }
+      await pause()
+      if (!current()) return
+      try { await ctx.sessions?.refresh() } catch { /* next attempt retries */ }
     }
   }
 
   const reconcile = async (mode: string): Promise<void> => {
-    if (reconciling) {
-      reconcileAgain = true
-      return
-    }
-    reconciling = true
-    try {
-      await ctx.sessions?.refresh()
-    } catch {
-      // A failed refresh must not block the mode switch; the next poll retries.
-    }
+    const token = ++generation
+    cancelWaits()
+    const current = (): boolean => isCurrent(token, mode)
+    try { await ctx.sessions?.refresh() } catch { /* a failed refresh must not block a current switch */ }
+    if (!current()) return
     refreshModelCatalog(ctx)
+    if (!current()) return
     if (mode === 'native') {
-      try {
-        await ensureNativeLocalSelection(ctx)
-      } catch {
-        // Navigation is best-effort; the Host-side filter already prevents
-        // new remote rows from appearing in the local tab.
-      }
-    }
-    if (mode === 'aggregated') {
-      // Leaving a Native device tab should return to the conversation that was
-      // on screen there, not to whatever local Session happened to be selected.
+      try { await ensureNativeLocalSelection(ctx, current) } catch { /* best-effort navigation */ }
+    } else if (mode === 'aggregated') {
       const pending = clientStore.takePendingAggregatedSession()
-      if (pending !== undefined) await restoreAggregatedSession(pending)
-    }
-    reconciling = false
-    if (reconcileAgain) {
-      reconcileAgain = false
-      await reconcile(clientStore.getSnapshot().displayMode)
+      if (pending !== undefined && current()) await restoreAggregatedSession(pending, current)
     }
   }
 
@@ -319,7 +304,10 @@ function installModeSideEffects(ctx: ClientContextLike): () => void {
     if (clientStore.getSnapshot().displayMode !== 'native' || guarding) return
     if (current === undefined || !decodeSessionId(current).isRemote) return
     guarding = true
-    void ensureNativeLocalSelection(ctx).finally(() => {
+    const token = generation
+    void ensureNativeLocalSelection(ctx, () => isCurrent(token, 'native')).catch(() => {
+      // A failed local workspace open must not leak an unhandled rejection.
+    }).finally(() => {
       guarding = false
     })
   })
@@ -333,6 +321,9 @@ function installModeSideEffects(ctx: ClientContextLike): () => void {
   if (clientStore.getSnapshot().displayMode === 'native') void reconcile('native')
 
   return () => {
+    disposed = true
+    generation += 1
+    cancelWaits()
     unsubscribeStore()
     unsubscribeSessions?.()
     unsubscribePanelInfo?.()
@@ -527,6 +518,7 @@ function applyClient(ctx: ClientContextLike): void {
         (readCtx.get?.('uiSession') as { sessionStatus?: SessionStatusSource } | undefined)
       return installReadStateOverlay({
         source: service?.sessionStatus,
+        notifyExistingSubscribers: service === undefined ? undefined : existingSessionStatusNotifier(service),
         getUnread: () => {
           const snapshot = clientStore.getSnapshot()
           // Before the first Host snapshot arrives, keep DSH's own local

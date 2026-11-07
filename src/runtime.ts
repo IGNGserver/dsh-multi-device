@@ -517,17 +517,13 @@ export class MultiDeviceControlPlane {
 
         case 'upsertManualRule': {
           const rule = payload as unknown as ManualWorkspaceRule
-          this.registry.aggregator.upsertManualRule(rule)
-          this.registry.saveToDisk()
-          this.registry.refreshWorkspaceView()
+          this.registry.mutateAggregation(() => this.registry.aggregator.upsertManualRule(rule))
           return { ok: true, value: this.registry.snapshot(clientId) }
         }
 
         case 'removeManualRule': {
           const ruleId = String(payload.ruleId ?? '')
-          this.registry.aggregator.removeManualRule(ruleId)
-          this.registry.saveToDisk()
-          this.registry.refreshWorkspaceView()
+          this.registry.mutateAggregation(() => this.registry.aggregator.removeManualRule(ruleId))
           return { ok: true, value: this.registry.snapshot(clientId) }
         }
 
@@ -536,9 +532,7 @@ export class MultiDeviceControlPlane {
           if (memberKey === '') return { ok: false, error: 'Member key is required' }
           const excluded = Boolean(payload.excluded)
           try {
-            this.registry.aggregator.setMemberExcluded(memberKey, excluded)
-            this.registry.saveToDisk()
-            this.registry.refreshWorkspaceView()
+            this.registry.mutateAggregation(() => this.registry.aggregator.setMemberExcluded(memberKey, excluded))
           } catch (error) {
             return { ok: false, error: error instanceof Error ? error.message : String(error) }
           }
@@ -563,9 +557,7 @@ export class MultiDeviceControlPlane {
         case 'setPreferredDevice': {
           const logicalWorkspaceId = String(payload.logicalWorkspaceId ?? '')
           const deviceId = String(payload.deviceId ?? '') as DeviceId
-          this.registry.aggregator.setPreferredDevice(logicalWorkspaceId, deviceId)
-          this.registry.saveToDisk()
-          this.registry.refreshWorkspaceView()
+          this.registry.mutateAggregation(() => this.registry.aggregator.setPreferredDevice(logicalWorkspaceId, deviceId))
           return { ok: true, value: this.registry.snapshot(clientId) }
         }
 
@@ -583,9 +575,7 @@ export class MultiDeviceControlPlane {
         case 'setCustomTitle': {
           const logicalWorkspaceId = String(payload.logicalWorkspaceId ?? '')
           const title = String(payload.title ?? '')
-          this.registry.aggregator.setCustomTitle(logicalWorkspaceId, title)
-          this.registry.saveToDisk()
-          this.registry.refreshWorkspaceView()
+          this.registry.mutateAggregation(() => this.registry.aggregator.setCustomTitle(logicalWorkspaceId, title))
           return { ok: true, value: this.registry.snapshot(clientId) }
         }
 

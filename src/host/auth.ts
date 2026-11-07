@@ -15,11 +15,10 @@
  *
  * @module dsh-multi-device/host/auth
  */
-import { createHash, createHmac, randomUUID } from 'node:crypto'
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { createHash, createHmac } from 'node:crypto'
 import type { DeviceAuthConfig, DeviceConfig, DeviceId, SshTransportConfig } from '../contract.ts'
 import { requestRemote } from './http-request.ts'
+import { JsonSnapshotFile } from './storage.ts'
 import { execSshCommand } from './tunnel.ts'
 
 export interface StoredDeviceSecret {
@@ -306,14 +305,18 @@ function withoutCachedAuthentication(stored: StoredDeviceSecret): StoredDeviceSe
 export class DeviceAuthManager {
   private readonly secrets = new Map<DeviceId, StoredDeviceSecret>()
 
+  private readonly storage: JsonSnapshotFile | undefined
+
   constructor(private readonly secretsFilePath?: string) {
+    this.storage = secretsFilePath === undefined ? undefined : new JsonSnapshotFile(secretsFilePath,
+      value => value.version === 1 && typeof value.secrets === 'object' && value.secrets !== null && !Array.isArray(value.secrets))
     this.load()
   }
 
   load(): void {
-    if (this.secretsFilePath === undefined || !existsSync(this.secretsFilePath)) return
+    if (this.storage === undefined) return
     try {
-      const raw = JSON.parse(readFileSync(this.secretsFilePath, 'utf8')) as Partial<SecretStoreDocument>
+      const raw = this.storage.read<Partial<SecretStoreDocument>>()
       if (raw && typeof raw.secrets === 'object' && raw.secrets !== null) {
         let stripped = false
         for (const [id, entry] of Object.entries(raw.secrets)) {
@@ -339,30 +342,29 @@ export class DeviceAuthManager {
   }
 
   private save(): void {
-    if (this.secretsFilePath === undefined) return
-    const dir = dirname(this.secretsFilePath)
-    mkdirSync(dir, { recursive: true })
-    const tmp = `${this.secretsFilePath}.${randomUUID()}.tmp`
-    const doc: SecretStoreDocument = {
-      version: 1,
-      secrets: Object.fromEntries(this.secrets),
-    }
-    try {
-      // CIFS can drop a file when rename replaces it. Write a sibling, then
-      // copy the bytes onto the destination and remove the sibling.
-      writeFileSync(tmp, JSON.stringify(doc, null, 2), { mode: 0o600 })
-      try { chmodSync(tmp, 0o600) } catch { /* Windows fallback */ }
-      copyFileSync(tmp, this.secretsFilePath)
-      try { chmodSync(this.secretsFilePath, 0o600) } catch { /* Windows fallback */ }
-    } finally {
-      try { unlinkSync(tmp) } catch { /* sibling may not exist if the write failed */ }
+    this.storage?.write({ version: 1, secrets: Object.fromEntries(this.secrets) })
+  }
+
+  /** Preflight for multi-file registry mutations; write still performs locked CAS. */
+  assertWritable(): void {
+    this.storage?.assertWritable()
+  }
+
+  /** A failed save must not leave credentials active only in this Host's memory. */
+  private persistEntry(deviceId: DeviceId, next: StoredDeviceSecret | undefined): void {
+    const previous = this.secrets.get(deviceId)
+    if (next === undefined) this.secrets.delete(deviceId)
+    else this.secrets.set(deviceId, next)
+    try { this.save() }
+    catch (error) {
+      if (previous === undefined) this.secrets.delete(deviceId)
+      else this.secrets.set(deviceId, previous)
+      throw error
     }
   }
 
   removeDevice(deviceId: DeviceId): void {
-    if (this.secrets.delete(deviceId)) {
-      this.save()
-    }
+    if (this.secrets.has(deviceId)) this.persistEntry(deviceId, undefined)
   }
 
   /**
@@ -372,8 +374,18 @@ export class DeviceAuthManager {
   invalidate(deviceId: DeviceId): void {
     const current = this.secrets.get(deviceId)
     if (current === undefined) return
-    this.secrets.set(deviceId, { ...withoutCachedAuthentication(current), updatedAt: Date.now() })
-    this.save()
+    this.persistEntry(deviceId, { ...withoutCachedAuthentication(current), updatedAt: Date.now() })
+  }
+
+  /** Internal Host transaction snapshot; never serialize this record to Clients. */
+  snapshotDevice(deviceId: DeviceId): StoredDeviceSecret | undefined {
+    return this.secrets.get(deviceId)
+  }
+
+  /** Best-effort durable rollback. A rejected setter that already rolled back needs no write. */
+  restoreDevice(deviceId: DeviceId, snapshot: StoredDeviceSecret | undefined): void {
+    if (this.secrets.get(deviceId) === snapshot) return
+    this.persistEntry(deviceId, snapshot)
   }
 
   /** Read the persisted secret record for a device (never exposed to the Client). */
@@ -394,8 +406,7 @@ export class DeviceAuthManager {
       ...(normalized !== undefined ? { authCredential: normalized } : {}),
     }
     if (normalized === undefined) delete (next as { authCredential?: string }).authCredential
-    this.secrets.set(deviceId, next)
-    this.save()
+    this.persistEntry(deviceId, next)
   }
 
   /**
@@ -413,8 +424,7 @@ export class DeviceAuthManager {
       ...(passphrase === null ? {} : { sshPassphrase: passphrase }),
     }
     if (passphrase === null) delete (next as { sshPassphrase?: string }).sshPassphrase
-    this.secrets.set(deviceId, next)
-    this.save()
+    this.persistEntry(deviceId, next)
   }
 
   /**
@@ -540,8 +550,7 @@ export class DeviceAuthManager {
         updatedAt: Date.now(),
       }
       delete (next as { signingSecret?: string }).signingSecret
-      this.secrets.set(device.id, next)
-      this.save()
+      this.persistEntry(device.id, next)
       return { ok: true }
     }
 
@@ -586,7 +595,7 @@ export class DeviceAuthManager {
           if ((current?.credentialVersion ?? 0) !== credentialVersion) {
             return { ok: false, error: 'Authentication credential changed; retry authentication' }
           }
-          this.secrets.set(deviceId, {
+          this.persistEntry(deviceId, {
             ...(current === undefined ? { deviceId, updatedAt: Date.now() } : withoutCachedAuthentication(current)),
             deviceId,
             cookie: cookiePair,
@@ -594,7 +603,6 @@ export class DeviceAuthManager {
             ...(cacheBinding !== undefined ? { cacheBinding } : {}),
             updatedAt: Date.now(),
           })
-          this.save()
           return { ok: true }
         }
       }

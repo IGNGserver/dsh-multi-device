@@ -287,6 +287,7 @@ export class MultiDeviceClientStore {
   private started = false
   /** Latest Session reported to the Host, used to dedupe mount/cleanup races. */
   private reportedSessionId: string | undefined
+  private hasReportedSession = false
   private reportingSessionId: string | undefined
   private activeSessionInFlight: Promise<void> | undefined
   /** Monotonic control-plane sequence so an older HTTP request cannot win. */
@@ -414,7 +415,14 @@ export class MultiDeviceClientStore {
       this.state.loading ||
       this.state.error !== undefined
     if (!shouldApplySnapshot(previous, snap, force)) return
-    if (snap.hostEpoch !== previous.hostEpoch) this.reportedSessionId = undefined
+    const epochChanged = snap.hostEpoch !== undefined && snap.hostEpoch !== previous.hostEpoch
+    if (epochChanged) {
+      this.hasReportedSession = false
+      this.reportedSessionId = undefined
+      this.activeSessionSeq += 1
+      this.activeSessionInFlight = undefined
+      this.reportingSessionId = undefined
+    }
     const configuredIds = new Set(snap.devices.map(device => device.id))
     const keepAliveEligible = new Set(
       snap.devices.filter(device => device.keepNativeAlive !== false).map(device => device.id),
@@ -480,6 +488,7 @@ export class MultiDeviceClientStore {
       keepAliveDeviceIds: keepAlive,
     })
     this.clearUnreadForActiveSession(snap)
+    if (epochChanged) void this.setActiveSession(this.state.activeSessionId)
   }
 
   /**
@@ -672,14 +681,17 @@ export class MultiDeviceClientStore {
     if (this.state.activeSessionId !== next) this.setState({ activeSessionId: next })
     if (next !== undefined && decodeSessionId(next).isRemote) this.ensureKeepAliveDevice(decodeSessionId(next).deviceId)
     this.clearUnreadForActiveSession(this.state.snapshot)
-    if (this.reportedSessionId === next && this.activeSessionInFlight === undefined) return Promise.resolve()
+    if (this.hasReportedSession && this.reportedSessionId === next && this.activeSessionInFlight === undefined) return Promise.resolve()
     if (this.activeSessionInFlight !== undefined && this.reportingSessionId === next) return this.activeSessionInFlight
     const requestSeq = ++this.activeSessionSeq
     this.reportingSessionId = next
     const promise = this.callControlPlane<{ accepted: true }>({
       action: 'setActiveSession', payload: { sessionId: next ?? '', requestSeq },
     }).then(result => {
-      if (result.ok && requestSeq === this.activeSessionSeq) this.reportedSessionId = next
+      if (result.ok && requestSeq === this.activeSessionSeq) {
+        this.reportedSessionId = next
+        this.hasReportedSession = true
+      }
     }).finally(() => {
       if (this.activeSessionInFlight === promise) this.activeSessionInFlight = undefined
     })
@@ -749,9 +761,7 @@ export class MultiDeviceClientStore {
   async refreshSnapshot(): Promise<void> {
     const res = await this.callControlPlane<MultiDeviceSnapshot>({ action: 'snapshot' })
     if (res.ok) {
-      const epochChanged = res.value.hostEpoch !== this.state.snapshot.hostEpoch
       this.applyIncomingSnapshot(res.value)
-      if (epochChanged) this.reportedSessionId = undefined
       void this.setActiveSession(this.state.activeSessionId)
     } else {
       this.setState({ loading: false, error: res.error })
