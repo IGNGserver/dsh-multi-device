@@ -109,7 +109,7 @@ describe('durable profile-local snapshots', () => {
 })
 
 describe.skipIf(process.platform === 'win32')('real POSIX scanning and shared-state writes', () => {
-  it('executes one complete find expression, excluding caches, hidden repos and worktrees', () => {
+  it('executes one complete find expression, including worktrees but excluding caches and hidden state', () => {
     const dir = temp()
     for (const name of ['visible repo', 'node_modules/pkg', '.hidden/repo']) {
       const repo = join(dir, name)
@@ -117,9 +117,18 @@ describe.skipIf(process.platform === 'win32')('real POSIX scanning and shared-st
       execFileSync('git', ['init', '-q', repo])
       execFileSync('git', ['-C', repo, 'remote', 'add', 'origin', 'https://github.com/example/repo.git'])
     }
-    mkdirSync(join(dir, 'worktree')); writeFileSync(join(dir, 'worktree/.git'), 'gitdir: elsewhere')
+    const main = join(dir, 'visible repo'), worktree = join(dir, '.wt', 'worktree')
+    execFileSync('git', ['-C', main, '-c', 'user.name=test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-qm', 'fixture'])
+    mkdirSync(join(dir, '.wt'), { recursive: true })
+    execFileSync('git', ['-C', main, 'worktree', 'add', '-qb', 'scan-fixture', worktree])
     const output = execFileSync('sh', ['-c', buildGitScanScript([dir])], { encoding: 'utf8' })
-    expect(parseGitScanOutput(output).map(repo => repo.path)).toEqual([join(dir, 'visible repo')])
+    expect(parseGitScanOutput(output).map(repo => repo.path).sort()).toEqual([main, worktree].sort())
+  })
+
+  it('reports broken worktree metadata instead of a successful empty scan', () => {
+    const root = temp()
+    writeFileSync(join(root, '.git'), 'gitdir: missing-worktree-metadata')
+    expect(() => execFileSync('sh', ['-c', buildGitScanScript([root])], { stdio: 'pipe' })).toThrow()
   })
 
   it('bounds the merged Host count even when many shard files are present', () => {

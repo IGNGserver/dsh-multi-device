@@ -126,9 +126,17 @@ function sameGroupState(
 }
 
 /** Messages the framed page's bridge can send to the proxy. */
+export interface NativeBridgeNavigation {
+  readonly sessionId: string
+  readonly requestSeq: number
+  readonly openState: 'loading' | 'open' | 'error'
+  readonly error?: string
+}
+
 type NativeBridgeInbound =
   | { readonly type: 'ready'; readonly deviceId?: string }
   | { readonly type: 'failed'; readonly error?: string }
+  | ({ readonly type: 'navigation' } & NativeBridgeNavigation)
   | { readonly type: 'selection'; readonly sessionId?: string | null }
   | { readonly type: 'group-expansion'; readonly groups?: unknown }
   | { readonly type: 'read'; readonly sessionId?: string; readonly completionId?: string; readonly requestId?: string }
@@ -137,7 +145,7 @@ type NativeBridgeInbound =
 
 /** Commands the proxy sends into the framed page's bridge. */
 type NativeBridgeOutbound =
-  | { readonly type: 'open-session'; readonly sessionId: string }
+  | { readonly type: 'open-session'; readonly sessionId: string; readonly requestSeq?: number }
   | { readonly type: 'refresh' }
   | { readonly type: 'set-embedded'; readonly enabled: boolean }
   | { readonly type: 'group-expansion'; readonly groups: Record<string, boolean> }
@@ -167,6 +175,8 @@ export interface NativeProxyHooks {
   ) => void
   /** Report the raw remote Session the framed page currently shows. */
   readonly onBridgeSelection?: (deviceId: DeviceId, sessionId: string | undefined, clientId?: string) => void
+  /** History-open acknowledgement, independent from the UI selection report. */
+  readonly onBridgeNavigation?: (deviceId: DeviceId, navigation: NativeBridgeNavigation, clientId?: string) => void
   /** Report the framed page's own `document.title` (empty means no title). */
   readonly onBridgeTitle?: (deviceId: DeviceId, title: string | undefined, clientId?: string) => void
   /** Report whether at least one framed page for this device is actually visible. */
@@ -204,6 +214,9 @@ interface ClientBridgeState extends NativeBridgeSnapshot {
   visible: boolean
   embedded: boolean
   pendingOpenSession?: string
+  pendingRequestSeq?: number
+  /** Latest container socket alone may acknowledge or execute navigation. */
+  navigationOwner?: WebSocket
   readyTimer?: ReturnType<typeof setTimeout>
 }
 
@@ -474,9 +487,14 @@ export class NativeDeviceProxy {
   }
 
   /** Queue/replay navigation only within the requesting browser client. */
-  openSession(sessionId: string, clientId = LEGACY_CLIENT_ID): void {
-    this.clientState(clientId).pendingOpenSession = sessionId
-    this.sendToBridge({ type: 'open-session', sessionId }, clientId)
+  openSession(sessionId: string, clientId = LEGACY_CLIENT_ID, requestSeq?: number): void {
+    if (requestSeq !== undefined && (!Number.isSafeInteger(requestSeq) || requestSeq < 0)) return
+    const state = this.clientState(clientId)
+    // Sequence counters may restart for a replacement container; socket
+    // ownership fences its generation, acknowledgements match the latest target.
+    state.pendingOpenSession = sessionId
+    state.pendingRequestSeq = requestSeq
+    this.sendToBridge({ type: 'open-session', sessionId, ...(requestSeq === undefined ? {} : { requestSeq }) }, clientId)
   }
 
   /** Ask the framed page to refresh its own Session list (after fork/create). */
@@ -521,7 +539,10 @@ export class NativeDeviceProxy {
   /** Reset only this client's cached command target (device switched away). */
   clearPendingSession(clientId = LEGACY_CLIENT_ID): void {
     const state = this.clientStates.get(clientId)
-    if (state !== undefined) state.pendingOpenSession = undefined
+    if (state !== undefined) {
+      state.pendingOpenSession = undefined
+      state.pendingRequestSeq = undefined
+    }
   }
 
   private sendToSocket(client: WebSocket, message: NativeBridgeOutbound): void {
@@ -535,6 +556,7 @@ export class NativeDeviceProxy {
     if (clientId === undefined && (message.type === 'open-session' || message.type === 'set-embedded')) return
     for (const [client, owner] of this.bridgeClients) {
       if (clientId !== undefined && owner !== clientId) continue
+      if (message.type === 'open-session' && this.clientStates.get(owner)?.navigationOwner !== client) continue
       this.sendToSocket(client, message)
     }
   }
@@ -972,6 +994,7 @@ export class NativeDeviceProxy {
   private attachBridge(ws: WebSocket, clientId: string): void {
     const state = this.clientState(clientId)
     const first = ![...this.bridgeClients.values()].includes(clientId)
+    state.navigationOwner = ws
     this.bridgeClients.set(ws, clientId)
     this.bridgeVisibility.set(ws, false)
     if (first) {
@@ -981,6 +1004,7 @@ export class NativeDeviceProxy {
     }
 
     ws.on('message', (raw) => {
+      if (this.stopped || state.navigationOwner !== ws) return
       let message: NativeBridgeInbound
       try {
         const parsed: unknown = JSON.parse(raw.toString())
@@ -1002,13 +1026,27 @@ export class NativeDeviceProxy {
           ...(tokens !== undefined ? { readCompletions: sanitizeReadCompletions(tokens) } : {}),
         })
         if (state.pendingOpenSession !== undefined) {
-          this.sendToSocket(ws, { type: 'open-session', sessionId: state.pendingOpenSession })
+          this.sendToSocket(ws, { type: 'open-session', sessionId: state.pendingOpenSession,
+            ...(state.pendingRequestSeq === undefined ? {} : { requestSeq: state.pendingRequestSeq }) })
         }
         return
       }
       if (message.type === 'failed') {
         this.clearBridgeTimer(clientId)
         this.setBridgeState('failed', message.error ?? 'the framed page could not start the native bridge', clientId)
+        return
+      }
+      if (message.type === 'navigation') {
+        if (typeof message.sessionId !== 'string' || state.pendingOpenSession === undefined ||
+            message.sessionId !== state.pendingOpenSession ||
+            !Number.isSafeInteger(message.requestSeq) || message.requestSeq < 0 ||
+            (state.pendingRequestSeq !== undefined && message.requestSeq !== state.pendingRequestSeq) ||
+            !['loading', 'open', 'error'].includes(message.openState)) return
+        const error = typeof message.error === 'string' ? message.error.slice(0, 2000) : undefined
+        this.hooks.onBridgeNavigation?.(this.device.id, {
+          sessionId: message.sessionId, requestSeq: message.requestSeq, openState: message.openState,
+          ...(error === undefined ? {} : { error }),
+        }, clientId)
         return
       }
       if (message.type === 'selection') {
@@ -1075,9 +1113,11 @@ export class NativeDeviceProxy {
       this.bridgeClients.delete(ws)
       this.bridgeVisibility.delete(ws)
       if (this.stopped) return
+      const wasOwner = state.navigationOwner === ws
+      if (wasOwner) state.navigationOwner = undefined
       this.trimClientStates(clientId)
       this.reportBridgeVisibility(clientId)
-      if ([...this.bridgeClients.values()].includes(clientId)) return
+      if (!wasOwner || [...this.bridgeClients.values()].includes(clientId)) return
       if (state.title !== undefined) {
         state.title = undefined
         this.hooks.onBridgeTitle?.(this.device.id, undefined, clientId)
@@ -1334,10 +1374,10 @@ export class NativeProxyManager {
   }
 
   /** Navigate the framed page to one raw remote Session (queued until ready). */
-  openSession(deviceId: DeviceId, sessionId: string, clientId = LEGACY_CLIENT_ID): boolean {
+  openSession(deviceId: DeviceId, sessionId: string, clientId = LEGACY_CLIENT_ID, requestSeq?: number): boolean {
     const proxy = this.proxies.get(deviceId)
     if (proxy === undefined) return false
-    proxy.openSession(sessionId, clientId)
+    proxy.openSession(sessionId, clientId, requestSeq)
     return true
   }
 

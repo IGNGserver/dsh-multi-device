@@ -3,6 +3,7 @@ import { createServer } from 'node:http'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { DeviceId, encodeRemoteEventId, type DeviceConfig } from '../src/contract.ts'
+import { DeviceCatalog } from '../src/host/device-catalog.ts'
 import { DeviceAuthManager } from '../src/host/auth.ts'
 import { RemoteDeviceClient, type RemoteDeviceCallbacks, type RemotePendingInteraction, type RemoteSessionSummary } from '../src/host/remote-client.ts'
 
@@ -33,16 +34,15 @@ function callbacks(): RemoteDeviceCallbacks {
 type RpcResult = { ok: true; value: unknown; httpStatus: number } | { ok: false; httpStatus: number; error: { code: string; message: string } }
 type Internals = {
   protocolVersion: string
-  summaries: RemoteSessionSummary[]
+  catalog: DeviceCatalog
   state: string
-  catalogStale: boolean
   baselineGeneration: number | undefined
   remoteEventsClientId: string | undefined
   pendingInteractions: Map<string, RemotePendingInteraction>
   projectionsBySession: Map<string, { asOfSeq: number; values: Record<string, unknown> }>
   rawRpcPost: (path: string, payload: unknown, signal?: AbortSignal) => Promise<RpcResult>
   handle02EmitEvent: (event: string, args: unknown[]) => void
-  pump02RemoteEvents: (signal: AbortSignal, onReady?: () => void) => Promise<void>
+  pump02RemoteEvents: (signal: AbortSignal, epoch?: number, onReady?: () => void) => Promise<void>
   pump02SessionControl: (signal: AbortSignal) => Promise<void>
   handshakeAndLoadInitial: (url: string, signal: AbortSignal) => Promise<unknown>
 }
@@ -52,6 +52,7 @@ function fixture() {
   const client = new RemoteDeviceClient(config(), auth, cb)
   const inner = client as unknown as Internals
   inner.protocolVersion = '0.2'
+  inner.catalog.markEventsReady(inner.catalog.epoch)
   disposers.push(() => client.stop())
   return { client, inner, cb, auth }
 }
@@ -65,7 +66,7 @@ const success = (items: RemoteSessionSummary[]): RpcResult => ({ ok: true, value
 describe('RemoteDeviceClient catalog convergence', () => {
   it('shares one request and replays added/removed/status/activity in order without duplicate live events', async () => {
     const { client, inner, cb } = fixture()
-    inner.summaries = [summary('s', { running: true }), summary('removed')]
+    inner.catalog.replaceSessions([summary('s', { running: true }), summary('removed')])
     const response = deferred<RpcResult>()
     const post = vi.spyOn(inner, 'rawRpcPost').mockReturnValue(response.promise)
     const first = client.refreshSessionCatalog()
@@ -91,7 +92,7 @@ describe('RemoteDeviceClient catalog convergence', () => {
 
   it('compares the committed snapshot with the current live table, not the request-start table', async () => {
     const { client, inner, cb } = fixture()
-    inner.summaries = [summary('s', { running: true })]
+    inner.catalog.replaceSessions([summary('s', { running: true })])
     const response = deferred<RpcResult>()
     vi.spyOn(inner, 'rawRpcPost').mockReturnValue(response.promise)
     const refresh = client.refreshSessionCatalog()
@@ -105,7 +106,7 @@ describe('RemoteDeviceClient catalog convergence', () => {
 
   it.each(['stop', 'disable', 'reconnect'] as const)('aborts and fences old responses across %s, including old finally cleanup', async boundary => {
     const { client, inner } = fixture()
-    inner.summaries = [summary('old')]
+    inner.catalog.replaceSessions([summary('old')])
     const old = deferred<RpcResult>()
     const fresh = deferred<RpcResult>()
     const post = vi.spyOn(inner, 'rawRpcPost').mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise)
@@ -134,7 +135,7 @@ describe('RemoteDeviceClient catalog convergence', () => {
 
   it('ignores caller-aborted responses and retries a failed request rather than retaining a stuck flight', async () => {
     const { client, inner } = fixture()
-    inner.summaries = [summary('s')]
+    inner.catalog.replaceSessions([summary('s')])
     const response = deferred<RpcResult>()
     const post = vi.spyOn(inner, 'rawRpcPost').mockReturnValueOnce(response.promise).mockResolvedValue(success([summary('fresh')]))
     const abort = new AbortController()
@@ -151,7 +152,7 @@ describe('RemoteDeviceClient catalog convergence', () => {
 
   it('releases a failed flight and never dispatches one invalidated before its microtask starts', async () => {
     const { client, inner } = fixture()
-    inner.summaries = [summary('s')]
+    inner.catalog.replaceSessions([summary('s')])
     const post = vi.spyOn(inner, 'rawRpcPost').mockResolvedValueOnce({ ok: false, httpStatus: 500, error: { code: 'failed', message: 'retry' } }).mockResolvedValue(success([summary('fresh')]))
     await client.refreshSessionCatalog()
     expect(client.sessionSummaries()[0]?.sessionId).toBe('s')
@@ -166,6 +167,7 @@ describe('RemoteDeviceClient catalog convergence', () => {
   it.each(['rpc', 'throw', 'malformed'] as const)('lowers freshness after %s failure without masking running, then recovers', async failure => {
     const { client, inner, cb } = fixture()
     inner.state = 'connected'
+    inner.catalog.setStale(false)
     const post = vi.spyOn(inner, 'rawRpcPost').mockResolvedValue(success([summary('s', { running: true })]))
     await client.refreshSessionCatalog()
     expect(client.catalogFresh).toBe(true)
@@ -189,7 +191,7 @@ describe('RemoteDeviceClient catalog convergence', () => {
 
   it('does not commit the protocol probe snapshot before subscribing to events', async () => {
     const { client, inner } = fixture()
-    inner.summaries = [summary('cached')]
+    inner.catalog.replaceSessions([summary('cached')])
     vi.spyOn(inner, 'rawRpcPost').mockResolvedValue({ ok: true, httpStatus: 200, value: { version: '0.2.0', items: [summary('probe')] } })
     await inner.handshakeAndLoadInitial('http://127.0.0.1:1', new AbortController().signal)
     expect(client.sessionSummaries()[0]?.sessionId).toBe('cached')
@@ -200,7 +202,7 @@ describe('RemoteDeviceClient catalog convergence', () => {
 describe('RemoteDeviceClient ordered session metadata', () => {
   it('updates blank immediately before running status and replays it over an inflight stale list', async () => {
     const { client, inner, cb } = fixture()
-    inner.summaries = [summary('s', { blank: true })]
+    inner.catalog.replaceSessions([summary('s', { blank: true })])
     const response = deferred<RpcResult>()
     vi.spyOn(inner, 'rawRpcPost').mockReturnValue(response.promise)
     const refresh = client.refreshSessionCatalog()
@@ -222,7 +224,7 @@ describe('RemoteDeviceClient ordered session metadata', () => {
 
   it('rejects same-key duplicate/older seqs without dropping lower-seq updates for a different key', async () => {
     const { client, inner, cb } = fixture()
-    inner.summaries = [summary('s', { blank: true })]
+    inner.catalog.replaceSessions([summary('s', { blank: true })])
     vi.spyOn(client, 'openStream').mockImplementation(async function* () {
       yield { type: 'projection', sessionId: 's', key: 'sessionListMetadata', seq: 5, value: { blank: false } }
       yield { type: 'projection', sessionId: 's', key: 'sessionListMetadata', seq: 4, value: { blank: true } }
@@ -237,7 +239,7 @@ describe('RemoteDeviceClient ordered session metadata', () => {
 
   it('applies baseline metadata and fences omitted keys, resetting ordering only on a new generation', async () => {
     const { client, inner } = fixture()
-    inner.summaries = [summary('s', { blank: true })]
+    inner.catalog.replaceSessions([summary('s', { blank: true })])
     const stream = vi.spyOn(client, 'openStream').mockImplementation(async function* () {
       yield { type: 'baseline', value: { projections: { s: { asOfSeq: 10, values: { sessionListMetadata: { blank: false } } } } } }
     })
@@ -252,7 +254,7 @@ describe('RemoteDeviceClient ordered session metadata', () => {
     expect(client.controlProjections().get('s')?.values).toEqual({})
     expect(client.sessionSummaries()[0]?.blank).toBe(false)
     client.stop()
-    inner.catalogStale = false
+    inner.catalog.setStale(false)
     stream.mockImplementation(async function* () {
       yield { type: 'baseline', value: { projections: { s: { asOfSeq: 1, values: { sessionListMetadata: { blank: true } } } } } }
       yield { type: 'projection', sessionId: 's', key: 'sessionListMetadata', seq: 2, value: { blank: false } }
@@ -266,7 +268,7 @@ describe('RemoteDeviceClient ordered session metadata', () => {
 describe('RemoteDeviceClient pending authority', () => {
   it('cancels and forgets pending requests on disconnect, disable and authoritative deletion', async () => {
     const { client, inner, cb } = fixture()
-    inner.summaries = [summary('s'), summary('keep')]
+    inner.catalog.replaceSessions([summary('s'), summary('keep')])
     inner.pendingInteractions.set('event', pending('event'))
     inner.projectionsBySession.set('s', { asOfSeq: 3, values: {} })
     vi.spyOn(inner, 'rawRpcPost').mockResolvedValue(success([summary('keep')]))
@@ -325,6 +327,7 @@ describe('RemoteDeviceClient pending authority', () => {
     const { client, inner, cb } = fixture()
     inner.pendingInteractions.set('old', pending('old'))
     client.stop()
+    vi.spyOn(inner, 'rawRpcPost').mockResolvedValue(success([]))
     vi.spyOn(client, 'openStream').mockImplementation(async function* () { yield { type: 'ready', clientId: 'new' } })
     await inner.pump02RemoteEvents(new AbortController().signal)
     expect(inner.pendingInteractions.size).toBe(0)
@@ -355,6 +358,10 @@ describe('real mux events-ready baseline ordering', () => {
         const frame = JSON.parse(data.toString())
         if (frame.type !== 'open') return
         if (frame.endpoint === '$events') connection.eventsId = frame.streamId
+        if (frame.endpoint === 'workspace/follow') socket.send(JSON.stringify({ type: 'item', streamId: frame.streamId,
+          value: { type: 'baseline', value: { items: [], archivedSessionIds: [], pinnedSessionIds: [] } } }))
+        if (frame.endpoint === 'session/control') socket.send(JSON.stringify({ type: 'item', streamId: frame.streamId,
+          value: { type: 'baseline', value: { projections: {} } } }))
       })
     })
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))

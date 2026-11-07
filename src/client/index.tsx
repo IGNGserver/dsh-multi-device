@@ -33,6 +33,7 @@ import {
   SessionRowHoverDeviceSection,
 } from './ModeSwitcherOverlay.tsx'
 import { MultiDeviceHubPanel } from './MultiDeviceHubPanel.tsx'
+import { AggregatedSidebar } from './AggregatedSidebar.tsx'
 import { OfflineDeviceBanner } from './OfflineDeviceBanner.tsx'
 import { installProjectDeviceBadges } from './projectBadges.ts'
 import {
@@ -51,7 +52,6 @@ import {
 import { clientStore, useMultiDeviceState } from './state.ts'
 import { adoptMultiDeviceStyles } from './styles.ts'
 import { installWindowTitle } from './windowTitle.ts'
-import { installScopedCatalog, type CatalogRpc } from './modelCatalog.ts'
 
 export const SETTINGS_SECTION_ID = 'multi-device'
 /** Retained alias for backwards compatibility with external callers. */
@@ -207,7 +207,13 @@ async function ensureNativeLocalSelection(ctx: ClientContextLike, isCurrent: () 
  * the data; this refreshes the local Session catalog and, on entering Native
  * Mode, moves the main conversation off a remote Session.
  */
-export function installModeSideEffects(ctx: ClientContextLike): () => void {
+export function installModeSideEffects(source: ClientContextLike): () => void {
+  const ctx = {
+    sessions: source.sessions,
+    uiWorkspace: source.uiWorkspace,
+    layout: source.layout ?? source.get?.('layout'),
+    get: source.get?.bind(source),
+  } as ClientContextLike
   let lastMode = clientStore.getSnapshot().displayMode
   let disposed = false
   let generation = 0
@@ -227,7 +233,11 @@ export function installModeSideEffects(ctx: ClientContextLike): () => void {
   const isCurrent = (token: number, mode: string): boolean =>
     !disposed && token === generation && clientStore.getSnapshot().displayMode === mode
 
-  const restoreAggregatedSession = async (sessionId: string, current: () => boolean): Promise<void> => {
+    const restoreAggregatedSession = async (sessionId: string, current: () => boolean): Promise<void> => {
+    if (clientStore.getSnapshot().snapshot.catalog !== undefined) {
+      if (current()) await clientStore.openCatalogSession(sessionId)
+      return
+    }
     const uiWorkspace = ctx.uiWorkspace
     if (uiWorkspace === undefined) return
     for (let attempt = 0; attempt < 3 && current(); attempt += 1) {
@@ -290,11 +300,7 @@ export function installModeSideEffects(ctx: ClientContextLike): () => void {
       return current
     }
     if (current !== undefined) {
-      // The Native Pane and the Host model-catalog scope both need the active
-      // Session even when the slot that normally reports it never mounts (for
-      // example when the hidden mirror conversation failed to open). This is a
-      // deduped fallback, not a second source of truth.
-      void clientStore.setActiveSession(current)
+      void clientStore.reportLocalMainSession(current)
     }
     return current
   }
@@ -423,55 +429,34 @@ function applyClient(ctx: ClientContextLike): void {
   ctx.effect(() => ctx.locale.register(LOCALE_NS, { zh, en }), 'dsh-multi-device: locales')
   ctx.effect(() => clientStore.start(), 'dsh-multi-device: client-store')
   ctx.effect(() => installWindowTitle(), 'dsh-multi-device: window title')
-  // A repair loop that cannot install must never take the whole client entry
-  // down with it: the sidebar and settings have to keep working.
-  ctx.effect(() => {
-    try {
-      return installSessionLinkRepair(ctx)
-    } catch (error) {
-      console.error('[dsh-multi-device] session link repair failed to install', error)
-      return () => {}
-    }
-  }, 'dsh-multi-device: session link repair')
-
   const getTranslate = (): ((key: MultiDeviceLocaleKey) => string) => {
-    try {
-      if (typeof ctx.locale.bind === 'function') {
-        return ctx.locale.bind(LOCALE_NS)
-      }
-    } catch {
-      // Fallback
-    }
-    return translateFallback
+    try { return ctx.locale.bind?.(LOCALE_NS) ?? translateFallback } catch { return translateFallback }
   }
-
-  const handleOpenSettings = (): void => {
-    openSettingsSection(ctx, SETTINGS_SECTION_ID)
-  }
+  const handleOpenSettings = (): void => { openSettingsSection(ctx, SETTINGS_SECTION_ID) }
   const refreshCatalog = (): void => refreshModelCatalog(ctx)
 
-  ctx.inject(['connection'], (scope) => {
-    scope.effect(() => {
-      const connection = scope.get?.('connection') as { rpc?: CatalogRpc } | undefined
-      if (connection?.rpc === undefined) return () => {}
-      return installScopedCatalog(connection.rpc,
-        () => clientStore.effectiveSessionId(),
-        id => decodeSessionId(id).isRemote,
-        async (sessionId, signal) => {
-          try {
-            const response = await fetch('/multi-device/api', {
-              method: 'POST', headers: { 'content-type': 'application/json' }, signal,
-              body: JSON.stringify({ action: 'modelCatalog', payload: { sessionId, clientId: clientStore.clientId } }),
-            })
-            const result = await response.json() as { ok: boolean; value?: unknown; error?: string }
-            if (result.ok) return { ok: true, value: result.value }
-            return { ok: false, error: { code: 'dsh-md/model-catalog', message: result.error ?? 'Catalog unavailable', details: {} } }
-          } catch (error) {
-            return { ok: false, error: { code: 'dsh-md/model-catalog', message: error instanceof Error ? error.message : String(error), details: {} } }
-          }
-        })
-    }, 'dsh-multi-device: browser scoped catalog')
+  // Independent catalog rows never depend on summaries injected into local DSH.
+  ctx.slots.inject('sidebar.workspaces', () => {
+    let unregister: (() => void) | undefined
+    const reconcileSidebar = (): void => {
+      const state = clientStore.getSnapshot()
+      const enabled = state.displayMode === 'aggregated' && state.snapshot.catalog?.schema === 1
+      if (enabled && unregister === undefined) {
+        unregister = ctx.slots.register({ name: 'sidebar.workspaces', priority: -100, locale: LOCALE_NS },
+          (props: { collapsed?: boolean; expandSidebar?: () => void }) => (
+            <AggregatedSidebar {...props} t={getTranslate()} onOpenSettings={handleOpenSettings} />
+          ))
+      } else if (!enabled && unregister !== undefined) {
+        unregister()
+        unregister = undefined
+      }
+    }
+    const unsubscribe = clientStore.subscribe(reconcileSidebar)
+    reconcileSidebar()
+    return () => { unsubscribe(); unregister?.() }
   })
+
+
   ctx.inject(['modelDirectories'], scope => {
     scope.effect(() => {
       let previous = clientStore.effectiveSessionId()
@@ -496,16 +481,23 @@ function applyClient(ctx: ClientContextLike): void {
   //    data; this refreshes the local Session catalog and leaves a remote
   //    conversation when the 本机 tab becomes active. The same injected context
   //    publishes `sessions` / `uiWorkspace` to the device chip components.
-  ctx.inject(['sessions', 'uiWorkspace'], (modeCtx) => {
+  ctx.inject(['sessions', 'uiWorkspace', 'layout'], (modeCtx) => {
     modeCtx.effect(
       () => installModeSideEffects(modeCtx),
       'dsh-multi-device: native local surface',
     )
     modeCtx.effect(
-      () => bindClientServices({
-        sessions: modeCtx.sessions as unknown as BoundSessionsService,
-        uiWorkspace: modeCtx.uiWorkspace as unknown as BoundUiWorkspaceService,
-      }),
+      () => {
+        try {
+          const sessions = modeCtx.sessions as unknown as BoundSessionsService
+          const uiWorkspace = modeCtx.uiWorkspace as unknown as BoundUiWorkspaceService
+          const layout = modeCtx.layout ?? (modeCtx.get?.('layout') as ClientContextLike['layout'])
+          return bindClientServices({ sessions, uiWorkspace, revealMain: () => layout?.selectPanel(null) })
+        } catch (error) {
+          console.error('[dsh-multi-device] native navigation service binding failed', error)
+          throw error
+        }
+      },
       'dsh-multi-device: client service handles',
     )
   })

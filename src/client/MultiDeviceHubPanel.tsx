@@ -838,7 +838,7 @@ export function MultiDeviceHubPanel({
           />
         </div>
 
-        <div className="dsh-md-pref-row">
+        {snapshot.catalog === undefined && <div className="dsh-md-pref-row">
           <div>
             <div className="dsh-md-pref-title">{t('nativePaneTitle')}</div>
             <div className="dsh-md-pref-desc">{t('nativePaneDesc')}</div>
@@ -852,7 +852,7 @@ export function MultiDeviceHubPanel({
               })
             }}
           />
-        </div>
+        </div>}
 
         <div className="dsh-md-pref-row">
           <div>

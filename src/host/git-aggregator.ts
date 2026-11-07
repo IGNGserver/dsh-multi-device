@@ -2,7 +2,7 @@
  * Git Remote Auto-Discovery and Logical Workspace Aggregation Engine.
  *
  * Responsibilities:
- * 1. Read-only discovery of Git remote URLs (`remote.origin.url` or first remote) for local
+ * 1. Read-only discovery of Git remote URLs (`remote.origin.url` only) for local
  *    and remote workspace directories, supporting both standard `.git/config` and Git worktree
  *    `.git` pointer files (`gitdir: ...`).
  * 2. Pure metadata & session-list aggregation (`WorkspaceAggregator`):
@@ -14,6 +14,7 @@
  *
  * @module dsh-multi-device/host/git-aggregator
  */
+import { execFile, execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import {
@@ -33,6 +34,7 @@ import {
   workspaceMemberKey,
 } from '../contract.ts'
 import { execSshCommand } from './tunnel.ts'
+import { assertGitPathNamespace, encodeGitScript, gitPlatformProbe, quotePosix, quotePowerShell, type GitRemotePlatform } from './git-platform.ts'
 
 export interface PhysicalWorkspaceInput {
   readonly deviceId: DeviceId
@@ -60,7 +62,6 @@ export function parseGitConfigRemoteUrl(
 ): string | undefined {
   let currentRemote: string | undefined
   let originUrl: string | undefined
-  let fallbackUrl: string | undefined
 
   for (const rawLine of configText.split(/\r?\n/)) {
     const line = rawLine.trim()
@@ -79,27 +80,38 @@ export function parseGitConfigRemoteUrl(
         if (url !== '') {
           if (currentRemote === 'origin' && originUrl === undefined) {
             originUrl = url
-          } else if (fallbackUrl === undefined) {
-            fallbackUrl = url
           }
         }
       }
     }
   }
 
-  return originUrl ?? (options.originOnly === true ? undefined : fallbackUrl)
+  return originUrl
 }
 
-/**
- * Discover the raw Git remote URL of a local directory by walking up to find `.git/config`
- * (supports both normal `.git` directories and `.git` worktree pointer files).
- * Purely read-only and synchronous with zero child-process overhead.
+/** Read origin through Git first (worktrees, includes and includeIf included).
+ * The bounded config-file fallback supports unavailable Git / legacy metadata,
+ * but never substitutes another remote for origin.
  */
 export function discoverLocalGitRemote(
   directoryPath: string,
-  options: { readonly originOnly?: boolean } = {},
+  options: { readonly originOnly?: boolean; readonly strict?: boolean } = {},
 ): string | undefined {
   if (!directoryPath || !isAbsolute(directoryPath)) return undefined
+  try {
+    execFileSync('git', ['-C', directoryPath, 'rev-parse', '--git-dir'], {
+      timeout: 3_000, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+    })
+    const raw = execFileSync('git', ['-C', directoryPath, 'config', '--includes', '--get', 'remote.origin.url'], {
+      encoding: 'utf8', timeout: 3_000, maxBuffer: 256 * 1024, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+    }).trim()
+    return raw || undefined
+  } catch (error) {
+    // Exit 1 means a valid config with no origin: do not undo include semantics
+    // by re-parsing a stale value in a different config file.
+    if ((error as { status?: number }).status === 1) return undefined
+    if (options.strict === true) throw new Error(`Unable to read Git origin at ${directoryPath}: ${error instanceof Error ? error.message : String(error)}`)
+  }
   let current = directoryPath
   for (let depth = 0; depth < 6; depth++) {
     const dotGit = join(current, '.git')
@@ -148,10 +160,60 @@ export function discoverLocalGitRemote(
   return undefined
 }
 
-/**
- * Batch-discover Git remote URLs for multiple paths on a remote SSH device in a single round-trip.
- * Read-only: runs `git -C <path> config --get remote.origin.url` for each path.
+/** Asynchronous origin reader used only by the bounded background cache queue.
+ * Unlike manual discovery this never falls back to synchronous filesystem I/O.
+ * A failed process rejects, preserving a previously known origin.
  */
+export async function discoverLocalGitRemoteAsync(directoryPath: string): Promise<string | undefined> {
+  if (!directoryPath || !isAbsolute(directoryPath)) throw new Error('Local Git paths must be absolute')
+  const run = (args: string[]): Promise<string> => new Promise((resolveResult, reject) => {
+    execFile('git', args, {
+      encoding: 'utf8', timeout: 3_000, maxBuffer: 256 * 1024, windowsHide: true,
+    }, (error, stdout) => {
+      if (error !== null) reject(error)
+      else resolveResult(stdout)
+    })
+  })
+  await run(['-C', directoryPath, 'rev-parse', '--git-dir'])
+  try {
+    return (await run(['-C', directoryPath, 'config', '--includes', '--get', 'remote.origin.url'])).trim() || undefined
+  } catch (error) {
+    if ((error as { code?: number }).code === 1) return undefined
+    throw error
+  }
+}
+
+/** Build an origin-only batch for the interpreter selected by the capability probe. */
+export function buildGitOriginScript(paths: readonly string[], platform: GitRemotePlatform): string {
+  for (const path of paths) assertGitPathNamespace(path, platform)
+  if (platform.shell === 'powershell') {
+    return [
+      "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)",
+      "if (-not (Get-Command git -ErrorAction SilentlyContinue)) { throw 'Git is unavailable' }",
+      ...paths.map((path, index) => [
+        `$d = ${quotePowerShell(path)}; if (-not (Test-Path -LiteralPath $d -PathType Container)) { throw 'Invalid workspace path (${index})' }`,
+        "$ErrorActionPreference='Continue'; & git -C $d rev-parse --git-dir >$null 2>$null; $repoCode = $LASTEXITCODE; $u = $null; $ErrorActionPreference='Stop'",
+        `if ($repoCode -eq 0) { $ErrorActionPreference='Continue'; $u = & git -C $d config --includes --get remote.origin.url 2>$null; $code=$LASTEXITCODE; $ErrorActionPreference='Stop'; if ($code -ne 0 -and $code -ne 1) { throw 'Git origin read failed (${index})' } } elseif (Test-Path -LiteralPath (Join-Path $d '.git')) { throw 'Invalid Git metadata (${index})' }`,
+        `Write-Output ("__DSH_GIT_${index}__" + [char]9 + ($u -join ""))`,
+      ].join('; ')),
+      "Write-Output '__DSH_GIT_DONE__'",
+    ].join('\n')
+  }
+  return [
+    'set -eu; command -v git >/dev/null',
+    ...paths.map((path, index) => [
+      `d=${quotePosix(path)}; [ -d "$d" ] || exit 2; u=`,
+      'if git -C "$d" rev-parse --git-dir >/dev/null 2>&1; then',
+      '  code=0; u=$(git -C "$d" config --includes --get remote.origin.url) || code=$?',
+      '  [ "$code" -le 1 ] || exit "$code"',
+      'elif [ -e "$d/.git" ]; then exit 2; fi',
+      `printf '__DSH_GIT_${index}__\\t%s\\n' "$u"`,
+    ].join('\n')),
+    "printf '__DSH_GIT_DONE__\\n'",
+  ].join('\n')
+}
+
+/** Errors throw, rather than making a failed device look like an empty catalog. */
 export async function discoverRemoteGitRemotesViaSsh(
   transport: SshTransportConfig,
   paths: readonly string[],
@@ -159,29 +221,16 @@ export async function discoverRemoteGitRemotesViaSsh(
   const result = new Map<string, string>()
   const uniquePaths = [...new Set(paths.filter(p => p.trim() !== ''))]
   if (uniquePaths.length === 0) return result
-
-  // Build a safe POSIX shell snippet that prints `PATH\tURL` per directory
-  const commands = uniquePaths.map((p, idx) => {
-    const escaped = `'${p.replaceAll("'", "'\\''")}'`
-    // origin only. A first-remote fallback would pick `nas` and split one repo.
-    return [
-      `u=$(git -C ${escaped} config --get remote.origin.url 2>/dev/null || true)`,
-      `printf "__DSH_GIT_%d__\\t%s\\n" ${idx} "$u"`,
-    ].join('; ')
-  })
-  const fullCommand = commands.join('; ')
-  const res = await execSshCommand(transport, fullCommand, 8_000)
-  if (!res.ok) return result
-
+  const platform = await gitPlatformProbe.detect(transport)
+  const res = await execSshCommand(transport, encodeGitScript(platform, buildGitOriginScript(uniquePaths, platform)), 8_000)
+  if (!res.ok) throw new Error(res.error)
+  if (!/^__DSH_GIT_DONE__\r?$/m.test(res.stdout)) throw new Error('Incomplete Git origin response')
   for (const line of res.stdout.split(/\r?\n/)) {
-    const match = /^__DSH_GIT_(\d+)__\t(.+)$/.exec(line.trim())
-    if (!match || match[1] === undefined || match[2] === undefined) continue
-    const idx = Number(match[1])
+    const match = /^__DSH_GIT_(\d+)__\t(.*)$/.exec(line)
+    if (match?.[1] === undefined || match[2] === undefined) continue
+    const path = uniquePaths[Number(match[1])]
     const url = match[2].trim()
-    const path = uniquePaths[idx]
-    if (path !== undefined && url !== '') {
-      result.set(path, url)
-    }
+    if (path !== undefined && url !== '') result.set(path, url)
   }
   return result
 }
@@ -200,12 +249,32 @@ export const DEFAULT_AGGREGATION_CONFIG: WorkspaceAggregationConfig = {
  * Pure aggregation engine: combines physical workspaces across devices into Logical Workspaces
  * and DSH `WorkspaceView` rows without touching any project files.
  */
+export const GIT_REMOTE_POSITIVE_TTL_MS = 60_000
+export const GIT_REMOTE_NEGATIVE_TTL_MS = 30_000
+
+export interface GitRemoteCacheOptions {
+  readonly now?: () => number
+  readonly positiveTtlMs?: number
+  readonly negativeTtlMs?: number
+  readonly localProbe?: (path: string) => Promise<string | undefined>
+  /** Concurrent paths, clamped to 2–4; each path runs commands sequentially. */
+  readonly localConcurrency?: number
+  /** Called asynchronously only when an accepted probe changes cached metadata. */
+  readonly onCacheChanged?: (deviceId: DeviceId, path: string, rawOrigin: string | undefined) => void
+}
+
+interface LocalGitProbeJob { readonly key: string; readonly path: string }
+
 export class WorkspaceAggregator {
   private config: WorkspaceAggregationConfig
-  private readonly gitRemoteCache = new Map<string, string | null>()
-  private readonly negativeCacheAt = new Map<string, number>()
+  private readonly gitRemoteCache = new Map<string, { value: string | null; at: number; deviceId: DeviceId }>()
+  private readonly localProbeJobs = new Map<string, LocalGitProbeJob>()
+  private readonly localProbeQueue: LocalGitProbeJob[] = []
+  private readonly localRetryAt = new Map<string, number>()
+  private activeLocalProbes = 0
+  private localDrainScheduled = false
 
-  constructor(initialConfig: Partial<WorkspaceAggregationConfig> = {}) {
+  constructor(initialConfig: Partial<WorkspaceAggregationConfig> = {}, private readonly cacheOptions: GitRemoteCacheOptions = {}) {
     this.config = {
       ...DEFAULT_AGGREGATION_CONFIG,
       ...initialConfig,
@@ -289,32 +358,100 @@ export class WorkspaceAggregator {
     return this.config
   }
 
-  /** Record a discovered raw Git remote URL for `<deviceId>:<normalizedPath>`. */
+  /** An explicit observation supersedes any queued or in-flight older read. */
   noteGitRemote(deviceId: DeviceId, path: string, rawGitRemote: string): void {
     const key = workspaceMemberKey(deviceId, path)
-    this.gitRemoteCache.set(key, rawGitRemote)
-    this.negativeCacheAt.delete(key)
+    const value = rawGitRemote.trim() || null
+    this.localProbeJobs.delete(key)
+    this.localRetryAt.delete(key)
+    this.gitRemoteCache.set(key, { value, at: this.cacheNow(), deviceId })
   }
 
+  /** Explicit invalidation also fences late async results; TTL alone retains stale data. */
+  invalidateGitRemote(deviceId?: DeviceId, path?: string): void {
+    if (deviceId === undefined) {
+      this.gitRemoteCache.clear(); this.localProbeJobs.clear(); this.localRetryAt.clear()
+      this.localProbeQueue.length = 0
+      return
+    }
+    if (path !== undefined) {
+      const key = workspaceMemberKey(deviceId, path)
+      this.gitRemoteCache.delete(key); this.localProbeJobs.delete(key); this.localRetryAt.delete(key)
+      return
+    }
+    for (const [key, cached] of this.gitRemoteCache) {
+      if (cached.deviceId === deviceId) this.gitRemoteCache.delete(key)
+    }
+    if (deviceId === LOCAL_DEVICE_ID) {
+      this.localProbeJobs.clear(); this.localRetryAt.clear(); this.localProbeQueue.length = 0
+    }
+  }
+
+  private cacheNow(): number { return this.cacheOptions.now?.() ?? Date.now() }
+
+  /** Snapshot-safe: memory only, with a deferred and deduplicated refresh request.
+   * Neither an expired positive nor a transient failure splits a known group.
+   */
   getCachedGitRemote(deviceId: DeviceId, path: string): string | undefined {
     const key = workspaceMemberKey(deviceId, path)
     const cached = this.gitRemoteCache.get(key)
-    if (typeof cached === 'string') return cached
-    if (cached === null) {
-      const at = this.negativeCacheAt.get(key) ?? 0
-      if (Date.now() - at < 30_000) return undefined
-    }
     if (deviceId === LOCAL_DEVICE_ID) {
-      const discovered = discoverLocalGitRemote(path)
-      if (discovered !== undefined) {
-        this.gitRemoteCache.set(key, discovered)
-        this.negativeCacheAt.delete(key)
-        return discovered
-      }
-      this.gitRemoteCache.set(key, null)
-      this.negativeCacheAt.set(key, Date.now())
+      const ttl = cached?.value === null
+        ? (this.cacheOptions.negativeTtlMs ?? GIT_REMOTE_NEGATIVE_TTL_MS)
+        : (this.cacheOptions.positiveTtlMs ?? GIT_REMOTE_POSITIVE_TTL_MS)
+      if (cached === undefined || this.cacheNow() - cached.at >= ttl) this.enqueueLocalProbe(key, path)
     }
-    return undefined
+    return cached?.value ?? undefined
+  }
+
+  private enqueueLocalProbe(key: string, path: string): void {
+    if (!isAbsolute(path) || this.localProbeJobs.has(key) || this.cacheNow() < (this.localRetryAt.get(key) ?? -Infinity)) return
+    const job = { key, path }
+    this.localProbeJobs.set(key, job)
+    this.localProbeQueue.push(job)
+    if (this.localDrainScheduled) return
+    this.localDrainScheduled = true
+    queueMicrotask(() => {
+      this.localDrainScheduled = false
+      this.drainLocalProbes()
+    })
+  }
+
+  private drainLocalProbes(): void {
+    const configured = this.cacheOptions.localConcurrency ?? 3
+    const limit = Number.isFinite(configured) ? Math.max(2, Math.min(4, Math.trunc(configured))) : 3
+    while (this.activeLocalProbes < limit && this.localProbeQueue.length > 0) {
+      const job = this.localProbeQueue.shift()!
+      if (this.localProbeJobs.get(job.key) !== job) continue
+      this.activeLocalProbes += 1
+      void this.runLocalProbe(job)
+    }
+  }
+
+  private async runLocalProbe(job: LocalGitProbeJob): Promise<void> {
+    try {
+      const raw = await (this.cacheOptions.localProbe ?? discoverLocalGitRemoteAsync)(job.path)
+      if (this.localProbeJobs.get(job.key) !== job) return
+      const value = raw?.trim() || null
+      const previous = this.gitRemoteCache.get(job.key)?.value
+      this.gitRemoteCache.set(job.key, { value, at: this.cacheNow(), deviceId: LOCAL_DEVICE_ID })
+      this.localRetryAt.delete(job.key)
+      // Delete before notifying: callback snapshots must see the accepted entry.
+      this.localProbeJobs.delete(job.key)
+      if ((previous ?? null) !== value) {
+        try { this.cacheOptions.onCacheChanged?.(LOCAL_DEVICE_ID, job.path, value ?? undefined) } catch { /* host notification must not poison discovery */ }
+      }
+    } catch {
+      if (this.localProbeJobs.get(job.key) === job) {
+        // Failure is not evidence of origin removal. Retain stale metadata and
+        // retry on a later snapshot after bounded negative-cache backoff.
+        this.localRetryAt.set(job.key, this.cacheNow() + (this.cacheOptions.negativeTtlMs ?? GIT_REMOTE_NEGATIVE_TTL_MS))
+      }
+    } finally {
+      if (this.localProbeJobs.get(job.key) === job) this.localProbeJobs.delete(job.key)
+      this.activeLocalProbes -= 1
+      this.drainLocalProbes()
+    }
   }
 
   /**

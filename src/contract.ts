@@ -258,6 +258,12 @@ export interface DeviceView {
   readonly nativePaneError?: string
   /** Raw remote Session the framed page currently shows, for no-flash switching. */
   readonly nativePaneSessionId?: string
+  readonly nativeNavigation?: {
+    readonly sessionId: string
+    readonly requestSeq: number
+    readonly openState: 'loading' | 'open' | 'error'
+    readonly error?: string
+  }
   /**
    * The framed page's own `document.title`, reported by the bridge. The client
    * uses it for the window/taskbar title while that device is the active tab or
@@ -268,6 +274,8 @@ export interface DeviceView {
 
 /** One cached remote Session summary; projections are never persisted. */
 export interface CachedSessionSummary {
+  /** Display hint only, not a projection seed or execution state. */
+  readonly title?: string
   readonly sessionId: string
   readonly updatedAt: number
   readonly agentAvailable: boolean
@@ -518,8 +526,38 @@ export interface MultiDeviceUiPreferences {
   readonly crossHostReadState: boolean
 }
 
+/** A navigation-only row. Never inserted into the local DSH Session Controller. */
+export interface AggregatedSessionRow {
+  readonly id: string
+  readonly rawSessionId: string
+  readonly deviceId: DeviceId
+  readonly title: string
+  readonly updatedAt: number
+  readonly running: boolean
+  readonly blank: boolean
+  readonly cwd?: string
+  readonly parentSessionId?: string
+  readonly origin?: 'subagent'
+  readonly stale: boolean
+  readonly missing?: boolean
+}
+
+/** One self-contained sidebar read model, committed with the workspace projection. */
+export interface AggregatedCatalogView {
+  readonly schema: 1
+  readonly revision: number
+  readonly sessions: Readonly<Record<string, AggregatedSessionRow>>
+  readonly pinnedSessionIds: readonly string[]
+  readonly issues: Readonly<Record<string, string>>
+}
+
+export type CatalogSessionAction = 'rename' | 'archive' | 'unarchive' | 'pin' | 'unpin' | 'fork'
+
 /** Complete Hub snapshot returned to the Client UI. */
 export interface MultiDeviceSnapshot {
+  /** Present on the independent-directory implementation; absent on legacy Hosts. */
+  readonly catalog?: AggregatedCatalogView
+  readonly catalogSelection?: { readonly sessionId: string; readonly requestSeq: number }
   readonly revision: number
   /** Stable Host identity used to detect self-loops across any hostname/IP. */
   readonly hostId?: string

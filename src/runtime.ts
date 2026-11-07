@@ -124,6 +124,8 @@ export function admitMultiDeviceRequest(ctx: Context, req: IncomingMessage): boo
 export interface ControlPlaneRequest {
   readonly action:
     | 'snapshot'
+    | 'catalogSessionAction'
+    | 'searchCatalogSessions'
     | 'modelCatalog'
     | 'diagnostics'
     | 'setDisplayMode'
@@ -366,6 +368,19 @@ export class MultiDeviceControlPlane {
       switch (request.action) {
         case 'snapshot':
           return { ok: true, value: this.registry.snapshot(clientId) }
+
+        case 'catalogSessionAction': {
+          const operations = ['rename', 'archive', 'unarchive', 'pin', 'unpin', 'fork'] as const
+          const operation = payload.operation as typeof operations[number]
+          if (!operations.includes(operation) || typeof payload.sessionId !== 'string' || !payload.sessionId) return { ok: false, error: 'Invalid session operation' }
+          const result = await this.registry.catalogSessionAction(payload.sessionId, operation, typeof payload.title === 'string' ? payload.title : undefined, payload.stopActivity === true)
+          return { ok: true, value: { ...result, snapshot: this.registry.snapshot(clientId) } }
+        }
+
+        case 'searchCatalogSessions': {
+          if (typeof payload.query !== 'string' || !payload.query.trim() || payload.query.length > 1000) return { ok: false, error: 'A search query of 1–1000 characters is required' }
+          return { ok: true, value: { sessionIds: await this.registry.searchCatalogSessions(payload.query.trim()) } }
+        }
 
         case 'modelCatalog': {
           const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId : undefined
