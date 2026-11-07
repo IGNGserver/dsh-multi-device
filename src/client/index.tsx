@@ -41,6 +41,11 @@ import {
 } from './readState.ts'
 import { SessionDeviceChip } from './SessionDeviceChip.tsx'
 import { SessionRowDeviceMarker } from './SessionRowDeviceMarker.tsx'
+import {
+  computeSessionLinkGap,
+  SessionLinkRepair,
+  setActiveSessionLinkRepair,
+} from './sessionLinkRepair.ts'
 import { clientStore, useMultiDeviceState } from './state.ts'
 import { adoptMultiDeviceStyles } from './styles.ts'
 import { installWindowTitle } from './windowTitle.ts'
@@ -330,12 +335,80 @@ function installModeSideEffects(ctx: ClientContextLike): () => void {
   }
 }
 
+/**
+ * Keep the projected Workspaces resolvable inside DSH's Session store.
+ *
+ * The sidebar draws a Workspace's children from the ids carried by the row and
+ * skips ids it has no summary for, so a lost `api-session/added` replay leaves
+ * remote Workspaces expanded-but-empty. Watching the projection for ids the
+ * store cannot resolve and re-running `session.list` (which the Host patches to
+ * merge every device) heals that generation without a reload.
+ */
+function installSessionLinkRepair(ctx: ClientContextLike): () => void {
+  const sessions = ctx.sessions
+  let lastSignature = ''
+
+  const signatureOf = (): string => {
+    const state = clientStore.getSnapshot()
+    const devices = state.snapshot.devices.map(device => `${device.id}:${device.state}`).join(',')
+    return `${state.displayMode}|${devices}`
+  }
+
+  const repair = new SessionLinkRepair({
+    computeGap: () => {
+      const snapshot = clientStore.getSnapshot().snapshot
+      const excluded = new Set<string>([
+        ...(snapshot.archivedSessionIds ?? []),
+        ...(snapshot.subagentSessionIds ?? []),
+      ])
+      const known = new Set<string>(Object.keys(sessions?.list.getSnapshot().byId ?? {}))
+      return computeSessionLinkGap(snapshot.logicalWorkspaces, known, { excludedSessionIds: excluded })
+    },
+    canRepair: () => {
+      const state = clientStore.getSnapshot()
+      const connectedDevices = state.snapshot.devices.filter(device => device.state === 'connected').length
+      return { ok: state.displayMode !== 'native' && connectedDevices > 0, connectedDevices }
+    },
+    refresh: async () => {
+      await sessions?.refresh?.()
+    },
+  })
+  setActiveSessionLinkRepair(repair)
+
+  // A device finishing its handshake or a mode switch starts a new budget: the
+  // earlier attempts were made for a different input set.
+  const noteInputs = (): void => {
+    const signature = signatureOf()
+    if (signature !== lastSignature) {
+      lastSignature = signature
+      repair.resetBudget()
+    }
+    repair.noteChange()
+  }
+
+  const unsubscribeStore = clientStore.subscribe(noteInputs)
+  const unsubscribeSessions = sessions?.list.subscribe?.(() => {
+    repair.noteChange()
+  })
+
+  lastSignature = signatureOf()
+  repair.noteChange()
+
+  return () => {
+    unsubscribeStore()
+    unsubscribeSessions?.()
+    setActiveSessionLinkRepair(undefined)
+    repair.dispose()
+  }
+}
+
 export function apply(ctx: ClientContextLike): void {
   adoptMultiDeviceStyles()
 
   ctx.effect(() => ctx.locale.register(LOCALE_NS, { zh, en }), 'dsh-multi-device: locales')
   ctx.effect(() => clientStore.start(), 'dsh-multi-device: client-store')
   ctx.effect(() => installWindowTitle(), 'dsh-multi-device: window title')
+  ctx.effect(() => installSessionLinkRepair(ctx), 'dsh-multi-device: session link repair')
 
   const getTranslate = (): ((key: MultiDeviceLocaleKey) => string) => {
     try {
