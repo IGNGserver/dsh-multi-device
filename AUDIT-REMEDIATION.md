@@ -12,17 +12,17 @@
 - [x] #15 bootstrap false 往返与权限意愿保持
 
 ## 批次二：持久化与生命周期
-- [ ] #5 真实 shell Git 扫描命令及错误传播
-- [ ] #7 Profile 数据归属、陈旧快照覆盖与迁移
-- [ ] #9 上下游 HTTP/SSE 取消联动
-- [ ] #10 启动中 stop/remove 清理监听
-- [ ] #11 活动会话上报失败/Host epoch 重试
-- [ ] #12 HMR 前置订阅的状态更新
-- [ ] #13 IPv6 URL 与实际监听地址一致
-- [ ] #14 Electron 回退/重载生命周期
-- [ ] #16 catalog 截断真实判定
-- [ ] #17 原子持久化与损坏备份/恢复
-- [ ] 核查共享读状态并发、Origin边界、冷启动可见性、过期模式导航风险
+- [x] #5 真实 shell Git 扫描命令及错误传播
+- [x] #7 Profile 数据归属、陈旧快照覆盖与迁移
+- [x] #9 上下游 HTTP/SSE 取消联动
+- [x] #10 启动中 stop/remove 清理监听
+- [x] #11 活动会话上报失败/Host epoch 重试
+- [x] #12 HMR 前置订阅的状态更新
+- [x] #13 IPv6 URL 与实际监听地址一致
+- [x] #14 Electron 回退/重载生命周期
+- [x] #16 catalog 截断真实判定
+- [x] #17 原子持久化与损坏备份/恢复
+- [x] 核查共享读状态并发、Origin边界、冷启动可见性、过期模式导航风险
 
 ## 批次三：官方安装与验收
 - [ ] 普通用户先官方插件管理器/预构建 tgz，开发安装独立
@@ -38,3 +38,12 @@
 
 ## 批次一验证
 本机盘隔离副本：verify:version、typecheck、178项测试通过（新增45项），2026-11-07。PR CI负责真实构建，结果链接在PR中记录。旧无绑定认证缓存安全失效，保留显式凭据；首次升级可能需要重新认证。#11上报重试同时修复并新增回归，第二批补Host epoch验证。
+
+## 批次二设计与边界
+- 默认数据位于 `$DSH_PROFILE_DIR/plugins/dsh-multi-device/`；旧 `$DSH_HOME/plugins/` 数据仅一次复制，源保留，各 Profile 独立 Host id。自定义同路径采用锁内摘要CAS拒绝陈旧写入，不自动合并配置；拒写需重启读取最新状态。
+- JSON 0600临时文件、fsync、rename原子替换，保存上一份有效备份。损坏文档恢复保留corrupt副本；恢复失败/未来schema拒写，不覆盖空默认。确定性stale/busy预检；常规IO错误回滚及跨文件补偿，不宣称断电跨文件ACID。
+- 跨Host已读状态写入独立`read-state.json.hosts/<hostId>.json`，分帧读取合并旧文档，避免read/merge/write竞争；默认关闭不变。
+- DSH 0.2.x未公开已有Session状态源通知API，HMR兼容桥集中检查JS可见的`statusListeners`，通知去重；不兼容时诊断要求刷新，不伪造交互或轮询。官方API变化时需更新适配。
+- IPv6或远程浏览器不能假定访问Host的IPv4回环代理，明确降级说明；不生成未监听地址。
+- 认证管理器无AbortSignal，已启动的认证I/O仍受原超时限制；代理取消后其结果不会重建转发或复活服务。
+- 整体验证：verify:version/typecheck/246 tests通过（相对批一新增68项），最终CI证据见PR。真实Electron视觉验收仍不能由React effect回归替代。

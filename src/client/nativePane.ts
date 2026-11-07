@@ -82,20 +82,39 @@ export function resolveSameSiteProxyUrl(rawUrl: string | undefined): string | un
   if (typeof window === 'undefined' || !window.location) return rawUrl
   try {
     const pageHost = window.location.hostname.toLowerCase()
-    if (pageHost !== 'localhost' && pageHost !== '127.0.0.1' && pageHost !== '[::1]') {
-      return rawUrl
-    }
+    // The Host proxy listens ONLY on 127.0.0.1. Never synthesize [::1]:port:
+    // there is no listener there. localhost is the supported IPv4 alias.
+    if (pageHost !== 'localhost' && pageHost !== '127.0.0.1') return rawUrl
     const parsed = new URL(rawUrl)
     const targetHost = parsed.hostname.toLowerCase()
-    if (
-      (targetHost === '127.0.0.1' || targetHost === 'localhost' || targetHost === '[::1]') &&
-      targetHost !== pageHost
-    ) {
+    if ((targetHost === '127.0.0.1' || targetHost === 'localhost') && targetHost !== pageHost) {
       parsed.hostname = pageHost
       return parsed.href
     }
-  } catch {
-    // Keep original URL
-  }
+  } catch { /* Keep original URL. */ }
   return rawUrl
+}
+
+/** Cross-site iframe cookies are not reliable on an IPv6 parent + IPv4 proxy. */
+export function nativeProxyEmbeddingError(rawUrl: string | undefined): string | undefined {
+  if (rawUrl === undefined || typeof window === 'undefined') return undefined
+  try {
+    const pageHost = window.location.hostname.toLowerCase()
+    const protocol = window.location.protocol
+    const target = new URL(rawUrl)
+    const targetHost = target.hostname.toLowerCase()
+    // Desktop's app protocol is not a remote browser; its loopback bridge is local.
+    if (protocol === 'dsh-app:') return undefined
+    const loopbackProxy = targetHost === '127.0.0.1' || targetHost === 'localhost' || targetHost === '[::1]'
+    if (loopbackProxy && pageHost !== 'localhost' && pageHost !== '127.0.0.1' && pageHost !== '[::1]') {
+      return 'The native proxy listens on the DSH Host loopback address. A remote browser cannot reach it through its own 127.0.0.1; use DSH locally or the aggregated conversation view.'
+    }
+    if (protocol === 'https:' && target.protocol === 'http:') {
+      return 'This HTTPS page cannot reliably embed the HTTP native proxy (mixed content). Use the local HTTP DSH page or the aggregated conversation view.'
+    }
+    if (pageHost === '[::1]' && (targetHost === '127.0.0.1' || targetHost === 'localhost')) {
+      return 'IPv6 parent pages cannot embed the IPv4-only native proxy reliably. Open DSH via 127.0.0.1 or localhost, or open the device in a separate window.'
+    }
+  } catch { /* An invalid URL is handled by the normal unavailable surface. */ }
+  return undefined
 }

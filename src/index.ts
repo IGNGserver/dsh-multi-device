@@ -28,6 +28,7 @@ import {
   type WorkspaceRegistryLike,
 } from './host/gateway.ts'
 import { DeviceRegistry } from './host/registry.ts'
+import { resolvePluginStorage } from './host/storage.ts'
 import {
   admitMultiDeviceRequest,
   MULTI_DEVICE_API_PATH,
@@ -45,9 +46,9 @@ export const name = 'dsh-multi-device'
 export const inject = ['webServer']
 
 export interface Config {
-  /** Custom path to persist device & aggregation config; defaults to `$DSH_HOME/plugins/dsh-multi-device.json`. */
+  /** Custom path to persist device & aggregation config; defaults to the current Profile plugin storage. */
   readonly dataFile?: string
-  /** Custom path to persist device auth secrets; defaults to `$DSH_HOME/plugins/dsh-multi-device-secrets.json`. */
+  /** Custom path to persist device auth secrets; defaults to the current Profile plugin storage. */
   readonly secretsFile?: string
   readonly features?: {
     /** Enable Aggregated Mode (unified sidebar workspaces & sessions). Default: true. */
@@ -100,8 +101,11 @@ function appendBootLog(dshHome: string, line: string): void {
 export function apply(ctx: Context, config?: Config): void {
   const resolved = Config(config ?? {})
   const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
-  const dataFile = resolved.dataFile ?? join(dshHome, 'plugins', 'dsh-multi-device.json')
-  const secretsFile = resolved.secretsFile ?? join(dshHome, 'plugins', 'dsh-multi-device-secrets.json')
+  const defaults = resolved.dataFile !== undefined && resolved.secretsFile !== undefined
+    ? { dataFile: resolved.dataFile, secretsFile: resolved.secretsFile }
+    : resolvePluginStorage(dshHome, process.env.DSH_PROFILE_DIR, process.env.DSH_PROFILE)
+  const dataFile = resolved.dataFile ?? defaults.dataFile
+  const secretsFile = resolved.secretsFile ?? defaults.secretsFile
 
   appendBootLog(dshHome, 'apply:enter')
   try {

@@ -198,6 +198,11 @@ interface ClientBridgeState extends NativeBridgeSnapshot {
 
 export class NativeDeviceProxy {
   private server: Server | undefined
+  private startPromise: Promise<void> | undefined
+  private startAbort: AbortController | undefined
+  private generation = 0
+  /** Includes requests waiting on authentication, HTTP streams and WS handshakes. */
+  private readonly cancelUpstreams = new Set<() => void>()
   private localPort: number | undefined
   private readonly sockets = new Set<Duplex>()
   private stopped = false
@@ -288,97 +293,129 @@ export class NativeDeviceProxy {
     return this.localPort
   }
 
-  async start(preferredPort?: number): Promise<void> {
-    if (this.server !== undefined || this.stopped) return
+  start(preferredPort?: number): Promise<void> {
+    if (this.startPromise !== undefined) return this.startPromise
+    if (this.server !== undefined || this.stopped) return Promise.resolve()
+    const generation = ++this.generation
+    const controller = new AbortController()
+    this.startAbort = controller
     const server = createServer((req, res) => {
-      void this.handleHttp(req, res)
+      void this.handleHttp(req, res).catch((error: unknown) => {
+        this.respondProxyError(res, error)
+      })
     })
+    // Own the server before the first await: stop() must also cancel a pending bind.
+    this.server = server
     server.on('upgrade', (req, socket, head) => {
-      const parsed = parseOriginForm(req.url)
-      if (parsed !== undefined && isNativeBridgeSocketPath(parsed.pathname)) {
-        this.handleBridgeUpgrade(req, socket, head)
-        return
+      try {
+        const parsed = parseOriginForm(req.url)
+        if (parsed !== undefined && isNativeBridgeSocketPath(parsed.pathname)) {
+          this.handleBridgeUpgrade(req, socket, head)
+          return
+        }
+        this.handleUpgrade(req, socket, head)
+      } catch {
+        socket.destroy()
       }
-      this.handleUpgrade(req, socket, head)
     })
     server.on('connection', (socket) => {
+      if (this.stopped) { socket.destroy(); return }
       this.sockets.add(socket)
-      socket.on('close', () => this.sockets.delete(socket))
+      socket.once('close', () => this.sockets.delete(socket))
     })
 
     const listenOn = (port: number): Promise<void> =>
       new Promise<void>((resolve, reject) => {
-        const onError = (error: Error): void => {
+        const cleanup = (): void => {
           server.off('listening', onListening)
-          reject(error)
-        }
-        const onListening = (): void => {
           server.off('error', onError)
-          resolve()
+          controller.signal.removeEventListener('abort', onAbort)
         }
+        const onError = (error: Error): void => { cleanup(); reject(error) }
+        const onListening = (): void => { cleanup(); resolve() }
+        const onAbort = (): void => { cleanup(); resolve() }
+        if (controller.signal.aborted) { resolve(); return }
         server.once('error', onError)
         server.once('listening', onListening)
-        server.listen(port, '127.0.0.1')
+        controller.signal.addEventListener('abort', onAbort, { once: true })
+        try {
+          server.listen({ port, host: '127.0.0.1', signal: controller.signal })
+        } catch (error) {
+          cleanup()
+          reject(error)
+        }
       })
 
-    // A stable loopback port keeps the proxy origin stable, which preserves
-    // the remote DSH page's localStorage (current Session, theme, panel sizes)
-    // across Host restarts. Fall back to an ephemeral port only when the saved
-    // one is genuinely unavailable.
-    const preferred = typeof preferredPort === 'number' &&
-      Number.isInteger(preferredPort) &&
-      preferredPort > 0 &&
-      preferredPort <= 65_535
-      ? preferredPort
-      : undefined
-    if (preferred !== undefined) {
+    const promise = (async () => {
       try {
-        await listenOn(preferred)
-      } catch {
-        await listenOn(0)
+        const preferred = typeof preferredPort === 'number' &&
+          Number.isInteger(preferredPort) && preferredPort > 0 && preferredPort <= 65_535
+          ? preferredPort : undefined
+        if (preferred !== undefined) {
+          try {
+            await listenOn(preferred)
+          } catch (error) {
+            if (this.stopped || generation !== this.generation) return
+            if ((error as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw error
+            await listenOn(0)
+          }
+        } else {
+          await listenOn(0)
+        }
+        if (this.stopped || generation !== this.generation) {
+          server.close()
+          return
+        }
+        const addr = server.address()
+        if (addr !== null && typeof addr === 'object') this.localPort = addr.port
+        this.bridgeServer = new WebSocketServer({ noServer: true })
+        if (this.localPort !== undefined) {
+          try { this.hooks.onPortAllocated?.(this.device.id, this.localPort) } catch { /* optional persistence */ }
+        }
+      } catch (error) {
+        controller.abort()
+        server.close()
+        if (this.server === server) this.server = undefined
+        if (!this.stopped) throw error
+      } finally {
+        if (this.startAbort === controller) this.startAbort = undefined
+        this.startPromise = undefined
       }
-    } else {
-      await listenOn(0)
-    }
-
-    const addr = server.address()
-    if (addr !== null && typeof addr === 'object') {
-      this.localPort = addr.port
-    }
-    this.bridgeServer = new WebSocketServer({ noServer: true })
-    this.server = server
-    if (this.localPort !== undefined) {
-      try {
-        this.hooks.onPortAllocated?.(this.device.id, this.localPort)
-      } catch {
-        // Persisting the preferred port is an optimization, never a reason to
-        // fail a working proxy.
-      }
-    }
+    })()
+    this.startPromise = promise
+    return promise
   }
 
   stop(): void {
+    if (this.stopped) return
     this.stopped = true
-    for (const [clientId, state] of this.clientStates) {
+    ++this.generation
+    this.startAbort?.abort()
+    for (const cancel of [...this.cancelUpstreams]) cancel()
+    this.cancelUpstreams.clear()
+    for (const [clientId, state] of [...this.clientStates]) {
       this.clearBridgeTimer(clientId)
-      if (state.visible) {
-        state.visible = false
-        this.hooks.onBridgeVisibility?.(this.device.id, false, clientId)
-      }
-      if (state.title !== undefined) {
-        state.title = undefined
-        this.hooks.onBridgeTitle?.(this.device.id, undefined, clientId)
-      }
-      this.resetBridgeSelection(clientId)
-      this.setBridgeState('idle', undefined, clientId)
+      try {
+        if (state.visible) {
+          state.visible = false
+          this.hooks.onBridgeVisibility?.(this.device.id, false, clientId)
+        }
+        if (state.title !== undefined) {
+          state.title = undefined
+          this.hooks.onBridgeTitle?.(this.device.id, undefined, clientId)
+        }
+        this.resetBridgeSelection(clientId)
+        this.setBridgeState('idle', undefined, clientId)
+      } catch { /* Notifications must not prevent resource disposal. */ }
     }
     for (const client of this.bridgeClients.keys()) {
-      try { client.close() } catch { /* ignore */ }
+      try { client.terminate() } catch { /* ignore */ }
     }
     this.bridgeClients.clear()
     this.bridgeServer?.close()
     this.bridgeServer = undefined
     this.bridgeVisibility.clear()
+    this.clientStates.clear()
     for (const socket of this.sockets) {
       try { socket.destroy() } catch { /* ignore */ }
     }
@@ -388,12 +425,26 @@ export class NativeDeviceProxy {
     this.localPort = undefined
   }
 
+  /** Keep recent disconnected panes/pending navigation without evicting live bridges. */
+  private trimClientStates(protectedClientId?: string): void {
+    const live = new Set(this.bridgeClients.values())
+    let offline = [...this.clientStates.keys()].filter(id => !live.has(id)).length
+    for (const id of this.clientStates.keys()) {
+      if (offline <= 256) break
+      if (id === protectedClientId || live.has(id)) continue
+      this.clearBridgeTimer(id)
+      this.clientStates.delete(id)
+      offline--
+    }
+  }
+
   private clientState(clientId = LEGACY_CLIENT_ID): ClientBridgeState {
     let state = this.clientStates.get(clientId)
-    if (state === undefined) {
-      state = { state: 'idle', visible: false, embedded: false }
-      this.clientStates.set(clientId, state)
-    }
+    if (state === undefined) state = { state: 'idle', visible: false, embedded: false }
+    // Map insertion order doubles as recency for the bounded offline cache.
+    this.clientStates.delete(clientId)
+    this.clientStates.set(clientId, state)
+    this.trimClientStates(clientId)
     return state
   }
 
@@ -498,7 +549,15 @@ export class NativeDeviceProxy {
     state.readyTimer = timer
   }
 
+  private respondProxyError(res: ServerResponse, error: unknown): void {
+    if (this.stopped || res.destroyed || res.writableEnded) return
+    if (res.headersSent) { res.destroy(); return }
+    res.writeHead(502, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+    res.end(renderUnavailableHtml(this.device.name, error instanceof Error ? error.message : String(error)))
+  }
+
   private async handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (this.stopped) { res.destroy(); return }
     const upstreamBase = this.getUpstreamBaseUrl()
     if (upstreamBase === undefined) {
       res.writeHead(503, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
@@ -567,165 +626,204 @@ export class NativeDeviceProxy {
       return
     }
 
-    await this.ensureAuthenticated(upstreamBase)
-
-    const upstream = splitUpstreamBase(upstreamBase)
-    const upstreamPath = `${upstream.prefix}${rawTarget}`
-    const isHttps = upstream.url.protocol === 'https:'
-    const authority = resolveRemoteAuthority(this.device)
-    const reqFn = isHttps ? httpsRequest : httpRequest
-    const rejectUnauthorized = this.device.transport.kind === 'direct'
-      ? this.device.transport.rejectUnauthorized !== false
-      : true
-    const method = req.method ?? 'GET'
-    const injectHtml = isHtmlNavigation(req)
-
-    const forward = (retried: boolean): void => {
-      const authHeaders = this.authManager.getAuthHeaders(this.device)
-      const outHeaders = buildForwardHeaders(req.headers, {
-        host: authority,
-        origin: req.headers['origin'] !== undefined
-          ? authHeaders['Origin'] ?? `${isHttps ? 'https' : 'http'}://${authority}`
-          : undefined,
-        cookie: authHeaders['Cookie'],
-        authorization: authHeaders['Authorization'],
-      })
-      if (injectHtml) {
-        // Keep the document uncompressed so the bridge tag can be inserted
-        // without a second encoding pass; DSH itself has no CSP that would
-        // forbid the same-origin script.
-        for (const key of Object.keys(outHeaders)) {
-          if (key.toLowerCase() === 'accept-encoding') delete outHeaders[key]
-        }
-      }
-
-      const proxyReq = reqFn(
-        upstream.url,
-        {
-          method,
-          path: upstreamPath,
-          headers: outHeaders,
-          ...(isHttps ? { rejectUnauthorized } : {}),
-        },
-        (proxyRes) => {
-          const status = proxyRes.statusCode ?? 502
-
-          // A remote DSH that rejects the injected credential must never leak its
-          // plain-text 401 body into the framed UI. Try one forced re-auth (the
-          // stored cookie may be stale after a remote restart), then show the
-          // plugin-owned authorization page instead of a blank one-liner.
-          if (status === 401 || status === 403) {
-            proxyRes.resume()
-            if (!retried && (method === 'GET' || method === 'HEAD')) {
-              void this.recoverAuthentication(upstreamBase, status)
-                .then((recovered) => {
-                  if (recovered) {
-                    forward(true)
-                    return
-                  }
-                  this.respondAuthRequired(res, status)
-                })
-                .catch((error: unknown) => {
-                  this.hooks.onAuthState?.(
-                    this.device.id,
-                    'error',
-                    error instanceof Error ? error.message : String(error),
-                  )
-                  this.respondAuthRequired(res, status)
-                })
-              return
-            }
-            // For non-idempotent requests (e.g. POST /api/session/list from an
-            // already-loaded SPA), trigger background re-auth so the next retry
-            // succeeds without destroying the Keep-Alive frame unless recovery fails.
-            void this.recoverAuthentication(upstreamBase, status).then((recovered) => {
-              if (!recovered) {
-                this.hooks.onAuthState?.(
-                  this.device.id,
-                  'required',
-                  `Remote DSH returned HTTP ${status}`,
-                )
-              }
-            })
-            this.respondAuthRequired(res, status)
-            return
-          }
-
-          if (status >= 200 && status < 400) {
-            this.hooks.onAuthState?.(this.device.id, 'ok')
-          }
-
-          const resHeaders: Record<string, string | string[]> = {}
-          for (const [key, val] of Object.entries(proxyRes.headers)) {
-            if (val === undefined) continue
-            const lower = key.toLowerCase()
-            // The proxy is the only allowed framing parent. Strip the generic
-            // DENY header and replace the CSP directive with a local allowlist.
-            if (lower === 'x-frame-options') continue
-            if (lower === 'content-security-policy') {
-              const cleaned = (Array.isArray(val) ? val.join('; ') : val)
-                .replace(/frame-ancestors[^;]*;?/gi, '')
-                .replace(/;\s*$/u, '')
-                .trim()
-              const allowedAncestors = this.allowedFramingAncestors()
-              const framing = allowedAncestors.length > 0
-                ? `frame-ancestors 'self' ${allowedAncestors.join(' ')}`
-                : ''
-              const next = [cleaned, framing].filter(part => part !== '').join('; ')
-              if (next !== '') resHeaders[key] = next
-              continue
-            }
-            if (lower === 'set-cookie') {
-              const cookies = Array.isArray(val) ? val : [val]
-              resHeaders[key] = cookies.map(c =>
-                c
-                  .replace(/;\s*SameSite=Strict/gi, '; SameSite=Lax')
-                  .replace(/;\s*Secure/gi, '')
-                  .replace(/;\s*Domain=[^;]*/gi, ''),
-              )
-              continue
-            }
-            if (lower === 'location' && typeof val === 'string') {
-              resHeaders[key] = rewriteLocation(val, upstreamBase, proxyOrigin)
-              continue
-            }
-            resHeaders[key] = val
-          }
-
-          const contentType = proxyRes.headers['content-type']
-          const shouldInject = injectHtml
-            && status === 200
-            && typeof contentType === 'string'
-            && contentType.toLowerCase().includes('text/html')
-          if (shouldInject) {
-            this.setBridgeState('loading', undefined, clientId)
-            this.armBridgeTimer(clientId)
-            this.streamInjectedHtml(proxyRes, res, status, resHeaders, clientId)
-            return
-          }
-
-          res.writeHead(status, resHeaders)
-          proxyRes.pipe(res)
-        },
-      )
-
-      proxyReq.on('error', (err) => {
-        if (!res.headersSent) {
-          res.writeHead(502, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
-          res.end(renderUnavailableHtml(this.device.name, err.message))
-        } else {
-          res.destroy()
-        }
-      })
-
-      if (retried || method === 'GET' || method === 'HEAD') {
-        proxyReq.end()
-      } else {
-        req.pipe(proxyReq)
-      }
+    let cancelled = false
+    const resources = new Set<{ destroy(): unknown }>()
+    const cleanups: (() => void)[] = []
+    const cancel = (): void => {
+      if (cancelled) return
+      cancelled = true
+      this.cancelUpstreams.delete(cancel)
+      req.off('aborted', cancel)
+      // Keep the error sinks until the closed streams are collected: Node can
+      // emit ECONNRESET after 'aborted' (and after destroy()).
+      res.off('close', cancel)
+      res.off('finish', cancel)
+      for (const cleanup of cleanups) cleanup()
+      for (const resource of resources) resource.destroy()
+      resources.clear()
+    }
+    const active = (): boolean => !cancelled && !this.stopped && !req.aborted && !res.destroyed && !res.writableEnded
+    const fail = (error: unknown): void => {
+      if (!active()) { cancel(); return }
+      this.respondProxyError(res, error)
+      cancel()
+    }
+    this.cancelUpstreams.add(cancel)
+    req.once('aborted', cancel)
+    req.once('error', cancel)
+    res.once('close', cancel)
+    res.once('finish', cancel)
+    res.once('error', cancel)
+    try {
+      await this.ensureAuthenticated(upstreamBase)
+      if (!active()) { cancel(); return }
+    } catch (error) {
+      fail(error)
+      return
     }
 
-    forward(false)
+    try {
+      const upstream = splitUpstreamBase(upstreamBase)
+      const upstreamPath = `${upstream.prefix}${rawTarget}`
+      const isHttps = upstream.url.protocol === 'https:'
+      const authority = resolveRemoteAuthority(this.device)
+      const reqFn = isHttps ? httpsRequest : httpRequest
+      const rejectUnauthorized = this.device.transport.kind === 'direct'
+        ? this.device.transport.rejectUnauthorized !== false
+        : true
+      const method = req.method ?? 'GET'
+      const injectHtml = isHtmlNavigation(req)
+
+      const forward = (retried: boolean): void => {
+        if (!active()) return
+        const authHeaders = this.authManager.getAuthHeaders(this.device)
+        const outHeaders = buildForwardHeaders(req.headers, {
+          host: authority,
+          origin: req.headers['origin'] !== undefined
+            ? authHeaders['Origin'] ?? `${isHttps ? 'https' : 'http'}://${authority}`
+            : undefined,
+          cookie: authHeaders['Cookie'],
+          authorization: authHeaders['Authorization'],
+        })
+        if (injectHtml) {
+          // Keep the document uncompressed so the bridge tag can be inserted
+          // without a second encoding pass; DSH itself has no CSP that would
+          // forbid the same-origin script.
+          for (const key of Object.keys(outHeaders)) {
+            if (key.toLowerCase() === 'accept-encoding') delete outHeaders[key]
+          }
+        }
+
+        const proxyReq = reqFn(
+          upstream.url,
+          {
+            method,
+            path: upstreamPath,
+            headers: outHeaders,
+            ...(isHttps ? { rejectUnauthorized } : {}),
+          },
+          (proxyRes) => {
+            resources.add(proxyRes)
+            proxyRes.once('close', () => resources.delete(proxyRes))
+            proxyRes.on('error', fail)
+            let discarded = false
+            proxyRes.once('aborted', () => {
+              if (!discarded) fail(new Error('The upstream response was aborted'))
+            })
+            if (!active()) { proxyRes.destroy(); return }
+            try {
+              const status = proxyRes.statusCode ?? 502
+
+              // A remote DSH that rejects the injected credential must never leak its
+              // plain-text 401 body into the framed UI. Try one forced re-auth (the
+              // stored cookie may be stale after a remote restart), then show the
+              // plugin-owned authorization page instead of a blank one-liner.
+              if (status === 401 || status === 403) {
+                discarded = true
+                proxyRes.destroy()
+                proxyReq.destroy()
+                if (!retried && (method === 'GET' || method === 'HEAD')) {
+                  void this.recoverAuthentication(upstreamBase, status)
+                    .then((recovered) => {
+                      if (!active()) return
+                      if (recovered) {
+                        forward(true)
+                        return
+                      }
+                      this.respondAuthRequired(res, status)
+                    })
+                    .catch(fail)
+                  return
+                }
+                // For non-idempotent requests (e.g. POST /api/session/list from an
+                // already-loaded SPA), trigger background re-auth so the next retry
+                // succeeds without destroying the Keep-Alive frame unless recovery fails.
+                void this.recoverAuthentication(upstreamBase, status).then((recovered) => {
+                  if (!active()) return
+                  if (!recovered) {
+                    this.hooks.onAuthState?.(
+                      this.device.id,
+                      'required',
+                      `Remote DSH returned HTTP ${status}`,
+                    )
+                  }
+                }).catch(fail)
+                this.respondAuthRequired(res, status)
+                return
+              }
+
+              if (status >= 200 && status < 400) {
+                this.hooks.onAuthState?.(this.device.id, 'ok')
+              }
+
+              const resHeaders: Record<string, string | string[]> = {}
+              for (const [key, val] of Object.entries(proxyRes.headers)) {
+                if (val === undefined) continue
+                const lower = key.toLowerCase()
+                // The proxy is the only allowed framing parent. Strip the generic
+                // DENY header and replace the CSP directive with a local allowlist.
+                if (lower === 'x-frame-options') continue
+                if (lower === 'content-security-policy') {
+                  const cleaned = (Array.isArray(val) ? val.join('; ') : val)
+                    .replace(/frame-ancestors[^;]*;?/gi, '')
+                    .replace(/;\s*$/u, '')
+                    .trim()
+                  const allowedAncestors = this.allowedFramingAncestors()
+                  const framing = allowedAncestors.length > 0
+                    ? `frame-ancestors 'self' ${allowedAncestors.join(' ')}`
+                    : ''
+                  const next = [cleaned, framing].filter(part => part !== '').join('; ')
+                  if (next !== '') resHeaders[key] = next
+                  continue
+                }
+                if (lower === 'set-cookie') {
+                  const cookies = Array.isArray(val) ? val : [val]
+                  resHeaders[key] = cookies.map(c =>
+                    c
+                      .replace(/;\s*SameSite=Strict/gi, '; SameSite=Lax')
+                      .replace(/;\s*Secure/gi, '')
+                      .replace(/;\s*Domain=[^;]*/gi, ''),
+                  )
+                  continue
+                }
+                if (lower === 'location' && typeof val === 'string') {
+                  resHeaders[key] = rewriteLocation(val, upstreamBase, proxyOrigin)
+                  continue
+                }
+                resHeaders[key] = val
+              }
+
+              const contentType = proxyRes.headers['content-type']
+              const shouldInject = injectHtml
+                && status === 200
+                && typeof contentType === 'string'
+                && contentType.toLowerCase().includes('text/html')
+              if (shouldInject) {
+                this.setBridgeState('loading', undefined, clientId)
+                this.armBridgeTimer(clientId)
+                cleanups.push(this.streamInjectedHtml(proxyRes, res, status, resHeaders, clientId))
+                return
+              }
+
+              res.writeHead(status, resHeaders)
+              proxyRes.pipe(res)
+            } catch (error) { fail(error) }
+          },
+        )
+        resources.add(proxyReq)
+        proxyReq.once('close', () => resources.delete(proxyReq))
+        cleanups.push(() => { req.unpipe(proxyReq) })
+        proxyReq.on('error', fail)
+
+        if (retried || method === 'GET' || method === 'HEAD') {
+          proxyReq.end()
+        } else {
+          req.pipe(proxyReq)
+        }
+      }
+
+      forward(false)
+    } catch (error) { fail(error) }
   }
 
   /**
@@ -742,37 +840,47 @@ export class NativeDeviceProxy {
     status: number,
     baseHeaders: Record<string, string | string[]>,
     clientId: string,
-  ): void {
+  ): () => void {
     const chunks: Buffer[] = []
     let size = 0
-    let tooLarge = false
-    proxyRes.on('data', (chunk: Buffer) => {
+    let finished = false
+    const cleanup = (): void => {
+      chunks.length = 0
+      proxyRes.off('data', onData)
+      proxyRes.off('end', onEnd)
+      proxyRes.off('error', onError)
+      proxyRes.off('aborted', onError)
+      if (!finished) this.clearBridgeTimer(clientId)
+    }
+    const onError = (): void => {
+      if (finished) return
+      finished = true
+      cleanup()
+      this.clearBridgeTimer(clientId)
+      this.resetBridgeSelection(clientId)
+      this.setBridgeState('failed', 'the remote HTML document was interrupted', clientId)
+      res.destroy()
+    }
+    const onData = (chunk: Buffer): void => {
       size += chunk.byteLength
       if (size > MAX_INJECTABLE_HTML_BYTES) {
-        tooLarge = true
-        return
-      }
-      chunks.push(chunk)
-    })
-    proxyRes.on('error', () => {
-      if (!res.headersSent) res.destroy()
-    })
-    proxyRes.on('aborted', () => {
-      if (!res.headersSent) res.destroy()
-    })
-    proxyRes.on('end', () => {
-      if (res.destroyed) return
-      if (tooLarge) {
-        // The buffered prefix is not a valid document; never send a truncated
-        // body as if it were the page. The pane falls back to the local mirror.
+        finished = true
+        cleanup()
         this.clearBridgeTimer(clientId)
         this.resetBridgeSelection(clientId)
         this.setBridgeState('failed', 'the remote HTML document was too large to inject the native bridge', clientId)
         res.writeHead(502, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
         res.end(renderUnavailableHtml(this.device.name, 'The remote page is too large to inject the native bridge.'))
+        proxyRes.destroy()
         return
       }
+      chunks.push(chunk)
+    }
+    const onEnd = (): void => {
+      if (finished || res.destroyed || this.stopped) { cleanup(); return }
+      finished = true
       const raw = Buffer.concat(chunks)
+      cleanup()
       const headers = { ...baseHeaders }
       const encoding = headerValueOf(proxyRes.headers, 'content-encoding')
       let body = raw
@@ -804,7 +912,12 @@ export class NativeDeviceProxy {
       headers['content-length'] = String(body.byteLength)
       res.writeHead(status, headers)
       res.end(body)
-    })
+    }
+    proxyRes.on('data', onData)
+    proxyRes.prependOnceListener('error', onError)
+    proxyRes.prependOnceListener('aborted', onError)
+    proxyRes.once('end', onEnd)
+    return cleanup
   }
 
   /** Validate one same-origin bridge upgrade and hand it to the WebSocket server. */
@@ -914,6 +1027,8 @@ export class NativeDeviceProxy {
     ws.on('close', () => {
       this.bridgeClients.delete(ws)
       this.bridgeVisibility.delete(ws)
+      if (this.stopped) return
+      this.trimClientStates(clientId)
       this.reportBridgeVisibility(clientId)
       if ([...this.bridgeClients.values()].includes(clientId)) return
       if (state.title !== undefined) {
@@ -959,6 +1074,7 @@ export class NativeDeviceProxy {
     if (now - this.lastAuthAttemptAt < 30_000) return
     this.lastAuthAttemptAt = now
     const result = await this.authManager.ensureAuthenticated(this.device, upstreamBase)
+    if (this.stopped) return
     if (!result.ok) {
       this.hooks.onAuthState?.(this.device.id, 'required', result.error)
     }
@@ -973,6 +1089,7 @@ export class NativeDeviceProxy {
       try {
         this.authManager.invalidate(this.device.id)
         const result = await this.authManager.ensureAuthenticated(this.device, upstreamBase, true)
+        if (this.stopped) return false
         if (result.ok && this.authManager.getAuthHeaders(this.device)['Cookie'] !== undefined) {
           this.hooks.onAuthState?.(this.device.id, 'ok')
           return true
@@ -992,6 +1109,7 @@ export class NativeDeviceProxy {
   }
 
   private respondAuthRequired(res: ServerResponse, status: number): void {
+    if (this.stopped || res.destroyed || res.writableEnded) return
     if (res.headersSent) {
       res.destroy()
       return
@@ -1005,6 +1123,7 @@ export class NativeDeviceProxy {
   }
 
   private handleUpgrade(req: IncomingMessage, clientSocket: Duplex, head: Buffer): void {
+    if (this.stopped || clientSocket.destroyed) { clientSocket.destroy(); return }
     const upstreamBase = this.getUpstreamBaseUrl()
     if (upstreamBase === undefined) {
       clientSocket.destroy()
@@ -1052,14 +1171,40 @@ export class NativeDeviceProxy {
       ? this.device.transport.rejectUnauthorized !== false
       : true
 
+    let cancelled = false
+    let upstreamSocket: Duplex | undefined
+    let upstreamResponse: IncomingMessage | undefined
+    const cancel = (): void => {
+      if (cancelled) return
+      cancelled = true
+      this.cancelUpstreams.delete(cancel)
+      clientSocket.off('close', cancel)
+      clientSocket.off('end', cancel)
+      upstreamSocket?.unpipe(clientSocket)
+      if (upstreamSocket !== undefined) clientSocket.unpipe(upstreamSocket)
+      upstreamSocket?.destroy()
+      upstreamResponse?.destroy()
+      proxyReq.destroy()
+      clientSocket.destroy()
+    }
     const proxyReq = reqFn(upstream.url, {
       method: 'GET',
       path: upstreamPath,
       headers: outHeaders,
       ...(isHttps ? { rejectUnauthorized } : {}),
     })
+    this.cancelUpstreams.add(cancel)
+    clientSocket.once('close', cancel)
+    clientSocket.once('end', cancel)
+    clientSocket.on('error', cancel)
 
     proxyReq.on('upgrade', (proxyRes, proxySocket, proxyHead) => {
+      upstreamResponse = proxyRes
+      upstreamSocket = proxySocket
+      proxySocket.on('error', cancel)
+      proxySocket.once('close', cancel)
+      proxySocket.once('end', cancel)
+      if (cancelled || this.stopped || clientSocket.destroyed) { cancel(); proxySocket.destroy(); return }
       let rawResponse = `HTTP/1.1 ${proxyRes.statusCode ?? 101} ${proxyRes.statusMessage ?? 'Switching Protocols'}\r\n`
       for (let i = 0; i < proxyRes.rawHeaders.length; i += 2) {
         const k = proxyRes.rawHeaders[i]
@@ -1075,30 +1220,22 @@ export class NativeDeviceProxy {
       if (proxyHead.byteLength > 0) clientSocket.write(proxyHead)
       if (head.byteLength > 0) proxySocket.write(head)
       proxySocket.pipe(clientSocket).pipe(proxySocket)
-      proxySocket.on('error', () => clientSocket.destroy())
-      clientSocket.on('error', () => proxySocket.destroy())
     })
 
     proxyReq.on('response', (proxyRes) => {
+      upstreamResponse = proxyRes
+      proxyRes.on('error', cancel)
+      if (cancelled || this.stopped || clientSocket.destroyed) { proxyRes.destroy(); cancel(); return }
       const status = proxyRes.statusCode ?? 403
       if (status === 401 || status === 403) {
-        void this.recoverAuthentication(upstreamBase, status).then((recovered) => {
-          if (!recovered) {
-            this.hooks.onAuthState?.(
-              this.device.id,
-              'required',
-              `Remote DSH WebSocket returned HTTP ${status}`,
-            )
-          }
-        })
+        void this.recoverAuthentication(upstreamBase, status).catch(() => { /* recovery is best effort */ })
       }
+      // Rejection bodies can be infinite too; do not leave an unread response alive.
+      proxyRes.destroy()
       clientSocket.end(`HTTP/1.1 ${status} ${proxyRes.statusMessage ?? 'Rejected'}\r\nConnection: close\r\n\r\n`)
     })
 
-    proxyReq.on('error', () => {
-      clientSocket.destroy()
-    })
-
+    proxyReq.on('error', cancel)
     proxyReq.end()
   }
 }
@@ -1126,15 +1263,17 @@ export class NativeProxyManager {
         this.hooks,
       )
       this.proxies.set(device.id, proxy)
-      try {
-        await proxy.start(device.nativeProxyPort)
-      } catch {
-        this.proxies.delete(device.id)
-        return undefined
-      }
     } else {
       proxy.updateDevice(device)
     }
+    try {
+      await proxy.start(device.nativeProxyPort)
+    } catch {
+      proxy.stop()
+      if (this.proxies.get(device.id) === proxy) this.proxies.delete(device.id)
+      return undefined
+    }
+    if (this.proxies.get(device.id) !== proxy) return undefined
     return proxy.proxyUrl()
   }
 
@@ -1222,9 +1361,10 @@ function decodeHtmlBody(raw: Buffer, encoding: string | undefined): Buffer | und
   const normalized = (encoding ?? '').trim().toLowerCase()
   if (normalized === '' || normalized === 'identity') return raw
   try {
-    if (normalized === 'gzip' || normalized === 'x-gzip') return gunzipSync(raw)
-    if (normalized === 'deflate') return inflateSync(raw)
-    if (normalized === 'br') return brotliDecompressSync(raw)
+    const options = { maxOutputLength: MAX_INJECTABLE_HTML_BYTES }
+    if (normalized === 'gzip' || normalized === 'x-gzip') return gunzipSync(raw, options)
+    if (normalized === 'deflate') return inflateSync(raw, options)
+    if (normalized === 'br') return brotliDecompressSync(raw, options)
   } catch {
     return undefined
   }

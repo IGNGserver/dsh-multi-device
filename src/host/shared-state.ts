@@ -14,6 +14,8 @@
  * @module dsh-multi-device/host/shared-state
  */
 
+import { randomUUID } from 'node:crypto'
+
 export interface SharedReadEntry {
   readonly unread: boolean
   readonly at: number
@@ -66,7 +68,26 @@ export function parseSharedReadDocument(text: string): SharedReadDocument | unde
   try {
     raw = JSON.parse(text) as unknown
   } catch {
-    return undefined
+    // Read commands frame whole JSON documents, including pretty legacy files.
+    const parts = text.includes('\u001e') ? text.split('\u001e') : text.split(/\r?\n/)
+    const hosts: Record<string, SharedReadHostSection> = {}
+    let valid = false
+    for (const part of parts) {
+      if (part.trim() === '') continue
+      let document: SharedReadDocument | undefined
+      try {
+        // Parse each frame once; do not recursively split malformed fragments.
+        const candidate = JSON.parse(part) as unknown
+        document = parseSharedReadDocument(JSON.stringify(candidate))
+      } catch { continue }
+      if (document === undefined) continue
+      valid = true
+      for (const [id, section] of Object.entries(document.hosts)) {
+        if (hosts[id] === undefined && Object.keys(hosts).length >= SHARED_READ_HOST_LIMIT) continue
+        if (hosts[id] === undefined || section.updatedAt >= hosts[id].updatedAt) hosts[id] = section
+      }
+    }
+    return valid ? { version: 1, hosts } : undefined
   }
   if (typeof raw !== 'object' || raw === null) return undefined
   const doc = raw as { version?: unknown; hosts?: unknown }
@@ -177,18 +198,26 @@ function shellQuote(value: string): string {
 
 /** Read command; a missing file is an empty document, not a failure. */
 export function buildReadSharedStateCommand(path: string): string {
-  return `cat ${shellQuote(path)} 2>/dev/null || true`
+  return `if [ -f ${shellQuote(path)} ]; then cat ${shellQuote(path)}; printf '\\036'; fi; for f in ${shellQuote(`${path}.hosts`)}/*.json; do [ -f "$f" ] || continue; cat "$f"; printf '\\036'; done`
 }
 
 /** Atomic write through a sibling temp file, with GNU/BSD base64 fallback. */
-export function buildWriteSharedStateCommand(path: string, document: SharedReadDocument): string {
+export function buildWriteSharedStateCommand(path: string, document: SharedReadDocument, hostId?: string): string {
+  // Concurrent Hosts never replace one shared read/merge/write snapshot. Each
+  // owns one atomic file; readers merge the independent documents (plus legacy).
+  if (hostId !== undefined) {
+    if (!/^[A-Za-z0-9-]{1,80}$/.test(hostId)) throw new Error('Invalid shared state Host id')
+    path = `${path}.hosts/${hostId}.json`
+    document = { version: 1, hosts: { [hostId]: document.hosts[hostId] ?? { updatedAt: 0, sessions: {} } } }
+  }
   const text = JSON.stringify(document)
   const encoded = Buffer.from(text, 'utf8').toString('base64')
   const slash = path.lastIndexOf('/')
   const dir = slash > 0 ? path.slice(0, slash) : '.'
-  const tmp = `${path}.tmp`
+  const tmp = `${path}.${randomUUID()}.tmp`
   const script = [
-    `umask 077; mkdir -p ${shellQuote(dir)}`,
+    `set -e; umask 077; mkdir -p ${shellQuote(dir)}`,
+    `trap 'rm -f ${shellQuote(tmp).replaceAll("'", "'\\''")}' EXIT HUP INT TERM`,
     `if printf %s ${shellQuote(encoded)} | base64 -d > ${shellQuote(tmp)} 2>/dev/null; then`,
     `  mv -f ${shellQuote(tmp)} ${shellQuote(path)}`,
     'else',

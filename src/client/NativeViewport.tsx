@@ -50,7 +50,7 @@ import { UnreadCountBadge } from './UnreadCountBadge.tsx'
 import { useSessionSummary } from './clientServices.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
 import { SessionDeviceChip } from './SessionDeviceChip.tsx'
-import { nativePaneTarget, resolveSameSiteProxyUrl, shouldShowNativePane } from './nativePane.ts'
+import { nativePaneTarget, nativeProxyEmbeddingError, resolveSameSiteProxyUrl, shouldShowNativePane } from './nativePane.ts'
 import { clientStore, deviceStateToDotState, useMultiDeviceState } from './state.ts'
 import { countableUnreadIds, unreadCountForDevice } from './unreadCounts.ts'
 
@@ -66,11 +66,22 @@ function getDesktopBrowserBridge(): DesktopBrowserBridgeLike | undefined {
   return desktop?.protocolVersion === 1 ? desktop.browser : undefined
 }
 
+function postWebviewVisibility(webview: HTMLElement, visible: boolean): void {
+  try {
+    const pending = (webview as HTMLElement & {
+      executeJavaScript?: (code: string) => Promise<unknown>
+    }).executeJavaScript?.(
+      `window.postMessage(${JSON.stringify({ __dshMdVisibility: true, visible })}, '*')`,
+    )
+    if (pending !== undefined) void pending.catch(() => { /* guest not ready */ })
+  } catch { /* guest may not be attached yet */ }
+}
+
 /**
  * Single device's persistent frame (Electron `<webview>` when available and permitted,
  * or standard authenticated `<iframe>`).
  */
-function KeepAliveDeviceFrame({
+export function KeepAliveDeviceFrame({
   device,
   active,
   reloadCount,
@@ -83,7 +94,8 @@ function KeepAliveDeviceFrame({
   t: (key: MultiDeviceLocaleKey) => string
   onOpenSettings: () => void
 }): React.ReactElement {
-  const proxyUrl = resolveSameSiteProxyUrl(device.nativeProxyUrl)
+  const embeddingError = nativeProxyEmbeddingError(device.nativeProxyUrl)
+  const proxyUrl = embeddingError === undefined ? resolveSameSiteProxyUrl(device.nativeProxyUrl) : undefined
   const targetUrl = proxyUrl === undefined ? undefined : (() => {
     try {
       const url = new URL(proxyUrl)
@@ -97,8 +109,9 @@ function KeepAliveDeviceFrame({
   const containerRef = useRef<HTMLDivElement | null>(null)
   const frameRef = useRef<HTMLDivElement | null>(null)
   const activeRef = useRef(active)
-  const webviewLeaseRef = useRef<string | undefined>(undefined)
-  const [webviewFailed, setWebviewFailed] = useState(false)
+  const attemptKey = `${device.id}:${targetUrl ?? ''}:${reloadCount}`
+  const [failedAttempt, setFailedAttempt] = useState<string | undefined>(undefined)
+  const useDesktopWebview = getDesktopBrowserBridge() !== undefined && failedAttempt !== attemptKey
   const [reconnectError, setReconnectError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -126,15 +139,8 @@ function KeepAliveDeviceFrame({
       // Electron `<webview>` guests expose no `contentWindow`; post the same
       // message from inside the guest so a desktop tab does not depend on the
       // in-page IntersectionObserver alone to report visibility.
-      const webview = wrapper.querySelector<HTMLElement & {
-        executeJavaScript?: (code: string) => Promise<unknown>
-      }>('webview')
-      try {
-        const pending = webview?.executeJavaScript?.(
-          `window.postMessage(${JSON.stringify(message)}, '*')`,
-        )
-        if (pending !== undefined) void pending.catch(() => { /* guest not ready */ })
-      } catch { /* guest may not be attached yet */ }
+      const webview = wrapper.querySelector<HTMLElement>('webview')
+      if (webview !== null) postWebviewVisibility(webview, active)
     }
     postVisibility()
     const first = window.setTimeout(postVisibility, 150)
@@ -144,7 +150,7 @@ function KeepAliveDeviceFrame({
       window.clearTimeout(first)
       window.clearTimeout(second)
     }
-  }, [active, targetUrl])
+  }, [active, targetUrl, reloadCount, useDesktopWebview])
 
   // Switching a tab changes visibility, but does not move DOM focus. Without a
   // deliberate handoff, keystrokes and Ctrl/Cmd+C can stay in the previous
@@ -168,70 +174,66 @@ function KeepAliveDeviceFrame({
   }, [active])
 
   useEffect(() => {
-    setWebviewFailed(false)
-    if (authRequired) return
+    if (authRequired || !useDesktopWebview) return
     const bridge = getDesktopBrowserBridge()
     const container = containerRef.current
     if (bridge === undefined || container === null || targetUrl === undefined) return
 
     let cancelled = false
     let currentEl: HTMLElement | undefined
+    let lease: string | undefined
+    const release = (): void => {
+      const owned = lease
+      lease = undefined
+      if (owned !== undefined) void bridge.release(owned).catch(() => {})
+    }
+    const fail = (): void => {
+      if (!cancelled) setFailedAttempt(attemptKey)
+    }
 
-    void bridge
-      .acquire(`multi-device:${device.id}`)
-      .then((reservation) => {
-        if (cancelled || containerRef.current === null) {
-          void bridge.release(reservation.lease)
-          return
-        }
-        webviewLeaseRef.current = reservation.lease
-        const webview = document.createElement('webview')
-        webview.className = 'dsh-md-native-iframe'
-        webview.setAttribute('name', reservation.lease)
-        webview.setAttribute('partition', reservation.partition)
-        webview.setAttribute('allowpopups', '')
-        webview.setAttribute('src', `about:blank#${reservation.lease}`)
-        webview.addEventListener('did-fail-load', () => {
-          if (!cancelled) setWebviewFailed(true)
-        }, { once: true })
-        webview.addEventListener(
-          'dom-ready',
-          () => {
-            try {
-              if (activeRef.current) webview.focus()
-            } catch { /* focus is best-effort */ }
-            try {
-              const wv = webview as unknown as { getURL?: () => string; loadURL?: (u: string) => Promise<void> }
-              if (wv.getURL?.().startsWith('about:blank#')) {
-                void wv.loadURL?.(targetUrl)
-              }
-            } catch {
-              if (!cancelled) setWebviewFailed(true)
-            }
-          },
-          { once: true },
-        )
-        currentEl = webview
-        container.innerHTML = ''
-        container.appendChild(webview)
+    void bridge.acquire(`multi-device:${device.id}`).then((reservation) => {
+      lease = reservation.lease
+      if (cancelled || containerRef.current !== container) {
+        release()
+        return
+      }
+      const webview = document.createElement('webview')
+      currentEl = webview
+      webview.className = 'dsh-md-native-iframe'
+      webview.setAttribute('name', reservation.lease)
+      webview.setAttribute('partition', reservation.partition)
+      webview.setAttribute('allowpopups', '')
+      webview.setAttribute('src', `about:blank#${reservation.lease}`)
+      webview.addEventListener('did-fail-load', fail, { once: true })
+      webview.addEventListener('dom-ready', () => {
+        if (!cancelled) postWebviewVisibility(webview, activeRef.current)
       })
-      .catch(() => {
-        // Fall back to the standard authenticated iframe below.
-        if (!cancelled) setWebviewFailed(true)
-      })
+      webview.addEventListener('dom-ready', () => {
+        if (cancelled) return
+        try {
+          if (activeRef.current) webview.focus()
+        } catch { /* focus is best-effort */ }
+        try {
+          const wv = webview as unknown as { getURL?: () => string; loadURL?: (u: string) => Promise<void> }
+          if (wv.getURL?.().startsWith('about:blank#')) {
+            void wv.loadURL?.(targetUrl)?.then(() => {
+              if (!cancelled) postWebviewVisibility(webview, activeRef.current)
+            }).catch(fail)
+          }
+        } catch { fail() }
+      }, { once: true })
+      container.appendChild(webview)
+    }).catch(fail)
 
     return () => {
       cancelled = true
       currentEl?.remove()
-      const lease = webviewLeaseRef.current
-      webviewLeaseRef.current = undefined
-      if (lease !== undefined) {
-        void bridge.release(lease).catch(() => {})
-      }
+      release()
     }
-  }, [device.id, targetUrl, reloadCount, authRequired])
-
-  const useDesktopWebview = getDesktopBrowserBridge() !== undefined && !webviewFailed
+    // A failed attempt renders an iframe. Retrying changes attemptKey during
+    // render, so the container exists BEFORE this effect reacquires a lease.
+    // Each effect owns its lease, including late acquire results after unmount.
+  }, [device.id, targetUrl, attemptKey, authRequired, useDesktopWebview])
 
   return (
     <div
@@ -251,7 +253,7 @@ function KeepAliveDeviceFrame({
           <StateDot state={deviceStateToDotState(device.state)} size={12} />
           <div className="dsh-md-row-name">{device.name}</div>
           <div className="dsh-md-pref-desc">
-            {reconnectError ?? device.lastError ?? device.targetSummary}
+            {embeddingError ?? reconnectError ?? device.lastError ?? device.targetSummary}
           </div>
           <Button
             variant="primary"

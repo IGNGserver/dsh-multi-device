@@ -10,9 +10,7 @@
  * @module dsh-multi-device/host/registry
  */
 import { randomUUID } from 'node:crypto'
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname } from 'node:path'
 import {
   type DeviceAuthState,
   type DeviceCatalogCache,
@@ -37,6 +35,7 @@ import {
   type WorkspaceAggregationConfig,
 } from '../contract.ts'
 import { DeviceAuthManager } from './auth.ts'
+import { JsonSnapshotFile } from './storage.ts'
 import {
   DEFAULT_AGGREGATION_CONFIG,
   discoverRemoteGitRemotesViaSsh,
@@ -304,6 +303,8 @@ export class DeviceRegistry {
   private readonly sharedReadStateInitialized = new Set<DeviceId>()
   private readonly sharedReadStatePushTimers = new Map<DeviceId, ReturnType<typeof setTimeout>>()
 
+  private readonly storage: JsonSnapshotFile
+
   constructor(
     private readonly dataFilePath: string,
     secretsFilePath: string,
@@ -315,6 +316,7 @@ export class DeviceRegistry {
       allowDirectTransport?: boolean
     } = {},
   ) {
+    this.storage = new JsonSnapshotFile(dataFilePath, value => value.version === 1 && Array.isArray(value.devices))
     this.authManager = new DeviceAuthManager(secretsFilePath)
     this.nativeProxyManager = new NativeProxyManager(
       this.authManager,
@@ -769,7 +771,7 @@ export class DeviceRegistry {
       const doc = buildSharedReadDocument(existing, this.hostId, sessions, Date.now())
       await execSshCommand(
         target.transport,
-        buildWriteSharedStateCommand(target.path, doc),
+        buildWriteSharedStateCommand(target.path, doc, this.hostId),
         15_000,
       )
     } catch {
@@ -1023,12 +1025,13 @@ export class DeviceRegistry {
    */
   setDisplayMode(mode: DisplayMode): void {
     if (this.displayMode === mode) return
+    this.storage.assertWritable()
+    const previous = this.displayMode
     this.displayMode = mode
-    // Entering Native Mode from an aggregated remote Session must land on the
-    // owning device tab showing that conversation, not on 本机. The proxy keeps
-    // the command queued until the frame's bridge is ready.
+    try { this.saveToDisk() }
+    catch (error) { this.displayMode = previous; throw error }
+    // Publish navigation only after the requested mode is durably accepted.
     if (mode === 'native') this.openActiveRemoteSessionInNative()
-    this.saveToDisk()
     this.bumpRevision()
     this.notifyWorkspacesChanged()
     this.syncNativePaneEmbedding()
@@ -1116,6 +1119,8 @@ export class DeviceRegistry {
     if (id === LOCAL_DEVICE_ID) {
       return { ok: false, error: '"local" is a reserved device ID' }
     }
+    this.storage.assertWritable()
+    this.authManager.assertWritable()
     const previous = this.configs.get(id)
 
     const config: DeviceConfig = {
@@ -1131,22 +1136,34 @@ export class DeviceRegistry {
         : {}),
     }
 
-    if (input.auth?.credential !== undefined) {
-      this.authManager.setAuthCredential(id, input.auth.credential)
-    }
-    if (input.transport.kind === 'ssh') {
-      const keyPath = input.transport.privateKeyPath?.trim() ?? ''
-      if (input.transport.passphrase !== undefined && input.transport.passphrase.trim() !== '') {
-        this.authManager.setSshPassphrase(id, input.transport.passphrase)
-      } else if (keyPath === '') {
-        // Switching back to Auto (SSH Agent / default keys) clears any old encrypted-key passphrase.
-        this.authManager.setSshPassphrase(id, null)
-      }
-    }
+    const previousSecret = this.authManager.snapshotDevice(id)
     const sanitized = sanitizeDeviceConfig(config)
-    this.configs.set(id, sanitized)
+    try {
+      if (input.auth?.credential !== undefined) {
+        this.authManager.setAuthCredential(id, input.auth.credential)
+      }
+      if (input.transport.kind === 'ssh') {
+        const keyPath = input.transport.privateKeyPath?.trim() ?? ''
+        if (input.transport.passphrase !== undefined && input.transport.passphrase.trim() !== '') {
+          this.authManager.setSshPassphrase(id, input.transport.passphrase)
+        } else if (keyPath === '') {
+          // Switching to SSH Agent / default keys clears an encrypted-key passphrase.
+          this.authManager.setSshPassphrase(id, null)
+        }
+      }
+      this.configs.set(id, sanitized)
+      this.saveToDisk()
+    } catch (error) {
+      if (previous === undefined) this.configs.delete(id)
+      else this.configs.set(id, previous)
+      try { this.authManager.restoreDevice(id, previousSecret) }
+      catch (rollbackError) {
+        throw new AggregateError([error, rollbackError],
+          `${error instanceof Error ? error.message : String(error)}; credential rollback also failed`, { cause: error })
+      }
+      throw error
+    }
     this.authStates.delete(id)
-    this.saveToDisk()
 
     const client = await this.mountClient(sanitized)
     this.bumpRevision()
@@ -1157,14 +1174,29 @@ export class DeviceRegistry {
   removeDevice(deviceId: DeviceId): boolean {
     const existing = this.configs.get(deviceId)
     if (existing === undefined) return false
-    this.configs.delete(deviceId)
+    this.storage.assertWritable()
+    this.authManager.assertWritable()
+    // Compensate ordinary IO failures; independent files are not crash-atomic.
+    const previousSecret = this.authManager.snapshotDevice(deviceId)
+    try {
+      this.authManager.removeDevice(deviceId)
+      this.configs.delete(deviceId)
+      this.saveToDisk()
+    } catch (error) {
+      this.configs.set(deviceId, existing)
+      try { this.authManager.restoreDevice(deviceId, previousSecret) }
+      catch (rollbackError) {
+        throw new AggregateError([error, rollbackError],
+          `${error instanceof Error ? error.message : String(error)}; credential rollback also failed`, { cause: error })
+      }
+      throw error
+    }
     const client = this.clients.get(deviceId)
     if (client !== undefined) {
       client.stop()
       this.clients.delete(deviceId)
     }
     this.nativeProxyManager.removeProxy(deviceId)
-    this.authManager.removeDevice(deviceId)
     this.authStates.delete(deviceId)
     this.catalogs.delete(deviceId)
     for (const key of this.nativePanes.keys()) {
@@ -1185,7 +1217,7 @@ export class DeviceRegistry {
     for (const [key, value] of this.paneEmbeddedDevices) {
       if (value === deviceId) this.paneEmbeddedDevices.delete(key)
     }
-    this.saveToDisk()
+    this.schedulePersist()
     this.bumpRevision()
     this.notifyWorkspacesChanged()
     return true
@@ -1529,12 +1561,19 @@ export class DeviceRegistry {
     }
   }
 
-  updateAggregationConfig(patch: Partial<WorkspaceAggregationConfig>): WorkspaceAggregationConfig {
-    const updated = this.aggregator.setConfig(patch)
-    this.saveToDisk()
+  mutateAggregation(change: () => WorkspaceAggregationConfig): WorkspaceAggregationConfig {
+    this.storage.assertWritable()
+    const previous = this.aggregator.getConfig()
+    let updated: WorkspaceAggregationConfig
+    try { updated = change(); this.saveToDisk() }
+    catch (error) { this.aggregator.setConfig(previous); throw error }
     this.bumpRevision()
     this.notifyWorkspacesChanged()
     return updated
+  }
+
+  updateAggregationConfig(patch: Partial<WorkspaceAggregationConfig>): WorkspaceAggregationConfig {
+    return this.mutateAggregation(() => this.aggregator.setConfig(patch))
   }
 
   /** Wire the local Workspace controller so a match can register local folders. */
@@ -1829,6 +1868,8 @@ export class DeviceRegistry {
 
   /** Update and persist display preferences; unknown keys are ignored by the type. */
   updateUiPreferences(patch: Partial<MultiDeviceUiPreferences>): MultiDeviceUiPreferences {
+    this.storage.assertWritable()
+    const previous = this.uiPreferences
     this.uiPreferences = {
       sessionRowDeviceDot: patch.sessionRowDeviceDot === undefined
         ? this.uiPreferences.sessionRowDeviceDot
@@ -1840,7 +1881,8 @@ export class DeviceRegistry {
         ? this.uiPreferences.crossHostReadState
         : patch.crossHostReadState === true,
     }
-    this.saveToDisk()
+    try { this.saveToDisk() }
+    catch (error) { this.uiPreferences = previous; throw error }
     this.bumpRevision()
     this.syncNativePaneEmbedding()
     this.syncSharedReadStateTimer()
@@ -2030,10 +2072,10 @@ export class DeviceRegistry {
   }
 
   private loadFromDisk(): void {
-    if (!existsSync(this.dataFilePath)) return
     let migratedSecrets = false
     try {
-      const raw = JSON.parse(readFileSync(this.dataFilePath, 'utf8')) as Partial<PersistedRegistryDocument>
+      const raw = this.storage.read<Partial<PersistedRegistryDocument>>()
+      if (raw === undefined) return
       if (typeof raw.hostId === 'string' && /^[A-Za-z0-9-]{8,80}$/.test(raw.hostId)) {
         this.hostId = raw.hostId
       }
@@ -2153,9 +2195,6 @@ export class DeviceRegistry {
   }
 
   saveToDisk(): void {
-    const dir = dirname(this.dataFilePath)
-    mkdirSync(dir, { recursive: true })
-    const tmp = `${this.dataFilePath}.${randomUUID()}.tmp`
     const readEntries = this.readTracker.entriesSnapshot()
     const doc: PersistedRegistryDocument = {
       version: 1,
@@ -2175,14 +2214,7 @@ export class DeviceRegistry {
         ? { readState: { entries: readEntries } }
         : {}),
     }
-    try {
-      writeFileSync(tmp, JSON.stringify(doc, null, 2), { mode: 0o600 })
-      try { chmodSync(tmp, 0o600) } catch { /* Windows fallback */ }
-      copyFileSync(tmp, this.dataFilePath)
-      try { chmodSync(this.dataFilePath, 0o600) } catch { /* Windows fallback */ }
-    } finally {
-      try { unlinkSync(tmp) } catch { /* sibling may not exist if the write failed */ }
-    }
+    this.storage.write(doc)
   }
 }
 
@@ -2213,8 +2245,10 @@ function trimCatalog(cache: DeviceCatalogCache): DeviceCatalogCache {
   const workspaces = cache.workspaces.length > CATALOG_WORKSPACE_LIMIT
     ? cache.workspaces.slice(0, CATALOG_WORKSPACE_LIMIT)
     : cache.workspaces
-  const archivedSessionIds = cache.archivedSessionIds.slice(0, CATALOG_ID_LIMIT)
-  const pinnedSessionIds = cache.pinnedSessionIds.slice(0, CATALOG_ID_LIMIT)
+  const archivedSessionIds = cache.archivedSessionIds.length > CATALOG_ID_LIMIT
+    ? cache.archivedSessionIds.slice(0, CATALOG_ID_LIMIT) : cache.archivedSessionIds
+  const pinnedSessionIds = cache.pinnedSessionIds.length > CATALOG_ID_LIMIT
+    ? cache.pinnedSessionIds.slice(0, CATALOG_ID_LIMIT) : cache.pinnedSessionIds
   const trimmed =
     sessions !== cache.sessions ||
     workspaces !== cache.workspaces ||
@@ -2226,7 +2260,7 @@ function trimCatalog(cache: DeviceCatalogCache): DeviceCatalogCache {
     workspaces,
     archivedSessionIds,
     pinnedSessionIds,
-    ...(trimmed ? { catalogTruncated: true } : {}),
+    catalogTruncated: trimmed,
   }
 }
 
