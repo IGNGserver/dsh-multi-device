@@ -275,7 +275,9 @@ const EMPTY_SNAPSHOT: MultiDeviceSnapshot = {
   },
 }
 
-class MultiDeviceClientStore {
+export class MultiDeviceClientStore {
+  readonly clientId = CLIENT_INSTANCE_ID
+  private mainViewVisible = true
   private state: MultiDeviceClientState
   private readonly listeners = new Set<() => void>()
   private eventSource: EventSource | undefined
@@ -285,6 +287,7 @@ class MultiDeviceClientStore {
   private started = false
   /** Latest Session reported to the Host, used to dedupe mount/cleanup races. */
   private reportedSessionId: string | undefined
+  private reportingSessionId: string | undefined
   private activeSessionInFlight: Promise<void> | undefined
   /** Monotonic control-plane sequence so an older HTTP request cannot win. */
   private activeSessionSeq = 0
@@ -375,7 +378,7 @@ class MultiDeviceClientStore {
     if (typeof EventSource === 'undefined' || !this.started) return
     this.eventSource?.close()
     try {
-      const es = new EventSource('/multi-device/events')
+      const es = new EventSource(`/multi-device/events?clientId=${encodeURIComponent(this.clientId)}`)
       this.eventSource = es
       es.addEventListener('snapshot', (ev) => {
         this.sseAttempt = 0
@@ -411,6 +414,7 @@ class MultiDeviceClientStore {
       this.state.loading ||
       this.state.error !== undefined
     if (!shouldApplySnapshot(previous, snap, force)) return
+    if (snap.hostEpoch !== previous.hostEpoch) this.reportedSessionId = undefined
     const configuredIds = new Set(snap.devices.map(device => device.id))
     const keepAliveEligible = new Set(
       snap.devices.filter(device => device.keepNativeAlive !== false).map(device => device.id),
@@ -493,6 +497,7 @@ class MultiDeviceClientStore {
   private clearUnreadForActiveSession(snap: MultiDeviceSnapshot): void {
     const active = this.state.activeSessionId
     if (active === undefined) return
+    if (this.effectiveSessionId() !== active) return
     if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
     const unread = snap.unreadSessionIds ?? []
     if (!unread.includes(active)) return
@@ -609,6 +614,7 @@ class MultiDeviceClientStore {
     if (this.state.displayMode !== 'native') return
     storeActiveNativeDevice(undefined)
     this.setState({ activeNativeDeviceId: undefined })
+    this.clearUnreadForActiveSession(this.state.snapshot)
   }
 
   releaseKeepAliveDevice(deviceId: DeviceId): void {
@@ -648,31 +654,43 @@ class MultiDeviceClientStore {
    * Session owner's catalog, so a remote conversation never mixes in local
    * models (and vice versa).
    */
+  /** The local mirror remains mounted behind native tabs/global panels. */
+  effectiveSessionId(): string | undefined {
+    if (!this.mainViewVisible) return undefined
+    if (this.state.displayMode === 'native' && this.state.activeNativeDeviceId !== undefined) return undefined
+    return this.state.activeSessionId
+  }
+
+  setMainViewVisible(visible: boolean): void {
+    if (this.mainViewVisible === visible) return
+    this.mainViewVisible = visible
+    this.setState({})
+  }
+
   setActiveSession(sessionId: string | undefined): Promise<void> {
-    const next = sessionId === undefined || sessionId === '' ? undefined : sessionId
-    if (this.reportedSessionId === next) {
-      return this.activeSessionInFlight ?? Promise.resolve()
-    }
-    this.reportedSessionId = next
-    this.setState({
-      ...(next !== undefined ? { activeSessionId: next } : { activeSessionId: undefined }),
-    })
-    if (next !== undefined) {
-      const decoded = decodeSessionId(next)
-      if (decoded.isRemote) this.ensureKeepAliveDevice(decoded.deviceId)
-    }
+    const next = sessionId || undefined
+    if (this.state.activeSessionId !== next) this.setState({ activeSessionId: next })
+    if (next !== undefined && decodeSessionId(next).isRemote) this.ensureKeepAliveDevice(decodeSessionId(next).deviceId)
+    this.clearUnreadForActiveSession(this.state.snapshot)
+    if (this.reportedSessionId === next && this.activeSessionInFlight === undefined) return Promise.resolve()
+    if (this.activeSessionInFlight !== undefined && this.reportingSessionId === next) return this.activeSessionInFlight
     const requestSeq = ++this.activeSessionSeq
+    this.reportingSessionId = next
     const promise = this.callControlPlane<{ accepted: true }>({
-      action: 'setActiveSession',
-      payload: { sessionId: next ?? '', requestSeq, clientId: CLIENT_INSTANCE_ID },
-    }).then(() => undefined)
+      action: 'setActiveSession', payload: { sessionId: next ?? '', requestSeq },
+    }).then(result => {
+      if (result.ok && requestSeq === this.activeSessionSeq) this.reportedSessionId = next
+    }).finally(() => {
+      if (this.activeSessionInFlight === promise) this.activeSessionInFlight = undefined
+    })
     this.activeSessionInFlight = promise
+    this.clearUnreadForActiveSession(this.state.snapshot)
     return promise
   }
 
   /** Clear the scope only when the unmounting Session is still the reported one. */
   clearActiveSession(sessionId: string): void {
-    if (this.reportedSessionId !== sessionId) return
+    if (this.state.activeSessionId !== sessionId) return
     void this.setActiveSession(undefined)
   }
 
@@ -716,7 +734,7 @@ class MultiDeviceClientStore {
       const response = await fetch('/multi-device/api', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(request),
+        body: JSON.stringify({ ...request, payload: { ...request.payload, clientId: this.clientId } }),
       })
       const data = (await response.json()) as { ok: true; value: T } | { ok: false; error: string }
       return data
@@ -731,7 +749,10 @@ class MultiDeviceClientStore {
   async refreshSnapshot(): Promise<void> {
     const res = await this.callControlPlane<MultiDeviceSnapshot>({ action: 'snapshot' })
     if (res.ok) {
+      const epochChanged = res.value.hostEpoch !== this.state.snapshot.hostEpoch
       this.applyIncomingSnapshot(res.value)
+      if (epochChanged) this.reportedSessionId = undefined
+      void this.setActiveSession(this.state.activeSessionId)
     } else {
       this.setState({ loading: false, error: res.error })
     }

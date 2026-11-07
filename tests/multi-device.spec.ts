@@ -401,8 +401,10 @@ describe('0b. Host-owned read state and native page state', () => {
     try {
       expect(registry.snapshot().unreadSessionIds).toEqual([remoteId, remoteId2])
       expect(registry.nativeGroupState(DeviceId('dev-a'))).toEqual({ 'ws-1': true, 'ws-2': false })
-      // Opening a remote Session through the aggregated page clears exactly it.
+      // Selection is not presence; a visible client explicitly acknowledges read.
       registry.setActiveSession(remoteId, 1)
+      expect(registry.snapshot().unreadSessionIds).toEqual([remoteId, remoteId2])
+      registry.markSessionRead(remoteId)
       expect(registry.snapshot().unreadSessionIds).toEqual([remoteId2])
       const plane = new MultiDeviceControlPlane(registry, () => true)
       const cleared = await plane.dispatch({
@@ -417,6 +419,8 @@ describe('0b. Host-owned read state and native page state', () => {
       registry.observeLocalSessionStatus('local-1', false)
       expect(registry.snapshot().unreadSessionIds).toEqual(['local-1'])
       registry.setActiveSession('local-1', 2)
+      expect(registry.snapshot().unreadSessionIds).toEqual(['local-1'])
+      registry.markSessionRead('local-1')
       expect(registry.snapshot().unreadSessionIds).toEqual([])
     } finally {
       registry.dispose()
@@ -1257,7 +1261,7 @@ describe('4c. New Session device switching', () => {
       expect(calls).toEqual([logicalId])
       expect(requested).toContainEqual({
         action: 'startSessionOnDevice',
-        payload: { logicalWorkspaceId: logicalId, deviceId: 'dev-ubuntu' },
+        payload: { logicalWorkspaceId: logicalId, deviceId: 'dev-ubuntu', clientId: expect.any(String) },
       })
     } finally {
       globalThis.fetch = originalFetch
@@ -1845,7 +1849,7 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
       const tokenRedirect = await fetch(proxyBase, { redirect: 'manual' })
       expect(tokenRedirect.status).toBe(302)
       const proxyCookie = tokenRedirect.headers.get('set-cookie')?.split(';')[0]
-      expect(proxyCookie).toContain('dsh-md-native=')
+      expect(proxyCookie).toMatch(/^dsh-md-native-[a-f0-9]+=/)
       const proxyRes = await fetch(proxyWithoutToken, {
         headers: { cookie: proxyCookie! },
       })
@@ -1971,7 +1975,10 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
       // 1b) A remote Session sees exactly the remote catalog, never local groups.
       const remoteSessionId = encodeRemoteSessionId(devId, 'rsess-1')
       expect(registry.setActiveSession(remoteSessionId, 1)).toBe(true)
-      const remoteCatalog = (await mockSessionController.modelCatalog()) as {
+      expect((await mockSessionController.modelCatalog()).groups).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'local-provider' })]))
+      const scopedCatalog = await new MultiDeviceControlPlane(registry).dispatch({ action: 'modelCatalog', payload: { sessionId: remoteSessionId } })
+      expect(scopedCatalog.ok).toBe(true)
+      const remoteCatalog = (scopedCatalog as { ok: true; value: unknown }).value as {
         groups: { id: string; models: { id: string }[] }[]
         routableProviders: string[]
       }
@@ -2477,7 +2484,7 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
       const nativeProxyBase = new URL(nativeProxyUrl)
       const tokenRedirect = await fetch(nativeProxyBase, { redirect: 'manual' })
       const nativeCookie = tokenRedirect.headers.get('set-cookie')?.split(';')[0]
-      expect(nativeCookie).toContain('dsh-md-native=')
+      expect(nativeCookie).toMatch(/^dsh-md-native-[a-f0-9]+=/)
       const wsProxyUrl = new URL('/api/events.mux', nativeProxyBase).href.replace(/^http:/, 'ws:')
       const wsClient = new WebSocket(wsProxyUrl, { headers: { cookie: nativeCookie! } })
       const echoed = await new Promise<string>((resolve, reject) => {

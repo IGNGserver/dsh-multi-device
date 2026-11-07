@@ -124,6 +124,7 @@ export function admitMultiDeviceRequest(ctx: Context, req: IncomingMessage): boo
 export interface ControlPlaneRequest {
   readonly action:
     | 'snapshot'
+    | 'modelCatalog'
     | 'diagnostics'
     | 'setDisplayMode'
     | 'upsertDevice'
@@ -357,16 +358,30 @@ export class MultiDeviceControlPlane {
     request: ControlPlaneRequest,
   ): Promise<{ ok: true; value: unknown } | { ok: false; error: string }> {
     const payload = request.payload ?? {}
+    const clientId = typeof payload.clientId === 'string' ? payload.clientId.slice(0, 128) : 'legacy'
     try {
       switch (request.action) {
         case 'snapshot':
-          return { ok: true, value: this.registry.snapshot() }
+          return { ok: true, value: this.registry.snapshot(clientId) }
+
+        case 'modelCatalog': {
+          const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId : undefined
+          const scope = this.registry.sessionScope(sessionId)
+          if (!this.registry.isAggregatedMode() || scope.kind !== 'remote') {
+            return { ok: false, error: 'A remote Session is required for this catalog' }
+          }
+          if (scope.client === undefined || !scope.client.isConnected()) {
+            return { ok: false, error: `Device ${scope.deviceName} is not connected` }
+          }
+          const catalog = await scope.client.invokeUnary('session', 'modelCatalog', {})
+          return { ok: true, value: catalog }
+        }
 
         case 'diagnostics':
           return {
             ok: true,
             value: buildDiagnostics(
-              this.registry.snapshot(),
+              this.registry.snapshot(clientId),
               readDiagnosticsClientReport(payload.client),
             ),
           }
@@ -377,7 +392,6 @@ export class MultiDeviceControlPlane {
           const requestSeq = typeof payload.requestSeq === 'number' && Number.isFinite(payload.requestSeq)
             ? payload.requestSeq
             : 0
-          const clientId = typeof payload.clientId === 'string' ? payload.clientId : ''
           this.registry.setActiveSession(sessionId, requestSeq, clientId)
           return { ok: true, value: { accepted: true as const } }
         }
@@ -390,7 +404,7 @@ export class MultiDeviceControlPlane {
           const changed = this.registry.markSessionRead(sessionId)
           return {
             ok: true,
-            value: { changed, snapshot: this.registry.snapshot() },
+            value: { changed, snapshot: this.registry.snapshot(clientId) },
           }
         }
 
@@ -402,7 +416,7 @@ export class MultiDeviceControlPlane {
           const changed = this.registry.markDeviceRead(String(deviceId) as DeviceId)
           return {
             ok: true,
-            value: { changed, snapshot: this.registry.snapshot() },
+            value: { changed, snapshot: this.registry.snapshot(clientId) },
           }
         }
 
@@ -421,14 +435,14 @@ export class MultiDeviceControlPlane {
             }
           }
           this.registry.setDisplayMode(mode)
-          return { ok: true, value: { snapshot: this.registry.snapshot() } }
+          return { ok: true, value: { snapshot: this.registry.snapshot(clientId) } }
         }
 
         case 'upsertDevice': {
           const input = payload as unknown as UpsertDeviceInput
           const res = await this.registry.upsertDevice(input)
           if (!res.ok) return res
-          return { ok: true, value: { device: res.device, snapshot: this.registry.snapshot() } }
+          return { ok: true, value: { device: res.device, snapshot: this.registry.snapshot(clientId) } }
         }
 
         case 'removeDevice': {
@@ -436,7 +450,7 @@ export class MultiDeviceControlPlane {
           if (deviceId === '') return { ok: false, error: 'Device id is required' }
           const removed = this.registry.removeDevice(deviceId)
           if (!removed) return { ok: false, error: 'Device is not configured' }
-          return { ok: true, value: { removed, snapshot: this.registry.snapshot() } }
+          return { ok: true, value: { removed, snapshot: this.registry.snapshot(clientId) } }
         }
 
         case 'reconnectDevice': {
@@ -444,7 +458,7 @@ export class MultiDeviceControlPlane {
           if (deviceId === '') return { ok: false, error: 'Device id is required' }
           const triggered = this.registry.reconnectDevice(deviceId)
           if (!triggered) return { ok: false, error: 'Device is not configured' }
-          return { ok: true, value: { triggered, snapshot: this.registry.snapshot() } }
+          return { ok: true, value: { triggered, snapshot: this.registry.snapshot(clientId) } }
         }
 
         case 'authenticateDevice': {
@@ -453,7 +467,7 @@ export class MultiDeviceControlPlane {
           const credential = typeof payload.credential === 'string' ? payload.credential : undefined
           const res = await this.registry.authenticateDevice(deviceId, credential)
           if (!res.ok) return res
-          return { ok: true, value: { ...res, snapshot: this.registry.snapshot() } }
+          return { ok: true, value: { ...res, snapshot: this.registry.snapshot(clientId) } }
         }
 
         case 'testDevice': {
@@ -474,21 +488,21 @@ export class MultiDeviceControlPlane {
           }
           const res = await this.registry.startSessionOnDevice(logicalWorkspaceId, deviceId)
           if (!res.ok) return res
-          return { ok: true, value: { ...res, snapshot: this.registry.snapshot() } }
+          return { ok: true, value: { ...res, snapshot: this.registry.snapshot(clientId) } }
         }
 
         case 'createSession': {
           const input = payload as unknown as RemoteSessionCreateInput
           const res = await this.registry.createRemoteSession(input)
           if (!res.ok) return res
-          return { ok: true, value: { ...res, snapshot: this.registry.snapshot() } }
+          return { ok: true, value: { ...res, snapshot: this.registry.snapshot(clientId) } }
         }
 
         case 'createRemoteWorkspace': {
           const input = payload as unknown as RemoteWorkspaceCreateInput
           const res = await this.registry.createRemoteWorkspace(input)
           if (!res.ok) return res
-          return { ok: true, value: { ...res, snapshot: this.registry.snapshot() } }
+          return { ok: true, value: { ...res, snapshot: this.registry.snapshot(clientId) } }
         }
 
         case 'updateAggregationConfig': {
@@ -498,7 +512,7 @@ export class MultiDeviceControlPlane {
           } catch (error) {
             return { ok: false, error: error instanceof Error ? error.message : String(error) }
           }
-          return { ok: true, value: this.registry.snapshot() }
+          return { ok: true, value: this.registry.snapshot(clientId) }
         }
 
         case 'upsertManualRule': {
@@ -506,7 +520,7 @@ export class MultiDeviceControlPlane {
           this.registry.aggregator.upsertManualRule(rule)
           this.registry.saveToDisk()
           this.registry.refreshWorkspaceView()
-          return { ok: true, value: this.registry.snapshot() }
+          return { ok: true, value: this.registry.snapshot(clientId) }
         }
 
         case 'removeManualRule': {
@@ -514,7 +528,7 @@ export class MultiDeviceControlPlane {
           this.registry.aggregator.removeManualRule(ruleId)
           this.registry.saveToDisk()
           this.registry.refreshWorkspaceView()
-          return { ok: true, value: this.registry.snapshot() }
+          return { ok: true, value: this.registry.snapshot(clientId) }
         }
 
         case 'setMemberExcluded': {
@@ -528,7 +542,7 @@ export class MultiDeviceControlPlane {
           } catch (error) {
             return { ok: false, error: error instanceof Error ? error.message : String(error) }
           }
-          return { ok: true, value: this.registry.snapshot() }
+          return { ok: true, value: this.registry.snapshot(clientId) }
         }
 
         case 'setUiPreferences': {
@@ -543,7 +557,7 @@ export class MultiDeviceControlPlane {
               ? { crossHostReadState: payload.crossHostReadState }
               : {}),
           })
-          return { ok: true, value: this.registry.snapshot() }
+          return { ok: true, value: this.registry.snapshot(clientId) }
         }
 
         case 'setPreferredDevice': {
@@ -552,13 +566,13 @@ export class MultiDeviceControlPlane {
           this.registry.aggregator.setPreferredDevice(logicalWorkspaceId, deviceId)
           this.registry.saveToDisk()
           this.registry.refreshWorkspaceView()
-          return { ok: true, value: this.registry.snapshot() }
+          return { ok: true, value: this.registry.snapshot(clientId) }
         }
 
         case 'startGitMatch': {
           const res = this.registry.startGitMatch()
           if (!res.ok) return res
-          return { ok: true, value: { gitMatch: this.registry.gitMatch(), snapshot: this.registry.snapshot() } }
+          return { ok: true, value: { gitMatch: this.registry.gitMatch(), snapshot: this.registry.snapshot(clientId) } }
         }
 
         case 'cancelGitMatch': {
@@ -572,7 +586,7 @@ export class MultiDeviceControlPlane {
           this.registry.aggregator.setCustomTitle(logicalWorkspaceId, title)
           this.registry.saveToDisk()
           this.registry.refreshWorkspaceView()
-          return { ok: true, value: this.registry.snapshot() }
+          return { ok: true, value: this.registry.snapshot(clientId) }
         }
 
         default:
@@ -595,7 +609,8 @@ export class MultiDeviceControlPlane {
     }
 
     if (req.method === 'GET') {
-      const snapshot: MultiDeviceSnapshot = this.registry.snapshot()
+      const clientId = readClientId(req)
+      const snapshot: MultiDeviceSnapshot = this.registry.snapshot(clientId)
       res.writeHead(200, {
         'content-type': 'application/json; charset=utf-8',
         'cache-control': 'no-store',
@@ -651,9 +666,10 @@ export class MultiDeviceControlPlane {
       'connection': 'keep-alive',
     })
 
+    const clientId = readClientId(req)
     const sendSnapshot = (): void => {
       try {
-        const snap = this.registry.snapshot()
+        const snap = this.registry.snapshot(clientId)
         res.write(`event: snapshot\ndata: ${JSON.stringify(snap)}\n\n`)
       } catch {
         // Ignore serialization failure
@@ -698,4 +714,10 @@ function readBody(req: IncomingMessage): Promise<Buffer | null> {
     req.on('end', () => resolve(Buffer.concat(chunks)))
     req.on('error', () => resolve(null))
   })
+}
+
+/** Client ids select navigation state, never authentication/authorization. */
+function readClientId(req: IncomingMessage): string {
+  try { return new URL(req.url ?? '/', 'http://localhost').searchParams.get('clientId')?.slice(0, 128) || 'legacy' }
+  catch { return 'legacy' }
 }

@@ -33,6 +33,10 @@ export interface StoredDeviceSecret {
   readonly bearerToken?: string
   /** Launch URL/token or explicit cookie/bearer credential entered by the user. */
   readonly authCredential?: string
+  /** Monotonic version of the user-supplied credential; absent in legacy records. */
+  readonly credentialVersion?: number
+  /** SHA-256 binding of transport target, auth policy and credential version/value. */
+  readonly cacheBinding?: string
   /** Passphrase for an encrypted local SSH private key. */
   readonly sshPassphrase?: string
   readonly updatedAt: number
@@ -269,6 +273,33 @@ export async function readRemoteCredentials(
   return { ok: false, error: details.join('; ') }
 }
 
+/** Bind derived credentials to the configured endpoint, never the ephemeral tunnel port. */
+function authenticationCacheBinding(device: DeviceConfig, stored: StoredDeviceSecret | undefined): string {
+  const transport = device.transport
+  const target = transport.kind === 'ssh'
+    ? [
+        'ssh', transport.host, transport.port ?? null, transport.username ?? null,
+        transport.privateKeyPath ?? null, transport.proxyJump ?? null, transport.engine ?? 'auto',
+        transport.remoteBindHost ?? '127.0.0.1', transport.remotePort ?? 3080,
+        transport.remoteDshHome?.trim() || '~/.dsh', transport.bootstrapFromRemoteCredentials === true,
+      ]
+    : ['direct', transport.baseUrl.replace(/\/+$/u, ''), transport.rejectUnauthorized !== false]
+  return createHash('sha256').update(JSON.stringify([
+    1, target, device.auth.mode,
+    device.auth.credential?.trim() || stored?.authCredential?.trim() || null,
+    stored?.credentialVersion ?? 0,
+  ])).digest('hex')
+}
+
+/** Remove only derived authentication material; preserve explicit credentials/passphrases. */
+function withoutCachedAuthentication(stored: StoredDeviceSecret): StoredDeviceSecret {
+  const {
+    cookie: _cookie, cookieAuthority: _authority, bearerToken: _bearer,
+    signingSecret: _secret, cacheBinding: _binding, ...rest
+  } = stored
+  return rest
+}
+
 /**
  * Manages persisted authentication state and headers for all configured devices.
  */
@@ -287,9 +318,17 @@ export class DeviceAuthManager {
         let stripped = false
         for (const [id, entry] of Object.entries(raw.secrets)) {
           if (entry && typeof entry === 'object') {
-            if (entry.signingSecret !== undefined) stripped = true
-            const { signingSecret: _dropped, ...rest } = entry
-            this.secrets.set(id as DeviceId, rest)
+            // Legacy cookies cannot prove which SSH host/credential produced them.
+            // Keep explicit credentials and SSH passphrases, but require re-authentication.
+            const unbound = typeof entry.cacheBinding !== 'string' || !/^[a-f0-9]{64}$/u.test(entry.cacheBinding)
+            if (unbound || entry.signingSecret !== undefined) {
+              if (entry.cookie !== undefined || entry.cookieAuthority !== undefined ||
+                  entry.bearerToken !== undefined || entry.signingSecret !== undefined ||
+                  entry.cacheBinding !== undefined) stripped = true
+              this.secrets.set(id as DeviceId, withoutCachedAuthentication(entry))
+            } else {
+              this.secrets.set(id as DeviceId, entry)
+            }
           }
         }
         if (stripped) this.save()
@@ -333,12 +372,7 @@ export class DeviceAuthManager {
   invalidate(deviceId: DeviceId): void {
     const current = this.secrets.get(deviceId)
     if (current === undefined) return
-    const next: Record<string, unknown> = { ...current, updatedAt: Date.now() }
-    delete next.cookie
-    delete next.cookieAuthority
-    delete next.bearerToken
-    delete next.signingSecret
-    this.secrets.set(deviceId, next as unknown as StoredDeviceSecret)
+    this.secrets.set(deviceId, { ...withoutCachedAuthentication(current), updatedAt: Date.now() })
     this.save()
   }
 
@@ -350,15 +384,16 @@ export class DeviceAuthManager {
   /** Persist or clear the explicit auth credential entered in the device form. */
   setAuthCredential(deviceId: DeviceId, credential: string | undefined): void {
     const current = this.secrets.get(deviceId)
+    const normalized = credential?.trim() || undefined
+    const changed = normalized !== current?.authCredential?.trim()
     const next: StoredDeviceSecret = {
-      ...(current ?? { deviceId, updatedAt: Date.now() }),
+      ...(current === undefined ? { deviceId, updatedAt: Date.now() } : changed ? withoutCachedAuthentication(current) : current),
       deviceId,
       updatedAt: Date.now(),
-      ...(credential !== undefined && credential.trim() !== ''
-        ? { authCredential: credential.trim() }
-        : {}),
+      credentialVersion: (current?.credentialVersion ?? 0) + (changed ? 1 : 0),
+      ...(normalized !== undefined ? { authCredential: normalized } : {}),
     }
-    if (credential === undefined || credential.trim() === '') delete (next as { authCredential?: string }).authCredential
+    if (normalized === undefined) delete (next as { authCredential?: string }).authCredential
     this.secrets.set(deviceId, next)
     this.save()
   }
@@ -398,7 +433,12 @@ export class DeviceAuthManager {
     const auth = device.auth
     if (auth.mode === 'none') return headers
 
-    const stored = this.secrets.get(device.id)
+    let stored = this.secrets.get(device.id)
+    if (stored !== undefined && (stored.cookie !== undefined || stored.bearerToken !== undefined) &&
+        stored.cacheBinding !== authenticationCacheBinding(device, stored)) {
+      this.invalidate(device.id)
+      stored = this.secrets.get(device.id)
+    }
     const credential = auth.credential?.trim() || stored?.authCredential?.trim()
 
     if (auth.mode === 'bearer' && credential !== undefined && credential !== '') {
@@ -439,51 +479,27 @@ export class DeviceAuthManager {
       return { ok: true }
     }
 
-    const existing = this.secrets.get(device.id)
-    if (!forceRefresh && existing?.cookie !== undefined && existing.cookieAuthority === cookieAuthority) {
+    let existing = this.secrets.get(device.id)
+    const cacheBinding = authenticationCacheBinding(device, existing)
+    if (existing !== undefined && (forceRefresh || existing.cacheBinding !== cacheBinding) &&
+        (existing.cookie !== undefined || existing.bearerToken !== undefined)) {
+      this.invalidate(device.id)
+      existing = this.secrets.get(device.id)
+    }
+    if (!forceRefresh && existing?.cookie !== undefined && existing.cookieAuthority === cookieAuthority &&
+        existing.cacheBinding === cacheBinding) {
       return { ok: true }
     }
 
-    // 1. If a launch token or URL is configured, exchange it via GET /?token=...
+    // A bare 32-byte base64url launch token is indistinguishable from a signing
+    // secret by shape. User input is ALWAYS exchanged; only SSH bootstrap may mint.
     const configuredCredential = auth.credential?.trim() || existing?.authCredential?.trim()
     if (configuredCredential !== undefined && configuredCredential !== '') {
-      const rawCred = configuredCredential
-      // Check if user pasted a 43-char base64url signing secret directly
-      if (decodeBase64Url(rawCred)?.byteLength === 32) {
-        const minted = mintDshBrowserCookie(cookieAuthority, rawCred)
-        if (minted !== undefined) {
-          const next: StoredDeviceSecret = {
-            ...(existing ?? { deviceId: device.id, updatedAt: Date.now() }),
-            deviceId: device.id,
-            cookie: minted,
-            cookieAuthority,
-            updatedAt: Date.now(),
-          }
-          delete (next as { signingSecret?: string }).signingSecret
-          this.secrets.set(device.id, next)
-          this.save()
-          return { ok: true }
-        }
-        const exchanged = await this.exchangeLaunchToken(
-          device.id,
-          effectiveBaseUrl,
-          authority,
-          cookieAuthority,
-          extractLaunchToken(rawCred),
-        )
-        if (exchanged.ok) return exchanged
-      } else {
-        const token = extractLaunchToken(rawCred)
-        const exchanged = await this.exchangeLaunchToken(
-          device.id,
-          effectiveBaseUrl,
-          authority,
-          cookieAuthority,
-          token,
-        )
-        if (exchanged.ok) return exchanged
-        if (auth.mode === 'token') return exchanged
-      }
+      const exchanged = await this.exchangeLaunchToken(
+        device.id, effectiveBaseUrl, authority, cookieAuthority,
+        extractLaunchToken(configuredCredential), cacheBinding,
+      )
+      if (exchanged.ok || auth.mode === 'token') return exchanged
     }
 
     // 2. SSH bootstrap. The device form enables this for auto mode. Mint a
@@ -511,11 +527,16 @@ export class DeviceAuthManager {
           error: `SSH login succeeded, but ${dshHome}/.credentials.yaml has no client-connection/browser-session secret. Paste the launch URL, or confirm dsh web is installed on that machine.`,
         }
       }
+      const current = this.secrets.get(device.id)
+      if (authenticationCacheBinding(device, current) !== cacheBinding) {
+        return { ok: false, error: 'Authentication configuration changed; retry authentication' }
+      }
       const next: StoredDeviceSecret = {
-        ...(existing ?? { deviceId: device.id, updatedAt: Date.now() }),
+        ...(current ?? { deviceId: device.id, updatedAt: Date.now() }),
         deviceId: device.id,
         cookie: minted,
         cookieAuthority,
+        cacheBinding,
         updatedAt: Date.now(),
       }
       delete (next as { signingSecret?: string }).signingSecret
@@ -537,7 +558,9 @@ export class DeviceAuthManager {
     authority: string,
     cookieAuthority: string,
     launchToken: string,
+    cacheBinding?: string,
   ): Promise<{ ok: true } | { ok: false; error: string }> {
+    const credentialVersion = this.secrets.get(deviceId)?.credentialVersion ?? 0
     try {
       const url = new URL('/', effectiveBaseUrl)
       url.searchParams.set('token', launchToken)
@@ -560,11 +583,15 @@ export class DeviceAuthManager {
           // Keep the user-supplied launch URL / passphrase across token
           // exchanges; only the cookie part is replaced.
           const current = this.secrets.get(deviceId)
+          if ((current?.credentialVersion ?? 0) !== credentialVersion) {
+            return { ok: false, error: 'Authentication credential changed; retry authentication' }
+          }
           this.secrets.set(deviceId, {
-            ...(current ?? { deviceId, updatedAt: Date.now() }),
+            ...(current === undefined ? { deviceId, updatedAt: Date.now() } : withoutCachedAuthentication(current)),
             deviceId,
             cookie: cookiePair,
             cookieAuthority,
+            ...(cacheBinding !== undefined ? { cacheBinding } : {}),
             updatedAt: Date.now(),
           })
           this.save()
