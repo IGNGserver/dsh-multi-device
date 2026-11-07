@@ -185,7 +185,7 @@ function updateUnreadBadge(counter: HTMLDetailsElement, ids: readonly string[], 
 /** Reconcile every project row against the current snapshot. */
 function syncRows(t: Translate): void {
   const state = clientStore.getSnapshot()
-  if (!shouldDecorateProjectRows(state.displayMode)) {
+  if (!shouldDecorateProjectRows(state.displayMode) || state.snapshot.catalog !== undefined) {
     // The Host filters Native Mode data, but an aggressive DOM reconciler must
     // also erase badges when the snapshot flips to `native` while rows stay
     // mounted (mode switching keeps the local page alive).

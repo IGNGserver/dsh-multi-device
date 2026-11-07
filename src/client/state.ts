@@ -311,6 +311,16 @@ export class MultiDeviceClientStore {
   /** Latest Session reported to the Host, used to dedupe mount/cleanup races. */
   private reportedSessionId: string | undefined
   private hasReportedSession = false
+  private observedLocalMainSessionId: string | undefined
+
+  /** Ignore the unchanged background main view, not an actual local navigation. */
+  reportLocalMainSession(sessionId: string): Promise<void> {
+    const changed = this.observedLocalMainSessionId !== undefined && this.observedLocalMainSessionId !== sessionId
+    this.observedLocalMainSessionId = sessionId
+    const remoteSelected = this.state.activeSessionId !== undefined && decodeSessionId(this.state.activeSessionId).isRemote
+    if (this.state.snapshot.catalog && this.state.displayMode === 'aggregated' && remoteSelected && !changed) return Promise.resolve()
+    return this.setActiveSession(sessionId)
+  }
   private reportingSessionId: string | undefined
   private activeSessionInFlight: Promise<void> | undefined
   /** Monotonic control-plane sequence so an older HTTP request cannot win. */
@@ -516,6 +526,12 @@ export class MultiDeviceClientStore {
       this.unreadClearInFlight.clear()
     }
     const configuredIds = new Set(snap.devices.map(device => device.id))
+    const selectedOwner = decodeSessionId(this.state.activeSessionId ?? '')
+    if (snap.catalog && selectedOwner.isRemote && !configuredIds.has(selectedOwner.deviceId)) {
+      this.hasReportedSession = false
+      this.state = { ...this.state, activeSessionId: this.observedLocalMainSessionId }
+      void this.setActiveSession(this.observedLocalMainSessionId)
+    }
     const keepAliveEligible = new Set(
       snap.devices.filter(device => device.keepNativeAlive !== false).map(device => device.id),
     )
@@ -571,6 +587,10 @@ export class MultiDeviceClientStore {
       const index = keepAlive.indexOf(paneDevice?.deviceId as DeviceId)
       if (index !== -1) keepAlive.splice(index, 1)
     }
+    if (snap.catalogSelection && snap.catalogSelection.requestSeq === this.activeSessionSeq && this.hasReportedSession) {
+      this.reportedSessionId = snap.catalogSelection.sessionId
+      this.state = { ...this.state, activeSessionId: snap.catalogSelection.sessionId }
+    }
     this.setState({
       snapshot: snap,
       loading: false,
@@ -599,6 +619,11 @@ export class MultiDeviceClientStore {
     if (this.disposed) return
     const active = this.state.activeSessionId
     if (active === undefined) return
+    const owner = decodeSessionId(active)
+    if (snap.catalog && owner.isRemote) {
+      const device = snap.devices.find(candidate => candidate.id === owner.deviceId)
+      if (device?.nativeNavigation?.openState !== 'open' || device.nativeNavigation.sessionId !== owner.rawSessionId) return
+    }
     if (this.effectiveSessionId() !== active) return
     if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
     const unread = snap.unreadSessionIds ?? []
@@ -720,6 +745,7 @@ export class MultiDeviceClientStore {
     if (this.state.displayMode !== 'native') return
     storeActiveNativeDevice(undefined)
     this.setState({ activeNativeDeviceId: undefined })
+    if (this.observedLocalMainSessionId !== undefined) void this.setActiveSession(this.observedLocalMainSessionId)
     this.clearUnreadForActiveSession(this.state.snapshot)
   }
 
@@ -843,6 +869,51 @@ export class MultiDeviceClientStore {
   // ==========================================================================
   // Control-Plane RPC Calls
   // ==========================================================================
+
+  async retryCatalogNavigation(): Promise<void> {
+    this.hasReportedSession = false
+    await this.setActiveSession(this.state.activeSessionId)
+  }
+
+  /** Open navigation metadata without retaining a foreign Session in the local Controller. */
+  async openCatalogSession(sessionId: string): Promise<{ ok: boolean; error?: string }> {
+    const owner = decodeSessionId(sessionId)
+    if (owner.isRemote) {
+      if (!this.state.snapshot.devices.some(device => device.id === owner.deviceId)) return { ok: false, error: 'The owning device was removed' }
+      getClientServices().revealMain?.()
+      this.setMainViewVisible(true)
+      this.hasReportedSession = false
+      await this.setActiveSession(sessionId)
+      return this.hasReportedSession && this.reportedSessionId === sessionId ? { ok: true } : { ok: false, error: 'The Host did not accept this navigation; retry or check the connection.' }
+    }
+    try {
+      const services = getClientServices()
+      if (!services.uiWorkspace || typeof services.uiWorkspace.openSession !== 'function') return { ok: false, error: 'Local DSH navigation is not ready' }
+      await services.sessions?.refresh?.()
+      services.revealMain?.()
+      this.setMainViewVisible(true)
+      services.uiWorkspace.openSession(sessionId)
+      await this.setActiveSession(sessionId)
+      return { ok: true }
+    } catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) } }
+  }
+
+  async catalogSessionAction(sessionId: string, action: import('../contract.ts').CatalogSessionAction, title?: string, stopActivity = false): Promise<{ ok: boolean; error?: string; sessionId?: string }> {
+    const result = await this.callControlPlane<{ snapshot: MultiDeviceSnapshot; sessionId?: string }>({ action: 'catalogSessionAction', payload: { sessionId, operation: action, title, stopActivity } })
+    if (!result.ok) return result
+    this.applyIncomingSnapshot(result.value.snapshot)
+    if (result.value.sessionId) await this.openCatalogSession(result.value.sessionId)
+    return { ok: true, sessionId: result.value.sessionId }
+  }
+
+  async searchCatalogSessions(query: string): Promise<{ ok: boolean; error?: string; sessionIds?: readonly string[] }> {
+    const result = await this.callControlPlane<{ sessionIds: readonly string[] }>({ action: 'searchCatalogSessions', payload: { query } })
+    return result.ok ? { ok: true, sessionIds: result.value.sessionIds } : result
+  }
+
+  async startSessionOnDevice(logicalWorkspaceId: string, deviceId: DeviceId): Promise<{ ok: boolean; error?: string }> {
+    return this.switchNewSessionDevice(getClientServices().uiWorkspace, logicalWorkspaceId, deviceId)
+  }
 
   async callControlPlane<T = unknown>(
     request: ControlPlaneRequest,
@@ -1161,6 +1232,7 @@ export class MultiDeviceClientStore {
     if (!res.ok) return { ok: false, error: res.error }
     this.applyIncomingSnapshot(res.value.snapshot)
     if (res.value.mode === 'registered' && res.value.sessionId !== undefined) {
+      if (this.state.snapshot.catalog) return this.openCatalogSession(res.value.sessionId)
       try {
         await getClientServices().sessions?.refresh?.()
       } catch {

@@ -2,6 +2,12 @@
 
 通过一个 **DeepSeek Harness（DSH）Desktop / Web Host** 管理多台运行 `dsh web` 的开发机。远端无需安装本插件；本插件不接管远端 Agent、模型配置或沙箱，也不克隆、同步或修改项目文件。`main` 是开发线，不等于已验证的发行版。
 
+## 聚合模式架构与支持范围
+
+聚合侧栏现在读取独立的设备目录，远端会话只在所属设备的原生容器中打开，不再向本地 Session Controller 注入镜像会话。目录重连使用 epoch、完整基线和拉取期间增量重放；加载、缺摘要、鉴权与原生历史打开失败都有明确状态。详见 [架构与验证说明](AGGREGATED-ARCHITECTURE.md)。
+
+原生内容支持本机 HTTP IPv4/localhost Web GUI 与已验证的 DSH Desktop guest。**远程浏览器、HTTPS→HTTP loopback、IPv6 parent 当前不具备安全完整的原生代理入口**，会明确提示原因，而不会回退到本机镜像。Windows SSH 使用平台适配命令；真实各平台 Desktop 验收与协议模拟测试是不同层级，不能混称已验证。
+
 ## 安装与升级（普通用户）
 
 **使用 GitHub Release 的预构建 `.tgz`，不需要 clone、安装源码依赖或本地构建。** 当前公共 npm 注册表没有 `dsh-multi-device` 包，不要仅输入包名尝试安装；npm 发布只是未来维护路线，目前不发布。完整 bundle `.tar.gz` 用于检查/归档，不是管理器安装入口。

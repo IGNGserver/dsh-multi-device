@@ -1460,7 +1460,7 @@ describe('4d. Offline catalog cache & reconnect waiting', () => {
       Array.isArray(frame.args) &&
       frame.args[1] === false,
     )
-    expect(status).toBeDefined()
+    expect(status).toBeUndefined()
     expect(client.sessionSummaries().find(summary => summary.sessionId === 's-running')?.running).toBe(false)
     expect(client.toView().runningSessionCount).toBe(0)
     expect(client.toView().catalogStale).toBe(true)
@@ -3353,7 +3353,7 @@ describe('9. Manual Git match: scan, register, and never run on its own', () => 
     expect(script).toContain("'/home/o'\\''brien'")
     expect(script).toContain('-maxdepth 5')
     expect(script).toContain("-name 'node_modules'")
-    expect(script).toContain("-name '.*' ! -name '.git' -prune")
+    expect(script).toContain("-name '.*' ! -name '.git' ! -name '.wt' -prune")
     expect(script).toContain("-type d -name '.git' -print")
     expect(script).toContain('remote.origin.url')
     // No first-remote fallback: a `nas` backup remote must never define identity.
@@ -3384,29 +3384,37 @@ describe('9. Manual Git match: scan, register, and never run on its own', () => 
     expect(byRemote.size).toBe(2)
   })
 
-  it('scans grouped repositories, skips worktrees, hidden dirs and node_modules', () => {
+  it('scans grouped repositories and worktrees, but skips hidden state and node_modules', async () => {
     const root = makeTempDir('dsh-md-scan-')
+    const { execFileSync } = await import('node:child_process')
+    const runGit = (...args: string[]): void => { execFileSync('git', args, { stdio: 'pipe' }) }
     const writeRepo = (relative: string, origin: string): void => {
       const repo = join(root, relative)
-      mkdirSync(join(repo, '.git'), { recursive: true })
-      writeFileSync(join(repo, '.git', 'config'), `[remote "origin"]\n\turl = ${origin}\n`)
+      mkdirSync(repo, { recursive: true })
+      runGit('init', '-q', repo)
+      runGit('-C', repo, 'remote', 'add', 'origin', origin)
     }
 
     writeRepo('组A/repo-one', 'git@github.com:org/repo-one.git')
     writeRepo('组B/repo-two', 'https://github.com/org/repo-two')
     // A nested dependency repository must never be a project.
     writeRepo('组A/repo-one/node_modules/dep', 'git@github.com:dep/dep.git')
-    // A worktree pointer is a member of its main project, not a project.
-    mkdirSync(join(root, 'repo-one-wt'), { recursive: true })
-    writeFileSync(join(root, 'repo-one-wt', '.git'), 'gitdir: /tmp/main/.git/worktrees/wt\n')
-    // Hidden directories are tool state (`.wt`, caches), never projects.
+    const main = join(root, '组A/repo-one'), worktree = join(root, '.wt', 'repo-one-wt')
+    runGit('-C', main, '-c', 'user.name=test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-qm', 'fixture')
+    mkdirSync(join(root, '.wt'), { recursive: true })
+    runGit('-C', main, 'worktree', 'add', '-qb', 'scan-fixture', worktree)
     writeRepo('.hidden/repo-four', 'git@github.com:org/repo-four.git')
 
     const repos = scanLocalGitRepos([root], { maxDepth: 4 })
     expect(repos.map(repo => repo.gitRemote).sort()).toEqual([
       'github.com/org/repo-one',
+      'github.com/org/repo-one',
       'github.com/org/repo-two',
     ])
+    expect(repos.map(repo => repo.path)).toContain(worktree)
+    const broken = makeTempDir('dsh-md-broken-worktree-')
+    writeFileSync(join(broken, '.git'), 'gitdir: missing-metadata')
+    expect(() => scanLocalGitRepos([broken])).toThrow('Unable to read Git origin')
   })
 
   it('keeps the shortest path per origin', () => {
@@ -4156,7 +4164,8 @@ describe('10. Native Pane bridge, injection and view decisions', () => {
       payload: { nativePane: false },
     })
     expect(toggled.ok).toBe(true)
-    expect((toggled as { value: MultiDeviceSnapshot }).value.ui?.nativePane).toBe(false)
+    expect((toggled as { value: MultiDeviceSnapshot }).value.ui?.nativePane).toBe(true)
+    expect(first.ui().nativePane).toBe(false) // Legacy preference retained; independent catalog requires native content.
     first.dispose()
 
     const second = new DeviceRegistry(
@@ -4245,10 +4254,21 @@ describe('11. Bridge runtime loader capture', () => {
       getSnapshot: () => ({ sessionId: 'rsess-1' }),
       subscribe: () => () => {},
     }
+    // Official 0.2.1-rc.5 separates catalog/selection from the borrowed
+    // observable Session binding. Keep history loading here: this test drives
+    // workspace UI and unread overlays, not a history-open acknowledgement.
+    const sessionFaces = new Map(['rsess-1', 'rsess-2'].map(sessionId => [sessionId, {
+      getSnapshot: () => ({ sessionId, openState: 'loading', openError: null }),
+      subscribe: (_listener: () => void) => () => {},
+    }]))
     const sessions = {
       list: {
-        getSnapshot: () => ({ byId: {} }),
+        getSnapshot: () => ({ byId: { 'rsess-1': {}, 'rsess-2': {} } }),
         subscribe: () => () => {},
+      },
+      binding: (sessionId: string) => {
+        const session = sessionFaces.get(sessionId)
+        return session === undefined ? undefined : { session }
       },
       refresh: () => Promise.resolve(),
     }
@@ -4355,6 +4375,11 @@ describe('11. Bridge runtime loader capture', () => {
     socket.emit('message', { data: JSON.stringify({ type: 'open-session', sessionId: 'rsess-2' }) })
     await new Promise<void>(resolve => setTimeout(resolve, 0))
     expect(opened).toContain('rsess-2')
+    expect(socket.sent.map(raw => JSON.parse(raw))).toContainEqual({
+      type: 'navigation', sessionId: 'rsess-2', requestSeq: 1, openState: 'loading',
+    })
+    expect(socket.sent.map(raw => JSON.parse(raw)).some(message =>
+      message.type === 'navigation' && message.openState === 'open')).toBe(false)
 
     socket.emit('message', { data: JSON.stringify({ type: 'read-state', unreadSessionIds: ['rsess-1'] }) })
     await new Promise<void>(resolve => setTimeout(resolve, 0))

@@ -39,6 +39,7 @@ export interface UiWorkspaceServiceLike {
 export interface BoundClientServices {
   readonly sessions?: SessionsServiceLike
   readonly uiWorkspace?: UiWorkspaceServiceLike
+  readonly revealMain?: () => void
 }
 
 let services: BoundClientServices = {}
@@ -51,6 +52,7 @@ export function bindClientServices(next: BoundClientServices): () => void {
     ? next.sessions.list.subscribe.bind(next.sessions.list)
     : undefined
   return () => {
+    if (services !== next) return
     services = {}
     sessionSubscribe = undefined
   }

@@ -105,7 +105,7 @@ export function ActiveSessionReporter({
 }): null {
   React.useEffect(() => {
     let cancelled = false
-    void clientStore.setActiveSession(sessionId).then(() => {
+    void clientStore.reportLocalMainSession(sessionId).then(() => {
       if (!cancelled) onScopeReported?.()
     })
     return () => {

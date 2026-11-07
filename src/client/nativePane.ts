@@ -41,6 +41,7 @@ export interface NativePaneVisibilityInput {
   readonly device: DeviceView | undefined
   /** The pane's center-column geometry was measured successfully. */
   readonly geometryReady: boolean
+  readonly independentCatalog?: boolean
 }
 
 /**
@@ -57,6 +58,7 @@ export function shouldShowNativePane(input: NativePaneVisibilityInput): boolean 
   const { enabled, target, device, geometryReady } = input
   if (!enabled || target === undefined || device === undefined || !geometryReady) return false
   if (device.id !== target.deviceId) return false
+  if (input.independentCatalog) return true
   if (device.keepNativeAlive === false) return false
   if (device.authState === 'required' || device.authState === 'error') return true
   const paneState = device.nativePaneState ?? 'idle'

@@ -87,7 +87,15 @@ function bridgeVm(initial?: { unread?: string[]; readCompletions?: Record<string
       openSession: (id: string) => { selected = id },
     },
     uiSession: { sessionStatus: status },
-    sessions: { list: { getSnapshot: () => ({ byId: {} }), subscribe: () => () => {} } },
+    sessions: {
+      list: { getSnapshot: () => ({ byId: {} }), subscribe: () => () => {} },
+      // Official 0.2.1-rc.5 readiness requires borrowed Session bindings;
+      // READ/ACK still follows selection and visibility, not history loading.
+      binding: (sessionId: string) => ({ session: {
+        getSnapshot: () => ({ sessionId, openState: 'open', openError: null }),
+        subscribe: (_listener: () => void) => () => {},
+      } }),
+    },
   })
   const tick = (ms: number) => {
     const end = now + ms

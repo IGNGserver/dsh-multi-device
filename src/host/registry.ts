@@ -36,6 +36,7 @@ import {
 } from '../contract.ts'
 import { emptyDeviceAttention, selectDeviceAttention, type SessionAttentionFact } from '../attention.ts'
 import { readRemoteCompletionIdentity } from './completion-identity.ts'
+import { buildAggregatedCatalog, catalogRow, type CatalogSummaryInput } from './aggregated-catalog.ts'
 import { DeviceAuthManager } from './auth.ts'
 import { JsonSnapshotFile } from './storage.ts'
 import {
@@ -199,6 +200,8 @@ export interface LocalHostProvider {
   readonly localWorkspaces: () => PhysicalWorkspaceInput[]
   /** Read current local session summaries. */
   readonly localSessionUpdatedAt: () => Map<string, number>
+  readonly localSessionSummaries?: () => readonly CatalogSummaryInput[]
+  readonly localPinnedSessionIds?: () => readonly string[]
   /**
    * Local archived Session IDs (`ctx.workspaceRegistry.archivedSessionIds`).
    * Optional so registries built by older callers and tests keep working;
@@ -268,6 +271,60 @@ export class DeviceRegistry {
   private gitMatchRun: GitMatchRun = createIdleGitMatch()
   private localWorkspaceCreator: ((path: string) => Promise<void>) | undefined
   private localSessionCreator: ((cwd: string) => Promise<string>) | undefined
+  private localCatalogAction: ((sessionId: string, action: import('../contract.ts').CatalogSessionAction, title?: string, stopActivity?: boolean) => Promise<{ sessionId?: string }>) | undefined
+  private localCatalogSearch: ((query: string) => Promise<readonly string[]>) | undefined
+
+  setLocalCatalogAdapters(
+    action: (sessionId: string, action: import('../contract.ts').CatalogSessionAction, title?: string, stopActivity?: boolean) => Promise<{ sessionId?: string }>,
+    search: (query: string) => Promise<readonly string[]>,
+  ): void {
+    this.localCatalogAction = action
+    this.localCatalogSearch = search
+  }
+
+  async catalogSessionAction(sessionId: string, action: import('../contract.ts').CatalogSessionAction, title?: string, stopActivity?: boolean): Promise<{ sessionId?: string }> {
+    const owner = decodeSessionId(sessionId)
+    if (!owner.isRemote) {
+      if (!this.localCatalogAction) throw new Error('Local session operations are unavailable')
+      const result = await this.localCatalogAction(sessionId, action, title, stopActivity === true)
+      this.refreshWorkspaceView()
+      return result
+    }
+    const client = this.clients.get(owner.deviceId)
+    if (!client) throw new Error('The owning device was removed')
+    if (!client.isConnected()) throw new Error('The owning device is offline or its catalog is not ready')
+    const sid = owner.rawSessionId
+    let result: unknown
+    if (action === 'rename') {
+      if (!title?.trim()) throw new Error('A non-empty title is required')
+      result = await client.invokeUnary('session', 'rename', { request: { sessionId: sid, title: title.trim() } })
+    } else if (action === 'fork') {
+      result = await client.invokeUnary('session', 'fork', { request: { sessionId: sid } })
+    } else {
+      const methods = { archive: 'archiveSession', unarchive: 'unarchiveSession', pin: 'pinSession', unpin: 'unpinSession' } as const
+      result = await client.invokeUnary('workspace', methods[action], { request: { sessionId: sid, ...(action === 'archive' && stopActivity === true ? { stopActivity: true } : {}) } })
+      const echo = result as { archivedSessionIds?: string[]; pinnedSessionIds?: string[] }
+      if (Array.isArray(echo.archivedSessionIds)) client.setArchivedIds(echo.archivedSessionIds)
+      if (Array.isArray(echo.pinnedSessionIds)) client.setPinnedIds(echo.pinnedSessionIds)
+    }
+    await client.refreshSessionCatalog()
+    this.nativeProxyManager.requestRefresh(client.id)
+    this.refreshWorkspaceView()
+    const created = result as { sessionId?: string } | undefined
+    return action === 'fork' && created?.sessionId ? { sessionId: encodeRemoteSessionId(client.id, created.sessionId) } : {}
+  }
+
+  async searchCatalogSessions(query: string): Promise<readonly string[]> {
+    const groups = await Promise.all([
+      this.localCatalogSearch ? this.localCatalogSearch(query) : Promise.resolve([]),
+      ...this.clientList().map(async client => {
+        if (!client.isConnected()) throw new Error(`${client.deviceConfig.name}: search unavailable while offline`)
+        const value = await client.invokeUnary('session', 'search', { request: { query } }) as { items?: { sessionId: string }[] }
+        return (value.items ?? []).map(item => encodeRemoteSessionId(client.id, item.sessionId))
+      }),
+    ])
+    return [...new Set(groups.flat())]
+  }
   private aggregatedGatewayActive = false
   private aggregatedGatewayError: string | undefined
   private nativeProxyActive = true
@@ -288,6 +345,7 @@ export class DeviceRegistry {
     sessionId?: string
     title?: string
     visible?: boolean
+    navigation?: import('./native-proxy.ts').NativeBridgeNavigation
   }>()
   /** Previous connection state per device, so workspace rows are recomputed on a real transition. */
   private readonly lastDeviceStates = new Map<DeviceId, DeviceConnectionState>()
@@ -349,6 +407,16 @@ export class DeviceRegistry {
         onBridgeState: (deviceId, state, error, clientId) => {
           this.setNativePaneState(deviceId, state, error, clientId)
         },
+        onBridgeNavigation: (deviceId, navigation, clientId = 'legacy') => {
+          const active = this.activeSessions.get(clientId)
+          const owner = decodeSessionId(active?.sessionId ?? '')
+          if (!owner.isRemote || owner.deviceId !== deviceId || owner.rawSessionId !== navigation.sessionId || active?.seq !== navigation.requestSeq) return
+          const key = this.paneKey(deviceId, clientId)
+          const previous = this.nativePanes.get(key)
+          if (JSON.stringify(previous?.navigation) === JSON.stringify(navigation)) return
+          this.nativePanes.set(key, { ...previous, state: previous?.state ?? 'loading', navigation })
+          this.bumpRevision()
+        },
         onBridgeSelection: (deviceId, sessionId, clientId) => {
           this.setNativePaneSelection(deviceId, sessionId, clientId)
         },
@@ -374,7 +442,10 @@ export class DeviceRegistry {
         },
       },
     )
-    this.aggregator = new WorkspaceAggregator()
+    this.aggregator = new WorkspaceAggregator({}, { onCacheChanged: () => {
+      this.bumpRevision()
+      this.notifyWorkspacesChanged()
+    } })
     this.nativeProxyActive = options.enableNativeProxy !== false
     this.loadFromDisk()
     this.syncSharedReadStateTimer()
@@ -511,7 +582,13 @@ export class DeviceRegistry {
     }
     this.activeSessions.set(key, { sessionId: next, seq: requestSeq })
     const decoded = next === undefined ? undefined : decodeSessionId(next)
-    if (decoded?.isRemote) this.publishNativePaneSession(decoded.deviceId, key)
+    if (decoded?.isRemote) {
+      const paneKey = this.paneKey(decoded.deviceId, key)
+      const previousPane = this.nativePanes.get(paneKey)
+      this.nativePanes.set(paneKey, { ...previousPane, state: previousPane?.state ?? 'idle', navigation: { sessionId: decoded.rawSessionId, requestSeq, openState: 'loading' } })
+      this.publishNativePaneSession(decoded.deviceId, key)
+      this.bumpRevision()
+    }
     this.syncNativePaneEmbedding(key)
     // Selection is not presence. Only a visible viewing client explicitly marks read.
     return changed
@@ -1003,7 +1080,7 @@ export class DeviceRegistry {
       return
     }
     const decoded = decodeSessionId(this.activeSessions.get(clientId)?.sessionId ?? '')
-    const next = this.displayMode === 'aggregated' && this.uiPreferences.nativePane && decoded.isRemote
+    const next = this.displayMode === 'aggregated' && decoded.isRemote
       ? decoded.deviceId : undefined
     const previous = this.paneEmbeddedDevices.get(clientId)
     if (previous !== undefined && previous !== next) this.nativeProxyManager.setEmbedded(previous, false, clientId)
@@ -1015,17 +1092,17 @@ export class DeviceRegistry {
   }
 
   private publishNativePaneSession(deviceId: DeviceId, clientId = 'legacy'): void {
-    if (this.displayMode !== 'aggregated' || !this.uiPreferences.nativePane) return
+    if (this.displayMode !== 'aggregated') return
     const decoded = decodeSessionId(this.activeSessions.get(clientId)?.sessionId ?? '')
     if (decoded.isRemote && decoded.deviceId === deviceId) {
-      this.nativeProxyManager.openSession(deviceId, decoded.rawSessionId, clientId)
+      this.nativeProxyManager.openSession(deviceId, decoded.rawSessionId, clientId, this.activeSessions.get(clientId)?.seq)
     }
   }
 
   private openActiveRemoteSessionInNative(): void {
     for (const [clientId, active] of this.activeSessions) {
       const decoded = decodeSessionId(active.sessionId ?? '')
-      if (decoded.isRemote) this.nativeProxyManager.openSession(decoded.deviceId, decoded.rawSessionId, clientId)
+      if (decoded.isRemote) this.nativeProxyManager.openSession(decoded.deviceId, decoded.rawSessionId, clientId, active.seq)
     }
   }
 
@@ -1055,6 +1132,7 @@ export class DeviceRegistry {
     }
     this.nativePanes.set(this.paneKey(deviceId, clientId), {
       state,
+      ...(state === 'ready' && previous?.navigation ? { navigation: previous.navigation } : {}),
       ...(nextError !== undefined ? { error: nextError } : {}),
       ...(nextSessionId !== undefined ? { sessionId: nextSessionId } : {}),
       ...(nextTitle !== undefined ? { title: nextTitle } : {}),
@@ -1075,13 +1153,24 @@ export class DeviceRegistry {
     const previous = this.nativePanes.get(this.paneKey(deviceId, clientId))
     if (previous?.sessionId === sessionId) return
     this.nativePanes.set(this.paneKey(deviceId, clientId), {
+      ...previous,
       state: previous?.state ?? 'idle',
+      sessionId,
       ...(previous?.error !== undefined ? { error: previous.error } : {}),
-      ...(sessionId !== undefined ? { sessionId } : {}),
       ...(previous?.title !== undefined ? { title: previous.title } : {}),
       ...(previous?.visible === true ? { visible: true } : {}),
     })
     this.bumpRevision()
+    const active = this.activeSessions.get(clientId)
+    const owner = decodeSessionId(active?.sessionId ?? '')
+    if (sessionId && owner.isRemote && owner.deviceId === deviceId && owner.rawSessionId !== sessionId && previous?.navigation?.openState === 'open') {
+      // Native links/forks/subagents can navigate without a sidebar click. Follow
+      // that selection in this browser only, then demand a fresh history ACK.
+      this.activeSessions.set(clientId, { sessionId: encodeRemoteSessionId(deviceId, sessionId), seq: active!.seq })
+      const pane = this.nativePanes.get(this.paneKey(deviceId, clientId))!
+      pane.navigation = { sessionId, requestSeq: active!.seq, openState: 'loading' }
+      this.publishNativePaneSession(deviceId, clientId)
+    }
     // Selecting a Session is not the same as viewing it: keep-alive frames for
     // other devices select Sessions in the background. The bridge sends an
     // explicit `read` only while its page is visible, which is the sole clear
@@ -1095,6 +1184,7 @@ export class DeviceRegistry {
     if (previous === undefined && next === undefined) return
     if (previous?.title === next) return
     this.nativePanes.set(this.paneKey(deviceId, clientId), {
+      ...previous,
       state: previous?.state ?? 'idle',
       ...(previous?.error !== undefined ? { error: previous.error } : {}),
       ...(previous?.sessionId !== undefined ? { sessionId: previous.sessionId } : {}),
@@ -1114,11 +1204,12 @@ export class DeviceRegistry {
     if (previous === undefined && !visible) return
     if (previous?.visible === visible) return
     this.nativePanes.set(this.paneKey(deviceId, clientId), {
+      ...previous,
       state: previous?.state ?? 'idle',
       ...(previous?.error !== undefined ? { error: previous.error } : {}),
       ...(previous?.sessionId !== undefined ? { sessionId: previous.sessionId } : {}),
       ...(previous?.title !== undefined ? { title: previous.title } : {}),
-      ...(visible ? { visible: true } : {}),
+      visible,
     })
   }
 
@@ -1137,6 +1228,7 @@ export class DeviceRegistry {
     return {
       ...view,
       nativePaneState: pane.state,
+      ...(pane.navigation !== undefined ? { nativeNavigation: pane.navigation } : {}),
       ...(pane.error !== undefined ? { nativePaneError: pane.error } : {}),
       ...(pane.sessionId !== undefined ? { nativePaneSessionId: pane.sessionId } : {}),
       ...(pane.title !== undefined ? { nativePaneTitle: pane.title } : {}),
@@ -1216,6 +1308,7 @@ export class DeviceRegistry {
     this.localCatalogMutations = undefined
     this.localCatalogInflight = undefined
     this.localCatalogFresh = false
+    this.aggregator.invalidateGitRemote()
     // Persist the last captured catalogs before the timers are torn down.
     try {
       this.flushCatalogCache()
@@ -1366,6 +1459,11 @@ export class DeviceRegistry {
     this.nativeProxyManager.removeProxy(deviceId)
     this.authStates.delete(deviceId)
     this.catalogs.delete(deviceId)
+    this.aggregator.invalidateGitRemote(deviceId)
+    for (const [clientId, selection] of this.activeSessions) {
+      const owner = decodeSessionId(selection.sessionId ?? '')
+      if (owner.isRemote && owner.deviceId === deviceId) this.activeSessions.set(clientId, { seq: selection.seq })
+    }
     for (const key of this.nativePanes.keys()) {
       if (key.endsWith(`\0${deviceId}`)) this.nativePanes.delete(key)
     }
@@ -1502,7 +1600,12 @@ export class DeviceRegistry {
       this.aggregator.setPreferredDevice(logicalWorkspaceId, deviceId)
       this.saveToDisk()
       this.refreshWorkspaceView()
-      return { ok: true, mode: 'member' }
+      if (deviceId === LOCAL_DEVICE_ID) {
+        if (!this.localSessionCreator) return { ok: false, error: 'Local session creation is unavailable' }
+        return { ok: true, mode: 'registered', sessionId: await this.localSessionCreator(member.path) }
+      }
+      const created = await this.createRemoteSession({ deviceId, workspaceId: member.remoteWorkspaceId })
+      return created.ok ? { ok: true, mode: 'registered', sessionId: created.sessionId } : created
     }
 
     if (deviceId === LOCAL_DEVICE_ID) {
@@ -1895,6 +1998,16 @@ export class DeviceRegistry {
     const physicalInputs: PhysicalWorkspaceInput[] = [...this.localHost.localWorkspaces()]
     const updatedAtMap = this.localHost.localSessionUpdatedAt()
     const sessionOrigins: Record<string, SessionOriginMetadata> = Object.create(null)
+    const rows: Record<string, import('../contract.ts').AggregatedSessionRow> = Object.create(null)
+    const issues: Record<string, string> = Object.fromEntries(this.sessionListErrors)
+    const pinnedSessionIds = [...(this.localHost.localPinnedSessionIds?.() ?? [])]
+    try {
+      for (const summary of this.localHost.localSessionSummaries?.() ?? []) {
+        rows[summary.sessionId] = catalogRow(summary.sessionId, LOCAL_DEVICE_ID, summary, false)
+      }
+    } catch (error) {
+      issues.local = error instanceof Error ? error.message : String(error)
+    }
     const archivedSessionIds = new Set<string>(this.localArchivedIds())
     const subagentSessionIds = new Set<string>(this.localSubagentIds())
     const attentionFacts: SessionAttentionFact[] = (this.localCatalog ?? []).map(row => ({
@@ -1952,8 +2065,10 @@ export class DeviceRegistry {
         orphanByCwd.set(key, list)
       }
 
+      pinnedSessionIds.push(...client.pinnedIds().map(id => encodeRemoteSessionId(client.id, id)))
       for (const s of summaries) {
-        const namespacedId = client.namespaceSummary(s).sessionId
+        const namespacedId = encodeRemoteSessionId(client.id, s.sessionId)
+        rows[namespacedId] = catalogRow(namespacedId, client.id, s, view.catalogStale === true || !client.isConnected())
         updatedAtMap.set(namespacedId, s.updatedAt)
         runningBySession.set(s.sessionId, s.running)
         if (s.origin === 'subagent') subagentSessionIds.add(namespacedId)
@@ -2057,6 +2172,8 @@ export class DeviceRegistry {
       }),
       sshConfigHosts: listSshConfigHosts(),
       aggregationConfig: this.aggregator.getConfig(),
+      catalog: buildAggregatedCatalog(this.revision, rows, logicalWorkspaces, pinnedSessionIds, issues),
+      ...(this.activeSessions.get(clientId)?.sessionId ? { catalogSelection: { sessionId: this.activeSessions.get(clientId)!.sessionId!, requestSeq: this.activeSessions.get(clientId)!.seq } } : {}),
       logicalWorkspaces,
       allPhysicalWorkspaces,
       sessionOrigins,
@@ -2066,7 +2183,7 @@ export class DeviceRegistry {
       archivedSessionIds: [...archivedSessionIds].sort(),
       subagentSessionIds: [...subagentSessionIds].sort(),
       gitMatch: this.gitMatchRun,
-      ui: this.uiPreferences,
+      ui: { ...this.uiPreferences, nativePane: true },
       // A partial merge is a first-class snapshot fact: the client warns
       // instead of presenting an incomplete aggregation as the truth.
       ...(this.sessionListErrors.size > 0
@@ -2444,24 +2561,12 @@ function workspaceIdFromCreate(created: unknown): string | undefined {
   return typeof body.workspaceId === 'string' && body.workspaceId !== '' ? body.workspaceId : undefined
 }
 
-const CATALOG_SESSION_LIMIT = 2_000
-const CATALOG_WORKSPACE_LIMIT = 300
 const CATALOG_ID_LIMIT = 5_000
 
-/**
- * Bound one device's persisted catalog. A device with thousands of Sessions
- * (long-lived dev boxes) must not turn the plugin data file into a choke point;
- * the newest Sessions are the ones the sidebar actually shows.
- */
+/** Keep the complete lightweight directory. Only ancillary pin/archive sets are bounded. */
 function trimCatalog(cache: DeviceCatalogCache): DeviceCatalogCache {
-  const sessions = cache.sessions.length > CATALOG_SESSION_LIMIT
-    ? [...cache.sessions]
-        .sort((a, b) => b.updatedAt - a.updatedAt)
-        .slice(0, CATALOG_SESSION_LIMIT)
-    : cache.sessions
-  const workspaces = cache.workspaces.length > CATALOG_WORKSPACE_LIMIT
-    ? cache.workspaces.slice(0, CATALOG_WORKSPACE_LIMIT)
-    : cache.workspaces
+  const sessions = cache.sessions
+  const workspaces = cache.workspaces
   const archivedSessionIds = cache.archivedSessionIds.length > CATALOG_ID_LIMIT
     ? cache.archivedSessionIds.slice(0, CATALOG_ID_LIMIT) : cache.archivedSessionIds
   const pinnedSessionIds = cache.pinnedSessionIds.length > CATALOG_ID_LIMIT

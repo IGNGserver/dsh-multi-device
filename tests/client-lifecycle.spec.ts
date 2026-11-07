@@ -55,7 +55,7 @@ async function frameHarness(acquire: ReturnType<typeof vi.fn>) {
   const release = vi.fn(async () => {})
   const guests: ElementMock[] = []
   vi.stubGlobal('dshDesktop', { protocolVersion: 1, browser: { acquire, release } })
-  vi.stubGlobal('window', { location: { hostname: '127.0.0.1' }, setTimeout, clearTimeout })
+  vi.stubGlobal('window', { location: { hostname: '127.0.0.1', protocol: 'http:', href: 'http://127.0.0.1:3080/' }, setTimeout, clearTimeout })
   vi.stubGlobal('document', { createElement: () => { const guest = new ElementMock(); guests.push(guest); return guest } })
   const { KeepAliveDeviceFrame } = await import('../src/client/NativeViewport.tsx')
   const props = { device, active: false, reloadCount: 0, t: (key: string) => key, onOpenSettings() {} }

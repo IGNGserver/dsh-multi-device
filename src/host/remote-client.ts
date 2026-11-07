@@ -3,7 +3,7 @@
  *
  * Connects to one remote DSH instance (over an SSH tunnel or direct HTTP/S) and speaks
  * BOTH **DSH 0.2.x** (`/api/<namespace>/<method>` + `/api/remote.mux`) AND **DSH 0.1.x**
- * (`/api/<domain>.<method>` + `/api/events.mux` + `/api/events.host`)!
+ * (`/api/<domain>.<method>`, list-only polling compatibility).
  *
  * Features:
  * - Automatic protocol version detection (`0.2` vs `0.1`).
@@ -29,10 +29,11 @@ import {
   encodeRemoteSessionId,
   isNamespacedEventId,
   isNamespacedSessionId,
-  isNamespacedWorkspaceId,
   type PendingInteractionKind,
   type RemoteProtocolVersion,
 } from '../contract.ts'
+import { DeviceCatalog } from './device-catalog.ts'
+import { catalogTitle } from './aggregated-catalog.ts'
 import { DeviceAuthManager } from './auth.ts'
 import { discoverRemoteGitRemotesViaSsh } from './git-aggregator.ts'
 import { headerValue, requestRemote, responseAsFetchResponse } from './http-request.ts'
@@ -164,19 +165,6 @@ function isConnectedState(state: DeviceConnectionState): boolean {
   return state === 'connected'
 }
 
-type CatalogMutation =
-  | { type: 'added'; summary: RemoteSessionSummary }
-  | { type: 'removed'; sessionId: string }
-  | { type: 'status'; sessionId: string; running: boolean }
-  | { type: 'activity'; sessionId: string; updatedAt: number }
-  | { type: 'blank'; sessionId: string; blank: boolean }
-
-interface CatalogRefresh {
-  readonly generation: number
-  readonly mutations: CatalogMutation[]
-  promise: Promise<void>
-}
-
 const BACKOFF_BASE_MS = 600
 const BACKOFF_MAX_MS = 12_000
 
@@ -194,26 +182,24 @@ export class RemoteDeviceClient {
   private lastError: string | undefined
   private reconnectAttempt = 0
   private nativeProxyUrl: string | undefined
-  /** Epoch ms of the last successful catalog sync (live or hydrated from disk). */
-  private lastSyncedAt: number | undefined
-  /** True while the catalog rows predate a live baseline (hydrated cache). */
-  private catalogStale = false
-  /** Failed refreshes lower freshness without fabricating running=false transitions. */
+  private readonly catalog = new DeviceCatalog()
   private refreshHealthy = true
-  private generation = 0
   private generationAbort = new AbortController()
-  private catalogRefresh: CatalogRefresh | undefined
   private baselineGeneration: number | undefined
-
-  private summaries: RemoteSessionSummary[] = []
-  private workspaces: RemoteWorkspaceItem[] = []
-  private archivedSessionIds: string[] = []
-  private pinnedSessionIds: string[] = []
-  private readonly projectionsBySession = new Map<string, { asOfSeq: number; values: Record<string, unknown> }>()
-  private readonly projectionSeqsBySession = new Map<string, Map<string, number>>()
-  private readonly projectionBaselinesBySession = new Map<string, number>()
+  private get generation(): number { return this.catalog.epoch }
+  private get lastSyncedAt(): number | undefined { return this.catalog.syncedAt }
+  private get catalogStale(): boolean { return this.catalog.stale }
+  private get summaries(): readonly RemoteSessionSummary[] { return this.catalog.sessions }
+  private get workspaces(): readonly RemoteWorkspaceItem[] { return this.catalog.workspaces }
+  private get archivedSessionIds(): readonly string[] { return this.catalog.archivedIds }
+  private get pinnedSessionIds(): readonly string[] { return this.catalog.pinnedIds }
+  private get projectionsBySession(): ReadonlyMap<string, { asOfSeq: number; values: Record<string, unknown> }> {
+    return this.catalog.controlProjections
+  }
+  private baselineFlight: { epoch: number; promise: Promise<void> } | undefined
+  private gitDiscoveryError: string | undefined
   private readonly pendingInteractions = new Map<string, RemotePendingInteraction>()
-  private readonly discoveredGitPaths = new Set<string>()
+  private readonly discoveredGitPaths = new Map<string, number>()
   private readonly gitProbeAttemptedAt = new Map<string, number>()
 
   private remoteEventsClientId: string | undefined
@@ -314,7 +300,8 @@ export class RemoteDeviceClient {
       ...(this.remoteHome !== undefined ? { remoteHome: this.remoteHome } : {}),
       ...(this.latencyMs !== undefined ? { latencyMs: this.latencyMs } : {}),
       ...(this.connectedAt !== undefined ? { connectedAt: this.connectedAt } : {}),
-      ...(this.lastError !== undefined ? { lastError: this.lastError } : {}),
+      ...(this.lastError !== undefined || this.gitDiscoveryError !== undefined
+        ? { lastError: this.lastError ?? this.gitDiscoveryError } : {}),
       reconnectAttempt: this.reconnectAttempt,
       sessionCount: counts.sessionCount,
       runningSessionCount: counts.runningSessionCount,
@@ -353,31 +340,8 @@ export class RemoteDeviceClient {
    * Host restart. A later live baseline replaces everything.
    */
   hydrateCatalog(cache: DeviceCatalogCache | undefined): void {
-    if (cache === undefined) return
-    if (this.summaries.length > 0 || this.workspaces.length > 0) return
-    this.summaries = cache.sessions.map(session => ({
-      sessionId: session.sessionId,
-      updatedAt: session.updatedAt,
-      agentAvailable: session.agentAvailable,
-      running: session.running,
-      blank: session.blank,
-      ...(session.parentSessionId !== undefined ? { parentSessionId: session.parentSessionId } : {}),
-      ...(session.origin !== undefined ? { origin: session.origin } : {}),
-      ...(session.cwd !== undefined ? { cwd: session.cwd } : {}),
-    }))
-    this.workspaces = cache.workspaces.map(workspace => ({
-      workspaceId: workspace.workspaceId,
-      path: workspace.path,
-      title: workspace.title,
-      sessionIds: [...workspace.sessionIds],
-      createdAt: workspace.createdAt,
-      updatedAt: workspace.updatedAt,
-    }))
-    this.archivedSessionIds = [...cache.archivedSessionIds]
-    this.pinnedSessionIds = [...cache.pinnedSessionIds]
+    if (cache === undefined || !this.catalog.hydrate(cache)) return
     if (cache.protocolVersion !== 'unknown') this.protocolVersion = cache.protocolVersion
-    this.lastSyncedAt = cache.syncedAt
-    this.catalogStale = true
   }
 
   /** Durable mirror of the current catalog; projections and secrets stay out. */
@@ -388,6 +352,7 @@ export class RemoteDeviceClient {
       protocolVersion: this.protocolVersion,
       sessions: this.summaries.map(session => ({
         sessionId: session.sessionId,
+        ...(session.projections !== undefined ? { title: catalogTitle(session) } : {}),
         updatedAt: session.updatedAt,
         agentAvailable: session.agentAvailable,
         running: session.running,
@@ -429,10 +394,7 @@ export class RemoteDeviceClient {
   }
 
   sessionSummaries(): readonly RemoteSessionSummary[] {
-    if (!this.catalogStale) return this.summaries
-    return this.summaries.map(summary =>
-      summary.running ? { ...summary, running: false, agentAvailable: false } : summary,
-    )
+    return this.catalog.visibleSessions()
   }
 
   workspaceItems(): readonly RemoteWorkspaceItem[] {
@@ -444,7 +406,7 @@ export class RemoteDeviceClient {
   }
 
   setArchivedIds(ids: readonly string[]): void {
-    this.archivedSessionIds = ids.filter(id => typeof id === 'string' && !isNamespacedSessionId(id))
+    this.catalog.setArchivedIds(ids)
   }
 
   pinnedIds(): readonly string[] {
@@ -452,7 +414,7 @@ export class RemoteDeviceClient {
   }
 
   setPinnedIds(ids: readonly string[]): void {
-    this.pinnedSessionIds = ids.filter(id => typeof id === 'string' && !isNamespacedSessionId(id))
+    this.catalog.setPinnedIds(ids)
   }
 
   /**
@@ -460,43 +422,9 @@ export class RemoteDeviceClient {
    * listeners of any newly created or updated remote Sessions.
    */
   refreshSessionCatalog(signal?: AbortSignal): Promise<void> {
-    if (this.protocolVersion !== '0.2' || this.generationAbort.signal.aborted) return Promise.resolve()
-    if (this.running && this.remoteEventsClientId === undefined) return Promise.resolve()
-    if (this.catalogRefresh?.generation === this.generation) return this.catalogRefresh.promise
-    const refresh: CatalogRefresh = { generation: this.generation, mutations: [], promise: Promise.resolve() }
-    const requestSignal = AbortSignal.any([
-      this.generationAbort.signal,
-      ...(signal !== undefined ? [signal] : []),
-    ])
-    this.catalogRefresh = refresh
-    refresh.promise = Promise.resolve().then(async () => {
-      if (requestSignal.aborted || refresh.generation !== this.generation) return
-      const res = await this.rawRpcPost('session/list', { args: { _request: {} } }, requestSignal)
-      if (requestSignal.aborted || refresh.generation !== this.generation) return
-      if (!res.ok || !isRecord(res.value) || !Array.isArray(res.value.items)) {
-        this.setRefreshHealthy(false)
-        return
-      }
-      let next = (res.value.items as RemoteSessionSummary[]).filter(
-        item => typeof item?.sessionId === 'string' && !isNamespacedSessionId(item.sessionId),
-      )
-      for (const mutation of refresh.mutations) next = this.applyCatalogMutation(next, mutation)
-      // Compare against the live table, not the table captured before the RPC:
-      // the event pump has already delivered each mutation to local consumers.
-      const previous = new Map(this.summaries.map(summary => [summary.sessionId, summary]))
-      this.summaries = next
-      this.pruneSessionState(new Set(next.map(summary => summary.sessionId)))
-      this.baselineGeneration = refresh.generation
-      this.refreshHealthy = true
-      this.reconcileSessionSummaries(previous)
-      this.callbacks.onStateChanged(this.id)
-    }).catch(error => {
-      if (!requestSignal.aborted && refresh.generation === this.generation) this.setRefreshHealthy(false)
-      throw error
-    }).finally(() => {
-      if (this.catalogRefresh === refresh) this.catalogRefresh = undefined
-    })
-    return refresh.promise
+    if (this.protocolVersion !== '0.2' || signal?.aborted) return Promise.resolve()
+    if (this.running && !this.catalog.eventsReady) return Promise.resolve()
+    return this.loadSessionBaseline(this.catalog.epoch, signal)
   }
 
   private setRefreshHealthy(healthy: boolean): void {
@@ -505,40 +433,43 @@ export class RemoteDeviceClient {
     this.callbacks.onStateChanged(this.id)
   }
 
-  private applyCatalogMutation(
-    summaries: RemoteSessionSummary[],
-    mutation: CatalogMutation,
-  ): RemoteSessionSummary[] {
-    switch (mutation.type) {
-      case 'added': {
-        const exists = summaries.some(summary => summary.sessionId === mutation.summary.sessionId)
-        return exists
-          ? summaries.map(summary => summary.sessionId === mutation.summary.sessionId ? mutation.summary : summary)
-          : [mutation.summary, ...summaries]
-      }
-      case 'removed':
-        return summaries.filter(summary => summary.sessionId !== mutation.sessionId)
-      case 'status':
-        return summaries.map(summary => summary.sessionId === mutation.sessionId
-          ? { ...summary, running: mutation.running, agentAvailable: true } : summary)
-      case 'blank':
-        return summaries.map(summary => summary.sessionId === mutation.sessionId
-          ? { ...summary, blank: mutation.blank } : summary)
-      case 'activity':
-        return summaries.map(summary => summary.sessionId === mutation.sessionId && mutation.updatedAt > summary.updatedAt
-          ? { ...summary, updatedAt: mutation.updatedAt } : summary)
-    }
+  private loadSessionBaseline(epoch: number, callerSignal?: AbortSignal): Promise<void> {
+    if (this.baselineFlight?.epoch === epoch) return this.baselineFlight.promise
+    const signal = AbortSignal.any([this.generationAbort.signal,
+      ...(this.iterationAbort === undefined ? [] : [this.iterationAbort.signal]),
+      ...(callerSignal === undefined ? [] : [callerSignal])])
+    let previous: ReadonlyMap<string, RemoteSessionSummary> = new Map()
+    let transportThrew = false
+    const promise = this.catalog.refreshSessions(epoch, async () => {
+      try {
+        const res = await this.rawRpcPost('session/list', { args: { _request: {} } }, signal)
+        if (!res.ok) return undefined
+        return res.value
+      } catch (error) { transportThrew = true; throw error }
+    }, false, signal, () => {
+      // Event deltas already reached consumers: compare with the current table.
+      previous = new Map(this.summaries.map(summary => [summary.sessionId, summary]))
+    }).then(applied => {
+      if (!applied || signal.aborted || !this.catalog.isCurrent(epoch)) return
+      this.prunePendingInteractions(new Set(this.summaries.map(summary => summary.sessionId)))
+      this.baselineGeneration = epoch
+      this.refreshHealthy = true
+      this.reconcileSessionSummaries(previous)
+      this.callbacks.onStateChanged(this.id)
+      void this.refreshRegisteredWorkspaceOrigins(epoch)
+    }).catch(error => {
+      if (signal.aborted || !this.catalog.isCurrent(epoch)) return
+      this.setRefreshHealthy(false)
+      // Preserve public behavior: RPC/malformed failures lower freshness; thrown IO still rejects.
+      if (transportThrew) throw error
+    }).finally(() => {
+      if (this.baselineFlight?.promise === promise) this.baselineFlight = undefined
+    })
+    this.baselineFlight = { epoch, promise }
+    return promise
   }
 
-  private mutateCatalog(mutation: CatalogMutation): void {
-    if (this.catalogRefresh?.generation === this.generation) this.catalogRefresh.mutations.push(mutation)
-    this.summaries = this.applyCatalogMutation(this.summaries, mutation)
-  }
-
-  private pruneSessionState(sessionIds: ReadonlySet<string>): void {
-    for (const sessionId of this.projectionsBySession.keys()) {
-      if (!sessionIds.has(sessionId)) this.projectionsBySession.delete(sessionId)
-    }
+  private prunePendingInteractions(sessionIds: ReadonlySet<string>): void {
     for (const [eventId, pending] of this.pendingInteractions) {
       if (sessionIds.has(pending.rawSessionId)) continue
       this.pendingInteractions.delete(eventId)
@@ -587,35 +518,20 @@ export class RemoteDeviceClient {
 
   /** Fence every async operation before a transport/configuration can change. */
   private invalidateGeneration(): void {
-    this.generation += 1
     this.generationAbort.abort()
     this.generationAbort = new AbortController()
-    this.catalogRefresh = undefined
+    this.catalog.beginEpoch()
+    this.baselineFlight = undefined
     this.baselineGeneration = undefined
     this.refreshHealthy = true
-    this.projectionSeqsBySession.clear()
-    this.projectionBaselinesBySession.clear()
     this.remoteEventsClientId = undefined
-    this.catalogStale = true
     this.clearPendingInteractions()
   }
 
   /** Preserve offline rows, but never claim live execution or pending requests. */
   private markDisconnected(): void {
-    this.catalogStale = true
-    const running = this.summaries.filter(summary => summary.running)
-    if (running.length > 0) {
-      this.summaries = this.summaries.map(summary =>
-        summary.running ? { ...summary, running: false, agentAvailable: false } : summary,
-      )
-      for (const summary of running) {
-        this.callbacks.onRemoteEventFrame(this.id, {
-          type: 'emit',
-          event: 'api-session/status',
-          args: [encodeRemoteSessionId(this.id, summary.sessionId), false],
-        })
-      }
-    }
+    // A transport loss is not a terminal execution observation. Merely expose
+    // stale rows with running masked; never mint an unread completion from it.
     this.clearPendingInteractions()
   }
 
@@ -634,6 +550,9 @@ export class RemoteDeviceClient {
   updateConfig(next: DeviceConfig): void {
     this.stop()
     this.config = next
+    this.discoveredGitPaths.clear()
+    this.gitProbeAttemptedAt.clear()
+    this.gitDiscoveryError = undefined
     if (next.enabled) {
       this.start()
     } else {
@@ -761,7 +680,7 @@ export class RemoteDeviceClient {
       }
     } finally {
       signal.removeEventListener('abort', onAbort)
-      this.muxStreams.delete(streamId)
+      if (socket === this.muxSocket) this.muxStreams.delete(streamId)
       if (socket.readyState === WebSocket.OPEN) {
         try {
           socket.send(JSON.stringify({ type: 'cancel', streamId }))
@@ -834,32 +753,34 @@ export class RemoteDeviceClient {
     while (this.running && !outerSignal.aborted) {
       this.iterationAbort?.abort()
       this.invalidateGeneration()
-      const generation = this.generation
       const iterAbort = new AbortController()
       this.iterationAbort = iterAbort
       const signal = AbortSignal.any([outerSignal, iterAbort.signal, this.generationAbort.signal])
+      const epoch = this.catalog.epoch
+      this.discoveredGitPaths.clear()
+      this.gitProbeAttemptedAt.clear()
       try {
         this.state = this.reconnectAttempt === 0 ? 'connecting' : 'reconnecting'
         this.callbacks.onStateChanged(this.id)
 
         // Step 1: Ensure transport (SSH tunnel or direct URL) is up
         const baseUrl = await this.ensureTransportUp(signal)
-        if (signal.aborted || generation !== this.generation) return
+        if (signal.aborted || !this.catalog.isCurrent(epoch)) return
         if (baseUrl === undefined) {
           throw new Error(this.tunnel?.status().error ?? 'Transport endpoint unavailable')
         }
 
         // Step 2: Ensure authentication
         const authRes = await this.authManager.ensureAuthenticated(this.config, baseUrl)
-        if (signal.aborted || generation !== this.generation) return
+        if (signal.aborted || !this.catalog.isCurrent(epoch)) return
         if (!authRes.ok) {
           throw new Error(authRes.error)
         }
 
         // Step 3: Probe protocol & fetch initial session list
         const t0 = Date.now()
-        const probed = await this.handshakeAndLoadInitial(baseUrl, signal)
-        if (signal.aborted || generation !== this.generation) return
+        const probed = await this.handshakeAndLoadInitial(baseUrl, signal, epoch)
+        if (signal.aborted || !this.catalog.isCurrent(epoch)) return
         this.latencyMs = Date.now() - t0
         this.protocolVersion = probed.protocolVersion
         this.realtime = probed.protocolVersion === '0.2'
@@ -867,30 +788,29 @@ export class RemoteDeviceClient {
           this.remoteDshVersion = probed.remoteDshVersion
         }
 
-        // Step 4: Subscribe before refreshing the 0.2 baseline. Socket open
-        // alone is not readiness: `$events` must be ready and the list merged.
+        // Step 4: Hold live streams until disconnection.
+        // A socket is not a directory baseline: all live subscriptions must be ready.
         if (this.protocolVersion === '0.2') {
           await this.runProtocol02Streams(baseUrl, signal, () => {
+            if (signal.aborted || !this.catalog.markLive(epoch)) return
             this.state = 'connected'
             this.connectedAt = Date.now()
             this.lastError = undefined
             this.reconnectAttempt = 0
-            this.lastSyncedAt = Date.now()
-            this.catalogStale = false
             this.callbacks.onStateChanged(this.id)
-          })
+            this.callbacks.onWorkspacesChanged(this.id)
+          }, epoch)
         } else {
+          if (!this.catalog.markLive(epoch, true)) return
           this.state = 'connected'
           this.connectedAt = Date.now()
           this.lastError = undefined
           this.reconnectAttempt = 0
-          this.lastSyncedAt = Date.now()
-          this.catalogStale = false
           this.callbacks.onStateChanged(this.id)
           await this.runProtocol01Polling(baseUrl, signal)
         }
       } catch (error) {
-        if (outerSignal.aborted || !this.running || generation !== this.generation) return
+        if (signal.aborted || !this.running || !this.catalog.isCurrent(epoch)) return
         this.lastError = error instanceof Error ? error.message : String(error)
         this.state = 'error'
         this.invalidateGeneration()
@@ -922,33 +842,35 @@ export class RemoteDeviceClient {
       })
       await this.tunnel.start()
     }
-    const base = this.tunnel.baseUrl()
+    const tunnel = this.tunnel
+    const base = tunnel.baseUrl()
     if (base !== undefined) return base
 
     // Wait briefly if tunnel is still connecting
     for (let i = 0; i < 20 && !signal.aborted; i++) {
-      const current = this.tunnel.baseUrl()
+      const current = tunnel.baseUrl()
       if (current !== undefined) return current
-      if (this.tunnel.status().state === 'error') break
+      if (tunnel.status().state === 'error') break
       await sleepWithSignal(250, signal)
     }
-    return this.tunnel.baseUrl()
+    return signal.aborted ? undefined : tunnel.baseUrl()
   }
 
   private async handshakeAndLoadInitial(
     baseUrl: string,
     signal: AbortSignal,
+    epoch = this.catalog.epoch,
   ): Promise<{ protocolVersion: '0.2' | '0.1'; remoteDshVersion?: string }> {
     // Try DSH 0.2 `/api/session/list` first
     let res02 = await this.rawRpcPost('session/list', { args: { _request: {} } }, signal)
-    signal.throwIfAborted()
+    if (signal.aborted || !this.catalog.isCurrent(epoch)) throw new Error('Remote connection superseded')
     if (!res02.ok && (res02.httpStatus === 401 || res02.httpStatus === 403)) {
       // Force re-auth and retry once
       this.authManager.invalidate(this.config.id)
       await this.authManager.ensureAuthenticated(this.config, baseUrl, true)
-      signal.throwIfAborted()
+      if (signal.aborted || !this.catalog.isCurrent(epoch)) throw new Error('Remote connection superseded')
       res02 = await this.rawRpcPost('session/list', { args: { _request: {} } }, signal)
-      signal.throwIfAborted()
+      if (signal.aborted || !this.catalog.isCurrent(epoch)) throw new Error('Remote connection superseded')
       if (!res02.ok && (res02.httpStatus === 401 || res02.httpStatus === 403)) {
         this.callbacks.onAuthState?.(this.id, 'required', res02.error.message)
       }
@@ -957,7 +879,7 @@ export class RemoteDeviceClient {
       this.callbacks.onAuthState?.(this.id, 'ok')
     }
 
-    signal.throwIfAborted()
+    if (signal.aborted || !this.catalog.isCurrent(epoch)) throw new Error('Remote connection superseded')
     const body02 = res02.ok ? res02.value : undefined
     const listGen = classifyRemoteProtocol(body02)
     // A versionless `items` body is the normal 0.2 list. Ask host.describe
@@ -969,9 +891,9 @@ export class RemoteDeviceClient {
     }
     signal.throwIfAborted()
     const resolved = resolveProbedProtocol(body02, hostValue)
+    if (signal.aborted || !this.catalog.isCurrent(epoch)) throw new Error('Remote connection superseded')
     if (resolved?.protocol === '0.2') {
-      // This request only probes the protocol. Its pre-subscription snapshot
-      // cannot be a live baseline: events could have changed while it was read.
+      // Probe only: the authoritative list is fetched after `$events` ready.
       this.realtime = true
       return { protocolVersion: '0.2', remoteDshVersion: resolved.version ?? '0.2.x' }
     }
@@ -980,6 +902,7 @@ export class RemoteDeviceClient {
         this.remoteHome = hostValue.cwd
       }
       await this.refreshLegacy01Lists(signal)
+      if (signal.aborted || !this.catalog.isCurrent(epoch)) throw new Error('Remote connection superseded')
       this.realtime = false
       return { protocolVersion: '0.1', remoteDshVersion: resolved.version ?? '0.1.x' }
     }
@@ -991,8 +914,8 @@ export class RemoteDeviceClient {
     baseUrl: string,
     signal: AbortSignal,
     onReady?: () => void,
+    epoch = this.catalog.epoch,
   ): Promise<void> {
-    const generation = this.generation
     signal.throwIfAborted()
     const wsUrl = new URL('/api/remote.mux', baseUrl)
     wsUrl.protocol = wsUrl.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -1008,22 +931,10 @@ export class RemoteDeviceClient {
     this.muxSocket = socket
 
     await new Promise<void>((resolve, reject) => {
-      const onOpen = (): void => {
-        cleanup()
-        resolve()
-      }
-      const onErr = (err: Error): void => {
-        cleanup()
-        reject(err)
-      }
-      const onAbort = (): void => {
-        cleanup()
-        reject(new Error('Remote stream connection aborted'))
-      }
-      const onClose = (): void => {
-        cleanup()
-        reject(new Error('Remote stream closed before opening'))
-      }
+      const onOpen = (): void => { cleanup(); resolve() }
+      const onErr = (err: Error): void => { cleanup(); reject(err) }
+      const onAbort = (): void => { cleanup(); reject(new Error('Remote connection aborted')) }
+      const onClose = (): void => onErr(new Error('Remote stream WebSocket closed before open'))
       const cleanup = (): void => {
         socket.off('open', onOpen)
         socket.off('error', onErr)
@@ -1036,10 +947,18 @@ export class RemoteDeviceClient {
       signal.addEventListener('abort', onAbort, { once: true })
       if (signal.aborted) onAbort()
     })
-
-    signal.throwIfAborted()
+    if (signal.aborted || !this.catalog.isCurrent(epoch)) return
+    let announced = false
+    let baselineTimer: ReturnType<typeof setTimeout> | undefined
+    const ready = (): void => {
+      if (announced || signal.aborted || !this.catalog.isCurrent(epoch) || !this.catalog.ready) return
+      announced = true
+      clearTimeout(baselineTimer)
+      onReady?.()
+    }
 
     socket.on('message', (data) => {
+      if (signal.aborted || !this.catalog.isCurrent(epoch)) return
       try {
         const frame = JSON.parse(data.toString('utf8')) as {
           type: 'item' | 'end' | 'error'
@@ -1071,58 +990,54 @@ export class RemoteDeviceClient {
       socket.once('error', (err) => reject(err))
     })
 
-    let eventsReady!: () => void
-    const ready = new Promise<void>(resolve => { eventsReady = resolve })
-    let onAbort!: () => void
-    const aborted = new Promise<never>((_, reject) => {
-      onAbort = () => reject(new Error('Remote stream connection aborted'))
-      signal.addEventListener('abort', onAbort, { once: true })
-      if (signal.aborted) onAbort()
+    const baselineTimeout = new Promise<never>((_, reject) => {
+      baselineTimer = setTimeout(() => reject(new Error('Remote catalog baseline timed out')), 15_000)
+      baselineTimer.unref?.()
     })
-    const streams = Promise.race([
-      closed,
-      aborted,
-      this.pump02RemoteEvents(signal, eventsReady),
-      this.pump02WorkspaceFollow(signal),
-      this.pump02SessionControl(signal),
-    ]).then(() => { throw new Error('Remote stream ended') })
     try {
-      await Promise.race([streams, ready])
-      // Do not await refresh inside the event pump: mutation replay must keep
-      // consuming status/activity/added/removed while this request is inflight.
-      await Promise.race([streams, this.refreshSessionCatalog(signal)])
-      signal.throwIfAborted()
-      if (generation !== this.generation || this.baselineGeneration !== generation) {
-        throw new Error('Remote session baseline unavailable')
-      }
-      onReady?.()
-      await streams
+      await Promise.race([
+        closed,
+        baselineTimeout,
+        this.pump02RemoteEvents(signal, epoch, ready).then(() => { if (!signal.aborted) throw new Error('Remote $events stream ended') }),
+        this.pump02WorkspaceFollow(signal, epoch, ready),
+        this.pump02SessionControl(signal, epoch, ready).then(() => { if (!signal.aborted) throw new Error('Remote session/control stream ended') }),
+      ])
     } finally {
       clearInterval(pingInterval)
-      signal.removeEventListener('abort', onAbort)
+      clearTimeout(baselineTimer)
     }
   }
 
-  private async pump02RemoteEvents(signal: AbortSignal, onReady?: () => void): Promise<void> {
-    const generation = this.generation
+  private async pump02RemoteEvents(signal: AbortSignal, epoch = this.catalog.epoch, onReady = (): void => {}): Promise<void> {
+    let baseline: Promise<void> | undefined
+    let baselineError: unknown
     for await (const item of this.openStream('$events', {}, signal)) {
-      if (signal.aborted || generation !== this.generation) return
+      if (signal.aborted || !this.catalog.isCurrent(epoch)) return
+      if (baselineError !== undefined) throw baselineError
       if (!isRecord(item) || typeof item.type !== 'string') continue
       if (item.type === 'ready') {
         if (typeof item.clientId === 'string') {
           this.remoteEventsClientId = item.clientId
-          onReady?.()
         }
         if (isRecord(item.host) && typeof item.host.home === 'string') {
           this.remoteHome = item.host.home
           this.callbacks.onStateChanged(this.id)
         }
-        // The server replays only waterfalls that are still authoritative.
+        if (typeof item.clientId !== 'string' || item.clientId.length === 0) continue
+        this.catalog.markEventsReady(epoch)
+        // Do not await here: the event pump must journal all deltas during HTTP IO.
+        baseline ??= this.loadSessionBaseline(epoch).then(() => {
+          if (!signal.aborted && this.catalog.isCurrent(epoch) && !this.refreshHealthy) throw new Error('Remote session baseline unavailable')
+          onReady()
+        }).catch(error => {
+          baselineError = error
+          if (this.catalog.isCurrent(epoch) && !signal.aborted) this.muxSocket?.close()
+        })
         continue
       }
 
       if (item.type === 'emit' && typeof item.event === 'string' && Array.isArray(item.args)) {
-        this.handle02EmitEvent(item.event, item.args)
+        this.handle02EmitEvent(item.event, item.args, epoch)
         continue
       }
 
@@ -1170,73 +1085,28 @@ export class RemoteDeviceClient {
         })
       }
     }
+
   }
 
-  private handle02EmitEvent(event: string, args: unknown[]): void {
+  private handle02EmitEvent(event: string, args: unknown[], epoch = this.catalog.epoch): void {
+    if (!this.catalog.isCurrent(epoch)) return
     switch (event) {
-      case 'api-session/added': {
-        const raw = args[0]
-        if (isRecord(raw) && typeof raw.sessionId === 'string') {
-          if (isNamespacedSessionId(raw.sessionId)) break
-          const summary = raw as unknown as RemoteSessionSummary
-          this.mutateCatalog({ type: 'added', summary })
-          this.callbacks.onStateChanged(this.id)
-          this.callbacks.onWorkspacesChanged(this.id)
-          this.callbacks.onRemoteEventFrame(this.id, {
-            type: 'emit',
-            event,
-            args: [this.namespaceSummary(summary)],
-          })
-        }
-        break
-      }
-      case 'api-session/removed': {
-        const sessionId = args[0]
-        if (typeof sessionId === 'string') {
-          if (isNamespacedSessionId(sessionId)) break
-          this.mutateCatalog({ type: 'removed', sessionId })
-          this.projectionsBySession.delete(sessionId)
-          for (const [eventId, pending] of this.pendingInteractions) {
-            if (pending.rawSessionId !== sessionId) continue
-            this.pendingInteractions.delete(eventId)
-            this.callbacks.onRemoteEventFrame(this.id, { type: 'cancel', eventId: pending.namespacedEventId })
-          }
-          this.callbacks.onStateChanged(this.id)
-          this.callbacks.onWorkspacesChanged(this.id)
-          this.callbacks.onRemoteEventFrame(this.id, {
-            type: 'emit',
-            event,
-            args: [encodeRemoteSessionId(this.id, sessionId)],
-          })
-        }
-        break
-      }
-      case 'api-session/status': {
-        const [sessionId, running] = args
-        if (typeof sessionId === 'string' && typeof running === 'boolean') {
-          if (isNamespacedSessionId(sessionId)) break
-          this.mutateCatalog({ type: 'status', sessionId, running })
-          this.callbacks.onStateChanged(this.id)
-          this.callbacks.onRemoteEventFrame(this.id, {
-            type: 'emit',
-            event,
-            args: [encodeRemoteSessionId(this.id, sessionId), running],
-          })
-        }
-        break
-      }
+      case 'api-session/added':
+      case 'api-session/removed':
+      case 'api-session/status':
       case 'api-session/activity': {
-        const [sessionId, updatedAt] = args
-        if (typeof sessionId === 'string' && typeof updatedAt === 'number') {
-          if (isNamespacedSessionId(sessionId)) break
-          this.mutateCatalog({ type: 'activity', sessionId, updatedAt })
-          this.callbacks.onWorkspacesChanged(this.id)
-          this.callbacks.onRemoteEventFrame(this.id, {
-            type: 'emit',
-            event,
-            args: [encodeRemoteSessionId(this.id, sessionId), updatedAt],
-          })
-        }
+        if (!this.catalog.applySessionEvent(epoch, event, args)) break
+        if (event === 'api-session/removed') this.prunePendingInteractions(new Set(this.summaries.map(summary => summary.sessionId)))
+        const raw = args[0]
+        const summary = event === 'api-session/added' && isRecord(raw)
+          ? this.summaries.find(row => row.sessionId === raw.sessionId) : undefined
+        this.callbacks.onStateChanged(this.id)
+        this.callbacks.onWorkspacesChanged(this.id)
+        this.callbacks.onRemoteEventFrame(this.id, {
+          type: 'emit', event,
+          args: summary !== undefined ? [this.namespaceSummary(summary)]
+            : [encodeRemoteSessionId(this.id, args[0] as string), ...args.slice(1)],
+        })
         break
       }
       case 'api-session/error': {
@@ -1265,140 +1135,35 @@ export class RemoteDeviceClient {
     }
   }
 
-  private sanitizeRemoteWorkspace(ws: RemoteWorkspaceItem): RemoteWorkspaceItem | undefined {
-    if (typeof ws?.workspaceId !== 'string' || isNamespacedWorkspaceId(ws.workspaceId)) return undefined
-    const sessionIds = Array.isArray(ws.sessionIds)
-      ? ws.sessionIds.filter(id => typeof id === 'string' && !isNamespacedSessionId(id))
-      : []
-    return { ...ws, sessionIds }
-  }
-
-  private async pump02WorkspaceFollow(signal: AbortSignal): Promise<void> {
-    const generation = this.generation
+  private async pump02WorkspaceFollow(signal: AbortSignal, epoch = this.catalog.epoch, onReady = (): void => {}): Promise<void> {
     for await (const frame of this.openStream('workspace/follow', {}, signal)) {
-      if (signal.aborted || generation !== this.generation) return
-      if (!isRecord(frame) || typeof frame.type !== 'string') continue
-      // DSH 0.2.2 can replace the complete projection when a remote-access
-      // filter changes. Treat it exactly like a reconnect baseline: the old
-      // row set is no longer authoritative.
-      if ((frame.type === 'baseline' || frame.type === 'replace') && isRecord(frame.value)) {
-        const val = frame.value
-        this.workspaces = Array.isArray(val.items)
-          ? (val.items as RemoteWorkspaceItem[])
-              .map(w => this.sanitizeRemoteWorkspace(w))
-              .filter((w): w is RemoteWorkspaceItem => w !== undefined)
-          : []
-        this.archivedSessionIds = Array.isArray(val.archivedSessionIds)
-          ? (val.archivedSessionIds as string[]).filter(id => typeof id === 'string' && !isNamespacedSessionId(id))
-          : []
-        this.pinnedSessionIds = Array.isArray(val.pinnedSessionIds)
-          ? (val.pinnedSessionIds as string[]).filter(id => typeof id === 'string' && !isNamespacedSessionId(id))
-          : []
-        this.callbacks.onStateChanged(this.id)
-        this.callbacks.onWorkspacesChanged(this.id)
-        void this.refreshRegisteredWorkspaceOrigins()
-        continue
-      }
-      if (frame.type === 'upsert' && isRecord(frame.workspace)) {
-        const ws = this.sanitizeRemoteWorkspace(frame.workspace as unknown as RemoteWorkspaceItem)
-        if (ws === undefined) continue
-        const idx = this.workspaces.findIndex(w => w.workspaceId === ws.workspaceId)
-        if (idx === -1) this.workspaces = [ws, ...this.workspaces]
-        else this.workspaces = this.workspaces.map((w, i) => (i === idx ? ws : w))
-        this.callbacks.onWorkspacesChanged(this.id)
-        void this.refreshRegisteredWorkspaceOrigins()
-      } else if (frame.type === 'remove' && typeof frame.workspaceId === 'string') {
-        if (isNamespacedWorkspaceId(frame.workspaceId)) continue
-        this.workspaces = this.workspaces.filter(w => w.workspaceId !== frame.workspaceId)
-        this.callbacks.onWorkspacesChanged(this.id)
-      } else if (frame.type === 'order' && Array.isArray(frame.workspaceIds)) {
-        const rank = new Map((frame.workspaceIds as string[]).map((id, i) => [id, i]))
-        this.workspaces = [...this.workspaces].sort(
-          (a, b) => (rank.get(a.workspaceId) ?? 9999) - (rank.get(b.workspaceId) ?? 9999),
-        )
-        this.callbacks.onWorkspacesChanged(this.id)
-      } else if (frame.type === 'archived' && Array.isArray(frame.archivedSessionIds)) {
-        this.archivedSessionIds = (frame.archivedSessionIds as string[]).filter(
-          id => typeof id === 'string' && !isNamespacedSessionId(id),
-        )
-        this.callbacks.onWorkspacesChanged(this.id)
-      } else if (frame.type === 'pinned' && Array.isArray(frame.pinnedSessionIds)) {
-        this.pinnedSessionIds = (frame.pinnedSessionIds as string[]).filter(
-          id => typeof id === 'string' && !isNamespacedSessionId(id),
-        )
-        this.callbacks.onWorkspacesChanged(this.id)
-      }
+      if (signal.aborted || !this.catalog.isCurrent(epoch)) return
+      if (!this.catalog.applyWorkspaceFrame(epoch, frame)) continue
+      this.callbacks.onStateChanged(this.id)
+      this.callbacks.onWorkspacesChanged(this.id)
+      void this.refreshRegisteredWorkspaceOrigins(epoch)
+      onReady()
     }
+    if (!signal.aborted) throw new Error('Remote workspace/follow stream ended')
   }
 
-  private applySessionListMetadata(sessionId: string, key: string, value: unknown): void {
-    if (key !== 'sessionListMetadata' || !isRecord(value) || typeof value.blank !== 'boolean') return
-    const previous = new Map(this.summaries.map(summary => [summary.sessionId, summary]))
-    this.mutateCatalog({ type: 'blank', sessionId, blank: value.blank })
-    if (previous.get(sessionId)?.blank === value.blank || !previous.has(sessionId)) return
-    this.reconcileSessionSummaries(previous)
-    this.callbacks.onStateChanged(this.id)
-  }
-
-  private async pump02SessionControl(signal: AbortSignal): Promise<void> {
-    const generation = this.generation
+  private async pump02SessionControl(signal: AbortSignal, epoch = this.catalog.epoch, onReady = (): void => {}): Promise<void> {
     for await (const frame of this.openStream('session/control', {}, signal)) {
-      if (signal.aborted || generation !== this.generation) return
-      if (!isRecord(frame) || typeof frame.type !== 'string') continue
-      if (frame.type === 'baseline' && isRecord(frame.value) && isRecord(frame.value.projections)) {
-        this.projectionsBySession.clear()
-        this.projectionSeqsBySession.clear()
-        this.projectionBaselinesBySession.clear()
-        for (const [sid, block] of Object.entries(frame.value.projections)) {
-          if (isNamespacedSessionId(sid)) continue
-          if (isRecord(block) && typeof block.asOfSeq === 'number' && isRecord(block.values)) {
-            const namespacedValues = this.namespaceProjectionValues(block.values)
-            this.projectionsBySession.set(sid, {
-              asOfSeq: block.asOfSeq,
-              values: namespacedValues,
-            })
-            const asOfSeq = block.asOfSeq
-            this.projectionBaselinesBySession.set(sid, asOfSeq)
-            this.projectionSeqsBySession.set(sid, new Map(Object.keys(namespacedValues).map(key => [key, asOfSeq])))
-            for (const [key, value] of Object.entries(namespacedValues)) {
-              this.applySessionListMetadata(sid, key, value)
-              this.callbacks.onControlProjectionFrame(this.id, {
-                sessionId: encodeRemoteSessionId(this.id, sid),
-                key,
-                value,
-                seq: Math.max(0, block.asOfSeq),
-              })
-            }
-          }
-        }
-        continue
+      if (signal.aborted || !this.catalog.isCurrent(epoch)) return
+      const previous = new Map(this.summaries.map(summary => [summary.sessionId, summary]))
+      const updates = this.catalog.applyControlFrame(epoch, frame, (key, value) => this.namespaceProjectionValue(key, value))
+      if (updates === undefined) continue
+      for (const update of updates) this.callbacks.onControlProjectionFrame(this.id, {
+        ...update, sessionId: encodeRemoteSessionId(this.id, update.sessionId),
+      })
+      if (updates.some(update => update.key === 'title' || update.key === 'sessionListMetadata')) {
+        this.reconcileSessionSummaries(previous)
+        this.callbacks.onWorkspacesChanged(this.id)
+        this.callbacks.onStateChanged(this.id)
       }
-      if (
-        frame.type === 'projection' &&
-        typeof frame.sessionId === 'string' &&
-        typeof frame.key === 'string' &&
-        typeof frame.seq === 'number'
-      ) {
-        if (isNamespacedSessionId(frame.sessionId)) continue
-        const seqs = this.projectionSeqsBySession.get(frame.sessionId) ?? new Map<string, number>()
-        const previousSeq = seqs.get(frame.key) ?? this.projectionBaselinesBySession.get(frame.sessionId)
-        if (previousSeq !== undefined && frame.seq <= previousSeq) continue
-        seqs.set(frame.key, frame.seq)
-        this.projectionSeqsBySession.set(frame.sessionId, seqs)
-        const namespacedValue = this.namespaceProjectionValue(frame.key, frame.value)
-        const existing = this.projectionsBySession.get(frame.sessionId) ?? { asOfSeq: frame.seq, values: {} }
-        existing.values[frame.key] = namespacedValue
-        existing.asOfSeq = Math.max(existing.asOfSeq, frame.seq)
-        this.projectionsBySession.set(frame.sessionId, existing)
-        this.applySessionListMetadata(frame.sessionId, frame.key, namespacedValue)
-        this.callbacks.onControlProjectionFrame(this.id, {
-          sessionId: encodeRemoteSessionId(this.id, frame.sessionId),
-          key: frame.key,
-          value: namespacedValue,
-          seq: frame.seq,
-        })
-      }
+      onReady()
     }
+
   }
 
   /**
@@ -1409,25 +1174,29 @@ export class RemoteDeviceClient {
    * only the paths DSH already lists are read. Discovering projects that exist
    * on disk but are not registered happens solely in the manual Git match.
    */
-  private async refreshRegisteredWorkspaceOrigins(): Promise<void> {
-    if (this.config.transport.kind !== 'ssh') return
+  private async refreshRegisteredWorkspaceOrigins(epoch = this.catalog.epoch): Promise<void> {
+    if (this.config.transport.kind !== 'ssh' || !this.catalog.isCurrent(epoch)) return
     const now = Date.now()
-    const pendingPaths = this.workspaces
-      .map(w => w.path)
-      .filter(p => p && !this.discoveredGitPaths.has(p))
-      .filter(p => now - (this.gitProbeAttemptedAt.get(p) ?? 0) >= 60_000)
+    const pendingPaths = [...new Set(this.workspaces.map(w => w.path))]
+      .filter(p => p && now - (this.discoveredGitPaths.get(p) ?? -Infinity) >= 300_000)
+      .filter(p => now - (this.gitProbeAttemptedAt.get(p) ?? -Infinity) >= 60_000)
     if (pendingPaths.length === 0) return
     for (const p of pendingPaths) this.gitProbeAttemptedAt.set(p, now)
-
-    const generation = this.generation
-    const discovered = await discoverRemoteGitRemotesViaSsh(this.config.transport, pendingPaths)
-    if (generation !== this.generation) return
-    // Only mark a path as complete when a remote URL was actually found; a
-    // transient SSH/git failure must be retryable on a later workspace change.
-    for (const path of discovered.keys()) this.discoveredGitPaths.add(path)
-    if (discovered.size > 0) {
-      this.callbacks.onGitRemotesDiscovered(this.id, discovered)
+    try {
+      const discovered = await discoverRemoteGitRemotesViaSsh(this.config.transport, pendingPaths)
+      if (!this.catalog.isCurrent(epoch)) return
+      for (const path of discovered.keys()) this.discoveredGitPaths.set(path, Date.now())
+      this.gitDiscoveryError = undefined
+      // Include explicit empty origins for successfully probed paths without a repository.
+      // The registry/aggregator can invalidate a previous origin rather than retaining it forever.
+      const origins = new Map(pendingPaths.map(path => [path, discovered.get(path) ?? '']))
+      this.callbacks.onGitRemotesDiscovered(this.id, origins)
       this.callbacks.onWorkspacesChanged(this.id)
+      this.callbacks.onStateChanged(this.id)
+    } catch (error) {
+      if (!this.catalog.isCurrent(epoch)) return
+      this.gitDiscoveryError = `Git discovery: ${error instanceof Error ? error.message : String(error)}`
+      this.callbacks.onStateChanged(this.id)
     }
   }
 
@@ -1436,46 +1205,29 @@ export class RemoteDeviceClient {
   // ==========================================================================
 
   private async refreshLegacy01Lists(signal: AbortSignal): Promise<void> {
-    const generation = this.generation
-    // The two lists are independent: fetch them in parallel so a 0.1 device
-    // with a large catalog reconciles in one round-trip instead of two.
-    const [sRes, wRes] = await Promise.all([
-      this.rawRpcPost('session.list', {}, signal, 'session.list'),
+    const epoch = this.catalog.epoch
+    const previous = new Map(this.summaries.map(summary => [summary.sessionId, summary]))
+    const [sessions, workspaces] = await Promise.all([
+      this.catalog.refreshSessions(epoch, async () => {
+        const res = await this.rawRpcPost('session.list', {}, signal, 'session.list')
+        if (!res.ok) throw new Error(res.error.message)
+        return res.value
+      }, true),
       this.rawRpcPost('workspace.list', {}, signal, 'workspace.list'),
     ])
-    if (signal.aborted || generation !== this.generation) return
-    const previousSummaries = new Map(this.summaries.map(summary => [summary.sessionId, summary]))
-    if (sRes.ok && isRecord(sRes.value) && Array.isArray(sRes.value.items)) {
-      this.summaries = (sRes.value.items as Record<string, unknown>[]).map(item => ({
-        sessionId: String(item.sessionId ?? ''),
-        updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : Date.now(),
-        agentAvailable: true,
-        running: Boolean(item.running),
-        blank: Boolean(item.blank),
-        ...(typeof item.parentSessionId === 'string' ? { parentSessionId: item.parentSessionId } : {}),
-        ...(typeof item.cwd === 'string' ? { cwd: item.cwd } : {}),
-        ...(isRecord(item.projections)
-          ? {
-              projections: {
-                kind: 'cached' as const,
-                asOfSeq: typeof item.projections.asOfSeq === 'number' ? item.projections.asOfSeq : 0,
-                values: isRecord(item.projections.values) ? item.projections.values : {},
-              },
-            }
-          : {}),
-      }))
-      this.pruneSessionState(new Set(this.summaries.map(summary => summary.sessionId)))
-      this.baselineGeneration = generation
+    if (signal.aborted || !this.catalog.isCurrent(epoch)) return
+    if (!workspaces.ok) throw new Error(workspaces.error.message)
+    if (!this.catalog.applyWorkspaceFrame(epoch, { type: 'baseline', value: workspaces.value }, true)) {
+      throw new Error('Invalid legacy workspace.list baseline')
     }
-    if (wRes.ok && isRecord(wRes.value) && Array.isArray(wRes.value.items)) {
-      this.workspaces = wRes.value.items as RemoteWorkspaceItem[]
-      if (Array.isArray(wRes.value.archivedSessionIds)) {
-        this.archivedSessionIds = wRes.value.archivedSessionIds as string[]
-      }
-      this.callbacks.onWorkspacesChanged(this.id)
-      void this.refreshRegisteredWorkspaceOrigins()
+    if (sessions) {
+      this.baselineGeneration = epoch
+      this.refreshHealthy = true
+      this.prunePendingInteractions(new Set(this.summaries.map(summary => summary.sessionId)))
+      this.reconcileSessionSummaries(previous)
     }
-    this.reconcileSessionSummaries(previousSummaries)
+    this.callbacks.onWorkspacesChanged(this.id)
+    void this.refreshRegisteredWorkspaceOrigins(epoch)
   }
 
   private async runProtocol01Polling(_baseUrl: string, signal: AbortSignal): Promise<void> {
@@ -1509,12 +1261,6 @@ export class RemoteDeviceClient {
   ): AsyncIterable<unknown> {
     const req = (args.request ?? {}) as { address?: { sessionId?: string }; maxMessages?: number }
     const sessionId = req.address?.sessionId ?? ''
-    const res = await this.rawRpcPost(
-      'session.history',
-      { sessionId, ...(req.maxMessages !== undefined ? { maxMessages: req.maxMessages } : {}) },
-      signal,
-      'session.history',
-    )
     // 0.1 has no incremental follow. Return an empty snapshot so the caller
     // does not treat a one-shot history dump as a live stream, then wait
     // until the caller aborts. Lists keep refreshing in the poll loop.
@@ -1528,6 +1274,7 @@ export class RemoteDeviceClient {
       projections: { asOfSeq: -1, values: {} },
       assistantStream: { revision: 0 },
     }
+    if (signal.aborted) return
     await new Promise<void>((resolve) => {
       signal.addEventListener('abort', () => resolve(), { once: true })
     })
@@ -1647,9 +1394,7 @@ export class RemoteDeviceClient {
     this.muxStreams.clear()
     if (socket !== undefined) {
       socket.removeAllListeners()
-      // ws emits an asynchronous error when closed during its handshake.
-      // The obsolete supervisor no longer owns listeners, but must absorb it.
-      socket.once('error', () => {})
+      socket.on('error', () => { /* Closing a CONNECTING socket emits asynchronously. */ })
       try { socket.close() } catch { /* ignore */ }
     }
   }

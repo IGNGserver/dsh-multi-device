@@ -19,11 +19,8 @@ import { appendFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import {
-  installAggregatedGateway02,
   readLocalPhysicalWorkspaces,
-  supportsWorkspaceReplaceFrames,
   type SessionControllerLike,
-  type TypertGatewayLike,
   type WorkspaceControllerLike,
   type WorkspaceRegistryLike,
 } from './host/gateway.ts'
@@ -154,23 +151,6 @@ function applyHost(
     }
   }
 
-  /**
-   * The Client WorkspaceModel ships with the same release as the Host. Its
-   * `clientModules` service publishes that release version; DSH 0.2.0 does
-   * not understand an incremental workspace `replace`, so the aggregated
-   * stream only uses it on newer clients.
-   */
-  const getClientReleaseVersion = (): string | undefined => {
-    try {
-      const service = (ctx as unknown as { get?: (k: string) => unknown }).get?.('clientModules') as
-        | { release?: { version?: unknown } }
-        | undefined
-      return typeof service?.release?.version === 'string' ? service.release.version : undefined
-    } catch {
-      return undefined
-    }
-  }
-
   const getLocalAgents = (): { list?: () => readonly { id: string; status?: string }[] } | undefined => {
     try {
       return (ctx as unknown as { get?: (k: string) => unknown }).get?.('agents') as { list?: () => readonly { id: string; status?: string }[] } | undefined
@@ -213,6 +193,7 @@ function applyHost(
     return typeof dispose === 'function' ? dispose : () => {}
   }, 'dsh-multi-device: local session activity')
 
+  let localCatalogRows: readonly import('./host/aggregated-catalog.ts').CatalogSummaryInput[] = []
   const registry = new DeviceRegistry(
     dataFile,
     secretsFile,
@@ -251,6 +232,8 @@ function applyHost(
         }
         return map
       },
+      localPinnedSessionIds: () => getWorkspaceRegistry()?.pinnedSessionIds ?? [],
+      localSessionSummaries: () => localCatalogRows,
       // Archived Sessions have no default sidebar row, so the unread counters
       // must know about them to avoid reporting reminders that cannot be seen.
       localArchivedSessionIds: () => {
@@ -437,13 +420,12 @@ function applyHost(
   // 3. Attach Aggregated Mode Gateway when enabled and Host services become available
   if (enableAggregated) {
     ctx.inject(
-      ['sessionController', 'workspaceController', 'typertGateway'],
+      ['sessionController', 'workspaceController'],
       (gatewayCtx) => {
         gatewayCtx.effect(() => {
           try {
             const sessionController = (gatewayCtx as unknown as { sessionController: SessionControllerLike }).sessionController
             const workspaceController = (gatewayCtx as unknown as { workspaceController: WorkspaceControllerLike }).workspaceController
-            const typertGateway = (gatewayCtx as unknown as { typertGateway: TypertGatewayLike }).typertGateway
 
             registry.setLocalWorkspaceCreator(async (path) => {
               await workspaceController.create({ path })
@@ -453,26 +435,59 @@ function applyHost(
               return created.sessionId
             })
 
-            const disposeGateway = installAggregatedGateway02(
-              registry,
-              sessionController,
-              workspaceController,
-              typertGateway,
-              getWorkspaceRegistry(),
-              {
-                workspaceReplaceFrames: () =>
-                  supportsWorkspaceReplaceFrames(getClientReleaseVersion()),
-              },
-            )
+            const abort = new AbortController()
+            let dirty = true
+            let refreshing = false
+            const refreshLocal = async (): Promise<void> => {
+              dirty = true
+              if (refreshing) return
+              refreshing = true
+              try {
+                while (dirty && !abort.signal.aborted) {
+                  dirty = false
+                  const result = await sessionController.list({}, abort.signal)
+                  if (abort.signal.aborted) return
+                  localCatalogRows = result.items as unknown as readonly import('./host/aggregated-catalog.ts').CatalogSummaryInput[]
+                  registry.refreshWorkspaceView()
+                }
+              } catch (error) {
+                if (!abort.signal.aborted) console.error('[dsh-multi-device] Local directory refresh failed', error)
+              } finally { refreshing = false }
+            }
+            registry.setLocalCatalogAdapters(async (sessionId, operation, title, stopActivity) => {
+              if (operation === 'rename') {
+                if (!title?.trim()) throw new Error('A non-empty title is required')
+                await sessionController.rename({ sessionId, title: title.trim() })
+              } else if (operation === 'fork') {
+                const result = await sessionController.fork({ sessionId })
+                await refreshLocal()
+                return result
+              } else {
+                const methods = { archive: 'archiveSession', unarchive: 'unarchiveSession', pin: 'pinSession', unpin: 'unpinSession' } as const
+                await workspaceController[methods[operation]]({ sessionId, ...(operation === 'archive' && stopActivity === true ? { stopActivity: true } : {}) })
+              }
+              await refreshLocal()
+              return {}
+            }, async query => (await sessionController.search({ query }, abort.signal)).items.map(item => item.sessionId))
+            const disposers: (() => void)[] = []
+            const events = ['api-session/added', 'api-session/removed', 'api-session/activity', 'api-session/status', 'workspace/changed']
+            for (const event of events) {
+              const off = (gatewayCtx as unknown as { on?: (event: string, listener: () => void) => (() => void) | void }).on?.(event, () => { void refreshLocal() })
+              if (typeof off === 'function') disposers.push(off)
+            }
+            const offDomain = (gatewayCtx as unknown as { on?: (event: string, listener: (change: { domain?: string }) => void) => (() => void) | void }).on?.('domain/changed', change => {
+              if (change.domain === 'workspace') void refreshLocal()
+            })
+            if (typeof offDomain === 'function') disposers.push(offDomain)
+            const timer = setInterval(() => { void refreshLocal() }, 15_000)
+            timer.unref?.()
+            void refreshLocal()
+            // The independent catalog does not patch local controllers or Typert dispatch.
             registry.setGatewayStatus(true)
             return () => {
-              disposeGateway()
-              registry.setLocalWorkspaceCreator(async () => {
-                throw new Error('Local workspace creation is unavailable')
-              })
-              registry.setLocalSessionCreator(async () => {
-                throw new Error('Local workspace creation is unavailable')
-              })
+              abort.abort()
+              clearInterval(timer)
+              for (const dispose of disposers) dispose()
               registry.setGatewayStatus(false)
             }
           } catch (error) {

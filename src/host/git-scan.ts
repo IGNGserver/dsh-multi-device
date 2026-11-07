@@ -3,8 +3,8 @@
  *
  * Discovery walks a small, explicit set of roots instead of assuming a
  * conventional `~/dev` layout: the user home plus the parent directory of every
- * workspace already registered on that device. Hidden directories are pruned,
- * so `.wt` worktrees and tool caches never become projects.
+ * workspace already registered on that device. Hidden caches are pruned except
+ * the deliberate `.wt` container; .git files and directories are both members.
  *
  * Scanning is only ever triggered by an explicit user action; nothing here is
  * called from a workspace/session stream.
@@ -16,6 +16,7 @@ import { join, posix, resolve, win32 } from 'node:path'
 import { normalizeGitRemote, type SshTransportConfig } from '../contract.ts'
 import { discoverLocalGitRemote } from './git-aggregator.ts'
 import { execSshCommand } from './tunnel.ts'
+import { assertGitPathNamespace, encodeGitScript, gitPlatformProbe, quotePosix, quotePowerShell } from './git-platform.ts'
 
 /** Directory names that never contain project repositories worth scanning. */
 const PRUNED_NAMES = new Set([
@@ -58,7 +59,7 @@ function normalizeTargetPath(input: string, stepUp = false): string {
   if (trimmed.startsWith('/')) {
     return stepUp ? posix.resolve(trimmed, '..') : posix.resolve(trimmed)
   }
-  return stepUp ? resolve(trimmed, '..') : resolve(trimmed)
+  throw new Error(`Scan roots must use an absolute device path: ${input}`)
 }
 
 /**
@@ -90,35 +91,64 @@ export function deriveScanRoots(
   return [...roots].sort()
 }
 
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`
+/** Clamp untrusted numeric options before embedding them into a script. */
+function scanDepth(value: number): number {
+  return Number.isFinite(value) ? Math.min(32, Math.max(0, Math.trunc(value))) : DEFAULT_SCAN_DEPTH
 }
 
-/**
- * Build the POSIX shell snippet that lists every `.git` directory below the
- * roots with its `origin` URL. Directories with a `.git` *file* are worktrees
- * and are intentionally skipped: a worktree is a member of its main project,
- * not a project of its own.
- */
+/** Scan only explicit roots; .wt is the sole hidden container traversed. */
 export function buildGitScanScript(roots: readonly string[], maxDepth = DEFAULT_SCAN_DEPTH): string {
-  const depth = Math.max(1, Math.trunc(maxDepth)) + 1
-  const rootList = roots.length > 0 ? roots.map(shellQuote).join(' ') : '"$HOME"'
-  const prune = [...PRUNED_NAMES].map(name => `-name ${shellQuote(name)}`).join(' -o ')
+  const depth = scanDepth(maxDepth) + 1
+  const rootList = roots.length > 0 ? roots.map(quotePosix).join(' ') : '"$HOME"'
+  const prune = [...PRUNED_NAMES].map(name => `-name ${quotePosix(name)}`).join(' -o ')
   return [
-    `set -eu`,
-    `scan_file=$(mktemp) || exit 1`,
+    'set -eu; command -v git >/dev/null',
+    'scan_file=$(mktemp) || exit 1',
     `trap 'rm -f "$scan_file" "$scan_file.sorted"' EXIT HUP INT TERM`,
     `for root in ${rootList}; do`,
-    `  [ -d "$root" ] || continue`,
-    `  find "$root" -mindepth 1 -maxdepth ${String(depth)} \\( ${prune} \\) -prune -o -name '.*' ! -name '.git' -prune -o -type d -name '.git' -print >> "$scan_file" || exit 1`,
-    `done`,
-    `sort -u "$scan_file" > "$scan_file.sorted" || exit 1`,
-    `trap 'rm -f "$scan_file" "$scan_file.sorted"' EXIT HUP INT TERM`,
-    `while IFS= read -r g; do`,
-    `  d=\${g%/.git}`,
-    `  u=$(git -C "$d" config --get remote.origin.url 2>/dev/null || true)`,
+    '  [ -d "$root" ] || { printf "Invalid scan root: %s\\n" "$root" >&2; exit 1; }',
+    `  find "$root" -mindepth 1 -maxdepth ${depth} \\( ${prune} \\) -prune -o -name '.*' ! -name '.git' ! -name '.wt' -prune -o \\( -type d -name '.git' -print -prune -o -type f -name '.git' -print \\) >> "$scan_file" || exit 1`,
+    'done',
+    'sort -u "$scan_file" > "$scan_file.sorted" || exit 1',
+    'while IFS= read -r g; do',
+    '  d=${g%/.git}',
+    '  git -C "$d" rev-parse --git-dir >/dev/null || exit $?',
+    '  code=0; u=$(git -C "$d" config --includes --get remote.origin.url) || code=$?',
+    '  [ "$code" -le 1 ] || exit "$code"',
     `  if [ -n "$u" ]; then printf '${SCAN_MARKER}\\t%s\\t%s\\n' "$d" "$u"; fi`,
-    `done < "$scan_file.sorted"`,
+    'done < "$scan_file.sorted"',
+    "printf '__DSH_SCAN_DONE__\\n'",
+  ].join('\n')
+}
+
+export function buildPowerShellGitScanScript(roots: readonly string[], maxDepth = DEFAULT_SCAN_DEPTH): string {
+  const pruned = [...PRUNED_NAMES].map(quotePowerShell).join(',')
+  return [
+    "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)",
+    "if (-not (Get-Command git -ErrorAction SilentlyContinue)) { throw 'Git is unavailable' }",
+    `$pruned = @(${pruned}); $seen = @{}; $maxDepth = ${scanDepth(maxDepth)}`,
+    'function Scan-Git([string]$directory, [int]$depth) {',
+    '  if ($seen.ContainsKey($directory) -and $seen[$directory] -le $depth) { return }; $seen[$directory]=$depth',
+    '  $entries = @(Get-ChildItem -LiteralPath $directory -Force -ErrorAction Stop)',
+    "  $dotGit = @($entries | Where-Object { $_.Name -eq '.git' })",
+    '  if ($dotGit.Count -gt 0) {',
+    "    $ErrorActionPreference='Continue'; & git -C $directory rev-parse --git-dir >$null 2>$null; $code=$LASTEXITCODE; $ErrorActionPreference='Stop'",
+    "    if ($code -ne 0) { throw ('Invalid Git repository: ' + $directory) }",
+    "    $ErrorActionPreference='Continue'; $u = & git -C $directory config --includes --get remote.origin.url 2>$null; $code=$LASTEXITCODE; $ErrorActionPreference='Stop'",
+    "    if ($code -ne 0 -and $code -ne 1) { throw ('Git origin read failed: ' + $directory) }",
+    `    if ($u) { Write-Output ('${SCAN_MARKER}' + [char]9 + $directory + [char]9 + ($u -join '')) }`,
+    "    if ($depth -lt $maxDepth -and ($entries | Where-Object { $_.Name -eq '.wt' -and $_.PSIsContainer -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) })) { Scan-Git (Join-Path $directory '.wt') ($depth + 1) }",
+    '    return',
+    '  }',
+    '  if ($depth -ge $maxDepth) { return }',
+    '  foreach ($entry in $entries) {',
+    "    if (-not $entry.PSIsContainer -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }",
+    "    if (($entry.Name.StartsWith('.') -and $entry.Name -ne '.wt') -or $pruned -contains $entry.Name) { continue }",
+    '    Scan-Git $entry.FullName ($depth + 1)',
+    '  }',
+    '}',
+    ...roots.map(root => `if (-not (Test-Path -LiteralPath ${quotePowerShell(root)} -PathType Container)) { throw 'Invalid scan root' }; Scan-Git ${quotePowerShell(root)} 0`),
+    "Write-Output '__DSH_SCAN_DONE__'",
   ].join('\n')
 }
 
@@ -130,7 +160,7 @@ export function parseGitScanOutput(stdout: string): ScannedRepository[] {
     const rest = line.slice(SCAN_MARKER.length + 1)
     const tab = rest.indexOf('\t')
     if (tab <= 0) continue
-    const path = rest.slice(0, tab).trim()
+    const path = rest.slice(0, tab)
     const rawOrigin = rest.slice(tab + 1).trim()
     if (path === '' || rawOrigin === '') continue
     const gitRemote = normalizeGitRemote(rawOrigin)
@@ -150,10 +180,18 @@ export async function scanRemoteGitRepos(
   options: { readonly maxDepth?: number; readonly timeoutMs?: number } = {},
 ): Promise<{ ok: true; repos: ScannedRepository[] } | { ok: false; error: string }> {
   if (roots.length === 0) return { ok: true, repos: [] }
-  const script = buildGitScanScript(roots, options.maxDepth ?? DEFAULT_SCAN_DEPTH)
-  const res = await execSshCommand(transport, script, options.timeoutMs ?? 25_000)
-  if (!res.ok) return { ok: false, error: res.error }
-  return { ok: true, repos: parseGitScanOutput(res.stdout) }
+  try {
+    const platform = await gitPlatformProbe.detect(transport)
+    for (const root of roots) assertGitPathNamespace(root, platform)
+    const depth = options.maxDepth ?? DEFAULT_SCAN_DEPTH
+    const script = platform.shell === 'posix' ? buildGitScanScript(roots, depth) : buildPowerShellGitScanScript(roots, depth)
+    const res = await execSshCommand(transport, encodeGitScript(platform, script), options.timeoutMs ?? 25_000)
+    if (!res.ok) return { ok: false, error: res.error }
+    if (!/^__DSH_SCAN_DONE__\r?$/m.test(res.stdout)) return { ok: false, error: 'Incomplete Git scan response' }
+    return { ok: true, repos: parseGitScanOutput(res.stdout) }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  }
 }
 
 /**
@@ -164,50 +202,52 @@ export function scanLocalGitRepos(
   roots: readonly string[],
   options: ScanOptions = {},
 ): ScannedRepository[] {
-  const maxDepth = options.maxDepth ?? DEFAULT_SCAN_DEPTH
+  const maxDepth = scanDepth(options.maxDepth ?? DEFAULT_SCAN_DEPTH)
   const byPath = new Map<string, ScannedRepository>()
-  const visited = new Set<string>()
+  const visited = new Map<string, number>()
 
   const walk = (directory: string, depth: number): void => {
-    if (visited.has(directory)) return
-    visited.add(directory)
+    const previousDepth = visited.get(directory)
+    if (previousDepth !== undefined && previousDepth <= depth) return
+    visited.set(directory, depth)
     let entries: Dirent[]
     try {
       entries = readdirSync(directory, { withFileTypes: true }) as Dirent[]
-    } catch {
-      return
+    } catch (error) {
+      throw new Error(`Unable to scan ${directory}: ${error instanceof Error ? error.message : String(error)}`)
     }
 
-    // `.git` as a directory is a checkout; a `.git` file is a worktree pointer
-    // and stays a member of the main project instead of becoming its own.
-    const hasDotGit = entries.some(entry => entry.name === '.git' && entry.isDirectory())
+    const hasDotGit = entries.some(entry => entry.name === '.git' && (entry.isDirectory() || entry.isFile()))
     if (hasDotGit) {
-      const rawOrigin = discoverLocalGitRemote(directory, { originOnly: true })
+      const rawOrigin = discoverLocalGitRemote(directory, { originOnly: true, strict: true })
       if (rawOrigin !== undefined) {
         const gitRemote = normalizeGitRemote(rawOrigin)
         if (gitRemote !== undefined && !byPath.has(directory)) {
           byPath.set(directory, { path: directory, rawOrigin, gitRemote })
         }
       }
-      // A repository root is a leaf for our purposes: nested repositories under
-      // it are not separate projects the user registered.
+      // Main checkouts are leaves except for the conventional explicit worktree
+      // container; never recurse into arbitrary dependency repositories.
+      if (depth < maxDepth && entries.some(entry => entry.name === '.wt' && entry.isDirectory())) {
+        walk(join(directory, '.wt'), depth + 1)
+      }
       return
     }
 
     if (depth >= maxDepth) return
     for (const entry of entries) {
       if (!entry.isDirectory()) continue
-      if (entry.name.startsWith('.')) continue
+      if (entry.name.startsWith('.') && entry.name !== '.wt') continue
       if (PRUNED_NAMES.has(entry.name)) continue
       walk(join(directory, entry.name), depth + 1)
     }
   }
 
-  for (const root of [...new Set(roots.map(r => resolve(r)))].sort()) {
+  for (const root of [...new Set([...roots, ...(options.extraRoots ?? [])].map(r => resolve(r)))].sort()) {
     try {
-      if (!statSync(root).isDirectory()) continue
-    } catch {
-      continue
+      if (!statSync(root).isDirectory()) throw new Error(`Scan root is not a directory: ${root}`)
+    } catch (error) {
+      throw new Error(`Unable to scan root ${root}: ${error instanceof Error ? error.message : String(error)}`)
     }
     walk(root, 0)
   }

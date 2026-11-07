@@ -51,7 +51,8 @@ import { AttentionDetails } from './AttentionDetails.tsx'
 import { useSessionSummary } from './clientServices.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
 import { SessionDeviceChip } from './SessionDeviceChip.tsx'
-import { nativePaneTarget, nativeProxyEmbeddingError, resolveSameSiteProxyUrl, shouldShowNativePane } from './nativePane.ts'
+import { assessBrowserNativeAccess } from '../host/browser-relay.ts'
+import { nativePaneTarget, shouldShowNativePane } from './nativePane.ts'
 import { clientStore, deviceStateToDotState, useMultiDeviceState } from './state.ts'
 import { countableUnreadIds } from './unreadCounts.ts'
 
@@ -95,8 +96,13 @@ export function KeepAliveDeviceFrame({
   t: (key: MultiDeviceLocaleKey) => string
   onOpenSettings: () => void
 }): React.ReactElement {
-  const embeddingError = nativeProxyEmbeddingError(device.nativeProxyUrl)
-  const proxyUrl = embeddingError === undefined ? resolveSameSiteProxyUrl(device.nativeProxyUrl) : undefined
+  const access = assessBrowserNativeAccess({
+    pageUrl: typeof window === 'undefined' ? 'http://127.0.0.1:3080/' : window.location.href ?? `${window.location.protocol}//${window.location.hostname}:3080/`,
+    proxyUrl: device.nativeProxyUrl,
+    desktopGuest: getDesktopBrowserBridge() !== undefined,
+  })
+  const embeddingError = access.status === 'available' ? undefined : access.message
+  const proxyUrl = access.status === 'available' ? access.url : undefined
   const targetUrl = proxyUrl === undefined ? undefined : (() => {
     try {
       const url = new URL(proxyUrl)
@@ -254,7 +260,7 @@ export function KeepAliveDeviceFrame({
           <StateDot state={deviceStateToDotState(device.state)} size={12} />
           <div className="dsh-md-row-name">{device.name}</div>
           <div className="dsh-md-pref-desc">
-            {embeddingError !== undefined ? t('nativeEmbeddingUnsupported') : reconnectError ?? device.lastError ?? device.targetSummary}
+            {embeddingError !== undefined ? embeddingError : reconnectError ?? device.lastError ?? device.targetSummary}
           </div>
           <Button
             variant="primary"
@@ -529,8 +535,8 @@ export function NativeTabBar({
                 size="icon"
                 aria-label={t('openExternal')}
                 onClick={() => {
-                  const url = resolveSameSiteProxyUrl(activeDevice.nativeProxyUrl) ?? activeDevice.effectiveBaseUrl
-                  if (url !== undefined) window.open(url, '_blank', 'noopener,noreferrer')
+                  const access = assessBrowserNativeAccess({ pageUrl: window.location.href, proxyUrl: activeDevice.nativeProxyUrl, desktopGuest: getDesktopBrowserBridge() !== undefined })
+                  if (access.status === 'available') window.open(access.url, '_blank', 'noopener,noreferrer')
                 }}
               >
                 <IconRightUpOutlineRegular size={14} />
@@ -739,6 +745,7 @@ export function NativeViewport({
     target,
     device: paneDevice,
     geometryReady: geometry !== undefined,
+    independentCatalog: state.snapshot.catalog !== undefined,
   })
 
   // The framed page visually covers the local conversation, but the local DOM
@@ -850,6 +857,17 @@ export function NativeViewport({
         )
       })()}
       <div className="dsh-md-native-stage-body">
+        {!isNative && state.snapshot.catalog && target && paneDevice && paneDevice.authState !== 'required' && paneDevice.authState !== 'error' && (() => {
+          const access = assessBrowserNativeAccess({ pageUrl: typeof window === 'undefined' ? 'http://127.0.0.1:3080/' : window.location.href ?? `${window.location.protocol}//${window.location.hostname}:3080/`, proxyUrl: paneDevice.nativeProxyUrl, desktopGuest: getDesktopBrowserBridge() !== undefined })
+          const navigation = paneDevice.nativeNavigation
+          const opened = navigation?.sessionId === target.rawSessionId && navigation.openState === 'open'
+          if (opened) return null
+          const error = access.status === 'unsupported' ? access.message : navigation?.sessionId === target.rawSessionId && navigation.openState === 'error' ? navigation.error : paneDevice.nativePaneState === 'failed' ? paneDevice.nativePaneError : undefined
+          return <div className="dsh-md-navigation-status" role={error ? 'alert' : 'status'} data-testid="native-navigation-status" style={{ position: 'absolute', inset: 0, zIndex: 5, display: 'grid', placeContent: 'center', gap: 12, padding: 24, background: 'var(--dsw-alias-bg-layer-1)' }}>
+            <span>{error ?? (paneDevice.state === 'connected' ? '正在打开原生会话…' : '设备尚未就绪，正在等待连接…')}</span>
+            <Button variant="outline" size="sm" onClick={() => { clientStore.reloadNativeDevice(paneDevice.id); void clientStore.retryCatalogNavigation() }}>重试</Button>
+          </div>
+        })()}
         {mountedDevices.map((device) => (
           <KeepAliveDeviceFrame
             key={device.id}

@@ -191,10 +191,15 @@ export class GitMatchRunner {
           continue
         }
 
-        const roots = deriveScanRoots(device.home, device.workspacePaths)
-        const scan = device.local
-          ? { ok: true as const, repos: this.ctx.scanLocalRepos(roots) }
-          : await this.ctx.scanRemoteRepos(device.deviceId, roots)
+        const roots = [...new Set([...deriveScanRoots(device.home, device.workspacePaths), ...device.workspacePaths])]
+        let scan: { ok: true; repos: ScannedRepository[] } | { ok: false; error: string }
+        try {
+          scan = device.local
+            ? { ok: true, repos: this.ctx.scanLocalRepos(roots) }
+            : await this.ctx.scanRemoteRepos(device.deviceId, roots)
+        } catch (error) {
+          scan = { ok: false, error: error instanceof Error ? error.message : String(error) }
+        }
 
         if (!scan.ok) {
           reportOf.get(device.deviceId)?.errors.push(scan.error)
@@ -227,7 +232,8 @@ export class GitMatchRunner {
             continue
           }
           const scanned = scannedByDevice.get(device.deviceId)
-          const repo = scanned?.get(seed.gitRemote)
+          if (scanned === undefined) continue
+          const repo = scanned.get(seed.gitRemote)
           if (repo === undefined) {
             report.notFound += 1
             continue
@@ -290,9 +296,15 @@ export class GitMatchRunner {
         continue
       }
 
-      const origins = device.local
-        ? await this.discoverLocalOrigins(device.workspacePaths)
-        : await this.ctx.discoverRemoteOrigins(device.deviceId, device.workspacePaths)
+      let origins: Map<string, string>
+      try {
+        origins = device.local
+          ? await this.discoverLocalOrigins(device.workspacePaths)
+          : await this.ctx.discoverRemoteOrigins(device.deviceId, device.workspacePaths)
+      } catch (error) {
+        reportOf.get(device.deviceId)?.errors.push(error instanceof Error ? error.message : String(error))
+        continue
+      }
 
       for (const [path, rawOrigin] of origins) {
         const gitRemote = normalizeGitRemote(rawOrigin)

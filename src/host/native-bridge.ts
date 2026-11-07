@@ -14,9 +14,9 @@
  * already carries the HttpOnly proxy cookie, and Electron `<webview>` guests
  * do not expose a reliable `contentWindow`.
  *
- * Failure is always graceful: when the module id, loader shape or CSP differs,
- * the bridge reports `failed` (or simply never becomes ready) and the client
- * falls back to the local mirror renderer.
+ * Failure is always explicit: unsupported workspace/session contracts report a
+ * bridge failure or navigation error; the native page is never replaced by a
+ * mirror renderer.
  *
  * @module dsh-multi-device/host/native-bridge
  */
@@ -64,8 +64,10 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
   var failedReason = null;
   var captured = null;
   var lastSelection = null;
-  var requestedSessionId = null;
-  var requestedAt = 0;
+  var navigation = null;
+  var navigationSeq = 0;
+  var socketGeneration = 0;
+  var NAVIGATION_TIMEOUT_MS = 15000;
   var lastTitle = '';
   var lastSentTitle = null;
   var titleObserver = null;
@@ -325,25 +327,6 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
   function report() {
     if (!readySent) return;
     var sessionId = currentSelection();
-    if (
-      requestedSessionId &&
-      sessionId &&
-      sessionId !== requestedSessionId &&
-      Date.now() - requestedAt < 2500 &&
-      hasKnownSession(requestedSessionId)
-    ) {
-      var target = requestedSessionId;
-      requestedAt = 0;
-      try {
-        if (captured && captured.uiWorkspace && typeof captured.uiWorkspace.openSession === 'function') {
-          captured.uiWorkspace.openSession(target);
-          sessionId = currentSelection();
-        }
-      } catch (error) {}
-    }
-    if (sessionId === requestedSessionId) {
-      requestedAt = 0;
-    }
     if (sessionId !== lastSelection) {
       lastSelection = sessionId;
       send({ type: 'selection', sessionId: sessionId });
@@ -364,28 +347,111 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
     } catch (error) {}
   }
 
-  function openSession(sessionId) {
-    if (!captured || typeof sessionId !== 'string' || sessionId === '') return;
-    var workspace = captured.uiWorkspace;
-    if (!workspace || typeof workspace.openSession !== 'function') return;
-    requestedSessionId = sessionId;
-    requestedAt = Date.now();
-    var run = function () {
-      try { workspace.openSession(sessionId); } catch (error) {}
-      report();
-    };
-    if (hasKnownSession(sessionId)) {
-      run();
+  function navigationError(error) {
+    if (error && typeof error.message === 'string') {
+      return (typeof error.code === 'string' ? error.code + ': ' : '') + error.message;
+    }
+    return typeof error === 'string' ? error : 'The remote Session could not open its history';
+  }
+
+  function cancelNavigation() {
+    var previous = navigation;
+    navigation = null;
+    if (!previous) return;
+    if (previous.timer !== null) clearTimeout(previous.timer);
+    if (previous.poll !== null) clearInterval(previous.poll);
+    if (previous.off) { try { previous.off(); } catch (error) {} }
+  }
+
+  function openSession(sessionId, requestSeq) {
+    if (typeof sessionId !== 'string' || sessionId === '') return;
+    var seq = typeof requestSeq === 'number' && Number.isSafeInteger(requestSeq) && requestSeq >= 0
+      ? requestSeq : navigationSeq + 1;
+    // Commands in one socket generation must be monotonic. A replay of the
+    // same transaction is harmless; a reconnect starts a fresh generation.
+    if (seq < navigationSeq) return;
+    navigationSeq = seq;
+    cancelNavigation();
+    var tx = { sessionId: sessionId, requestSeq: seq, context: captured,
+      generation: socketGeneration, timer: null, poll: null, off: null, face: null, settled: false };
+    navigation = tx;
+    function active() {
+      return navigation === tx && tx.context === captured && tx.generation === socketGeneration && !tx.settled;
+    }
+    function status(state, error) {
+      if (!active()) return;
+      var message = { type: 'navigation', sessionId: sessionId, requestSeq: seq, openState: state };
+      if (error) message.error = error;
+      send(message);
+      if (state !== 'loading') { tx.settled = true; cancelNavigation(); }
+    }
+    status('loading');
+    var sessions = captured && captured.sessions;
+    var workspace = captured && captured.uiWorkspace;
+    if (!workspace || typeof workspace.openSession !== 'function' || !sessions || typeof sessions.binding !== 'function') {
+      status('error', 'Incompatible DSH version: native navigation requires the 0.2.1-rc.5 sessions.binding/session snapshot contract');
       return;
     }
-    if (captured.sessions && typeof captured.sessions.refresh === 'function') {
+    function inspect() {
+      if (!active()) return;
       try {
-        var pending = captured.sessions.refresh();
-        if (pending && typeof pending.then === 'function') pending.then(run, run);
-        else run();
-      } catch (error) { run(); }
-      return;
+        var binding = sessions.binding(sessionId);
+        if (!binding) return;
+        var face = binding.session;
+        if (!face || typeof face.getSnapshot !== 'function' || typeof face.subscribe !== 'function') {
+          status('error', 'Incompatible DSH version: Session binding has no observable session snapshot');
+          return;
+        }
+        if (face !== tx.face) {
+          if (tx.off) { try { tx.off(); } catch (error) {} }
+          tx.face = face;
+          // Bind callbacks to the exact Session generation, not just its id.
+          var off = face.subscribe(function () { if (active() && tx.face === face) inspect(); });
+          if (!active()) { if (typeof off === 'function') off(); return; }
+          tx.off = typeof off === 'function' ? off : null;
+        }
+        var snapshot = face.getSnapshot();
+        if (!snapshot || snapshot.sessionId !== sessionId ||
+            ['cold', 'loading', 'open', 'error'].indexOf(snapshot.openState) === -1) {
+          status('error', 'Incompatible DSH version: unsupported Session snapshot/openState contract');
+          return;
+        }
+        if (snapshot.openState === 'error') { status('error', navigationError(snapshot.openError)); return; }
+        // Selection is necessary to show the target, never sufficient to prove
+        // history opened. An open empty history is a valid successful Session.
+        if (snapshot.openState === 'open' && currentSelection() === sessionId) status('open');
+      } catch (error) { status('error', navigationError(error)); }
     }
+    tx.timer = setTimeout(function () {
+      status('error', 'Timed out waiting for the remote Session history to open');
+    }, NAVIGATION_TIMEOUT_MS);
+    // Poll only to discover/rebind a borrowed binding after startup or a local
+    // Session generation replacement; history completion is observed directly.
+    var opening = false;
+    var refreshSettled = false;
+    function run() {
+      if (!active() || opening) return;
+      if (!hasKnownSession(sessionId)) return;
+      opening = true;
+      try { workspace.openSession(sessionId); } catch (error) {
+        // A reconnect can retire the manager baseline between list publication
+        // and retain. Wait for the next authoritative directory notification.
+        if (String(error && error.message || error).indexOf('sessions.retain: unknown session') !== -1) { opening = false; return; }
+        status('error', navigationError(error)); return;
+      }
+      report();
+      inspect();
+    }
+    // Observe the actual published directory, not just refresh's Promise:
+    // official refresh can finish an old generation without publishing a list.
+    tx.poll = setInterval(function () { if (!active()) return; if (opening) inspect(); else if (refreshSettled) run(); }, 50);
+    if (!hasKnownSession(sessionId) && typeof sessions.refresh === 'function') {
+      try {
+        var pending = sessions.refresh();
+        if (pending && typeof pending.then === 'function') { pending.then(function () { refreshSettled = true; run(); }, function (error) { status('error', navigationError(error)); }); return; }
+      } catch (error) { status('error', navigationError(error)); return; }
+    }
+    refreshSettled = true;
     run();
   }
 
@@ -917,11 +983,13 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
 
   function capture(context) {
     if (!context || captured === context) return;
+    cancelNavigation();
     captured = context;
     try { installGroupSync(context); } catch (error) {}
     try { installReadOverlay(context); } catch (error) {}
     var tries = 0;
     var finish = function () {
+      if (captured !== context) return;
       tries += 1;
       var workspace = captured && captured.uiWorkspace;
       var selection = workspace && workspace.selection;
@@ -929,6 +997,10 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
       if (!workspace || !selection || !sessions || !sessions.list) {
         if (tries < 80) { setTimeout(finish, 50); return; }
         fail('the DSH workspace/session services were not captured');
+        return;
+      }
+      if (typeof workspace.openSession !== 'function' || typeof sessions.binding !== 'function') {
+        fail('Incompatible DSH version: native navigation requires the 0.2.1-rc.5 sessions.binding contract');
         return;
       }
       try { selection.subscribe(report); } catch (error) {}
@@ -959,7 +1031,11 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
       schedule();
       return;
     }
+    var connectedSocket = socket;
+    socketGeneration += 1;
+    navigationSeq = 0;
     socket.addEventListener('open', function () {
+      if (socket !== connectedSocket) return;
       if (readySent) send({ type: 'ready', deviceId: deviceId });
       else if (failedReason) send({ type: 'failed', error: failedReason });
       report();
@@ -969,10 +1045,11 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
       if (groupSyncInstalled) sendGroups();
     });
     socket.addEventListener('message', function (event) {
+      if (socket !== connectedSocket) return;
       var data;
       try { data = JSON.parse(event.data); } catch (error) { return; }
       if (!data || typeof data !== 'object') return;
-      if (data.type === 'open-session' && typeof data.sessionId === 'string') openSession(data.sessionId);
+      if (data.type === 'open-session' && typeof data.sessionId === 'string') openSession(data.sessionId, data.requestSeq);
       else if (data.type === 'refresh') refreshSessions();
       else if (data.type === 'set-embedded') setEmbedded(data.enabled === true);
       else if (data.type === 'group-expansion') applyGroupState(data.groups);
@@ -980,6 +1057,8 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
       else if (data.type === 'read-ack') applyReadAck(data);
     });
     socket.addEventListener('close', function () {
+      if (socket !== connectedSocket) return;
+      cancelNavigation();
       socket = null;
       readStateReady = false;
       if (readRetryTimer !== null) { clearTimeout(readRetryTimer); readRetryTimer = null; }
@@ -992,7 +1071,7 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
       schedule();
     });
     socket.addEventListener('error', function () {
-      try { if (socket) socket.close(); } catch (error) {}
+      try { connectedSocket.close(); } catch (error) {}
     });
   }
 
@@ -1018,8 +1097,7 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
       copy.factory = function (require) {
         var exports = originalFactory(require);
         // Never let instrumentation break the remote page: a frozen export or
-        // a changed shape simply leaves the bridge un-ready and the local
-        // mirror in charge.
+        // a changed shape reports incompatibility without replacing the native page.
         try {
           if (exports && typeof exports.apply === 'function' && !exports.__dshMdNativeBridge) {
             var originalApply = exports.apply;
@@ -1115,7 +1193,7 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
   }
 
   setTimeout(function () {
-    if (!readySent) fail('the DSH workspace service was not available within 10s');
+    if (!readySent) fail('Incompatible DSH version or unavailable client: the workspace service was not available within 10s');
   }, 10000);
 
   connect();
