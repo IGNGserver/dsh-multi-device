@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Connected development devices">
+  <!-- Original artwork for dsh-multi-device; distributed under the repository MIT license. -->
+  <rect x="2" y="2" width="60" height="60" rx="15" fill="#163247"/>
+  <path d="M18 25v17h28V25M32 15v34" fill="none" stroke="#75d9cf" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <g fill="#163247" stroke="#e1fbf5" stroke-width="3">
+    <rect x="9" y="13" width="18" height="13" rx="3"/>
+    <rect x="37" y="13" width="18" height="13" rx="3"/>
+    <rect x="23" y="40" width="18" height="13" rx="3"/>
+  </g>
+  <g fill="#75d9cf"><circle cx="18" cy="20" r="2"/><circle cx="46" cy="20" r="2"/><circle cx="32" cy="47" r="2"/></g>
+</svg>

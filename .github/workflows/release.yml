@@ -29,6 +29,7 @@ jobs:
   release:
     name: Verify, package and publish GitHub Release
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -51,7 +52,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
 
       - name: Install dependencies
@@ -75,12 +76,13 @@ jobs:
           mkdir -p release-assets
 
           # 1. Standard npm/pnpm plugin tarball (for `dsh plugin add`)
-          npm pack --pack-destination release-assets
+          npm pack --json --pack-destination release-assets > "$RUNNER_TEMP/release-pack.json"
+          node scripts/verify-package.mjs "$RUNNER_TEMP/release-pack.json"
           mv "release-assets/dsh-multi-device-${version}.tgz" "release-assets/dsh-multi-device-v${version}.tgz"
 
           # 2. Full standalone bundle archive
           tar -czf "release-assets/dsh-multi-device-bundle-v${version}.tar.gz" \
-            package.json cordis.patch.yml VERSION README.md RELEASE.md LICENSE lib src stubs
+            package.json cordis.patch.yml VERSION README.md RELEASE.md LICENSE icon.svg locale lib src stubs
 
           # 3. Generate SHA-256 checksums
           (
@@ -89,6 +91,22 @@ jobs:
             sha256sum "dsh-multi-device-bundle-v${version}.tar.gz" > "dsh-multi-device-bundle-v${version}.tar.gz.sha256"
           )
           ls -lh release-assets
+
+      - name: Install official qualification runtime and pnpm
+        run: |
+          npm install --prefix "$RUNNER_TEMP/qualification" --no-audit --no-fund @deepseek-ai/dsh@0.2.1-rc.5 pnpm@11.18.0
+      - name: Qualify the exact release tarball before publishing
+        shell: bash
+        env:
+          DSH_SMOKE_ROOT: ${{ runner.temp }}/release-install-smoke
+          DSH_SMOKE_CLI: ${{ runner.temp }}/qualification/node_modules/@deepseek-ai/dsh/lib/bin.js
+          COREPACK_ENABLE_PROJECT_SPEC: '0'
+          PNPM_MANAGE_PACKAGE_MANAGER_VERSIONS: 'false'
+        run: |
+          set -euo pipefail
+          export PATH="$RUNNER_TEMP/qualification/node_modules/.bin:$PATH"
+          export DSH_SMOKE_PACKAGE="$PWD/release-assets/dsh-multi-device-v$(tr -d '[:space:]' < VERSION).tgz"
+          node scripts/smoke-official-install.mjs
 
       - name: Generate release notes and metadata
         id: release_meta
@@ -122,8 +140,10 @@ jobs:
           - **设备独立与跨版本兼容**：远端零插件要求，兼容 DSH 0.2.x；DSH 0.1.x 仅支持冷读/轮询。
 
           ### 快速安装
+          推荐在 DSH 官方「插件」管理页安装下方固定版本 URL，不需要源码或构建工具。
+          Desktop 命令行必须使用 Desktop 提供的 dsh（先打开一次以初始化，再完全退出），npm 安装的 dsh 不能管理 desktop profile。
           \`\`\`bash
-          # 安装至 DSH Desktop profile（请先退出 DSH Desktop）
+          # Desktop 提供的 dsh；不是 npm CLI
           dsh plugin --profile desktop add https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/dsh-multi-device-v${version}.tgz
 
           # 或安装至 DSH Web profile

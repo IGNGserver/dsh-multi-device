@@ -25,13 +25,13 @@
 - [x] 核查共享读状态并发、Origin边界、冷启动可见性、过期模式导航风险
 
 ## 批次三：官方安装与验收
-- [ ] 普通用户先官方插件管理器/预构建 tgz，开发安装独立
-- [ ] Desktop 内置 dsh 来源及退出/初始化说明
-- [ ] 降低基础包 ssh2/cpu-features 构建脚本安装负担
-- [ ] 安装前 locale metadata、图标及实际打包资源
-- [ ] npm 发布仅说明/预备，不实际发布或暗示现有公共包
-- [ ] 隔离官方安装→组合→启动→客户端加载→停用/卸载，升级/回滚验收
-- [ ] CI pnpm/DSH 兼容矩阵及回归，不仅源码mock
+- [x] 普通用户先官方插件管理器/预构建 tgz，开发安装独立
+- [x] Desktop 内置 dsh 来源及退出/初始化说明
+- [x] 降低基础包 ssh2/cpu-features 构建脚本安装负担
+- [x] 安装前 locale metadata、图标及实际打包资源
+- [x] npm 发布仅说明/预备，不实际发布或暗示现有公共包
+- [x] 隔离官方安装→组合→启动→客户端资源获取与factory注册（非UI渲染）→停用/卸载，升级/回滚验收
+- [x] CI pnpm/DSH 兼容矩阵及回归，不仅源码mock
 
 ## 执行纪律
 每批独立分支/worktree，从最新 origin/main 开始；依赖/测试仅 ~/.build；本地快速项，构建用PR CI；PR CI实际通过才Squash合入；不动现有diag-0216工作区；不更新VERSION、不tag、不Release、不部署。
@@ -47,3 +47,16 @@
 - IPv6或远程浏览器不能假定访问Host的IPv4回环代理，明确降级说明；不生成未监听地址。
 - 认证管理器无AbortSignal，已启动的认证I/O仍受原超时限制；代理取消后其结果不会重建转发或复活服务。
 - 整体验证：verify:version/typecheck/246 tests通过（相对批一新增68项），最终CI证据见PR。真实Electron视觉验收仍不能由React effect回归替代。
+
+## 最终验证与集成证据
+- 批次一：PR #51，merge `a32073b`；178 tests / typecheck / build通过。https://github.com/IGNGserver/dsh-multi-device/actions/runs/42342209372/job/128312154523
+- 批次二：PR #52，merge `4ff671b`；246 tests / typecheck / build通过。https://github.com/IGNGserver/dsh-multi-device/actions/runs/42344160551/job/128318156192
+- 批次三：PR #53；本机scratch版本/metadata/typecheck/249 tests、脚本syntax/helper self-test通过，CI同样构建并验证实际npm pack清单。https://github.com/IGNGserver/dsh-multi-device/actions/runs/42345365096/job/128321819471
+- 官方真实安装：Node 24.22.2、pnpm 11.18.0，普通`dsh plugin add <CI tgz>`（没有ignore-scripts），验证Host active、boot graph、实际combo factory注册、空设备control-plane、插件与Bundle启停、A→合成B→A、卸载重启：
+  - DSH 0.2.0-rc.2 PASS：https://github.com/IGNGserver/dsh-multi-device/actions/runs/42345365096/job/128321926397
+  - DSH 0.2.1-rc.5 PASS：https://github.com/IGNGserver/dsh-multi-device/actions/runs/42345365096/job/128321926327
+- 首轮smoke在npm pack阶段因stdout/stderr混合失败；读实际日志后修正通道分离并重新通过，不把失败记录当成功。
+- 不发布、不tag、不改VERSION，不修改用户现用Profile；旧v0.2.18资产不含这些修复，用户需另行授权后才能发行修复版。
+
+## 未被自动化结果证明的边界
+真实浏览器UI materialization/slot渲染、Desktop视觉、Windows/macOS系统集成及真实历史包数据升级仍需对应环境人工或GUI验收；HTTP+VM仅证明资源注册。合成B复用本次CI字节，仅验证安装器版本替换机制。release smoke门禁已加入，但本任务未触发发布workflow。原生页面bridge及HMR通知仍有集中且受检查的私有DSH兼容依赖，不能外推所有未来0.2.x皆兼容。
