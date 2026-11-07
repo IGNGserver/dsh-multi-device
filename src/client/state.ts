@@ -43,6 +43,33 @@ export function remoteDeviceForSession(sessionId: string | undefined): DeviceId 
   return decoded.isRemote ? decoded.deviceId : undefined
 }
 
+/**
+ * Decide whether an incoming Host snapshot may replace the current one.
+ *
+ * `revision` only orders snapshots from one Host process; a restart resets it
+ * to 1. When `hostEpoch` changes, the sequence starts over and the next
+ * snapshot must be accepted even though its number is lower — otherwise a page
+ * left open across a restart would drop every update and freeze its counts.
+ * Older Hosts omit the epoch, in which case the plain revision comparison
+ * applies.
+ *
+ * @param current - the snapshot the store currently holds.
+ * @param next - the incoming snapshot.
+ * @param force - accept an equal revision (initial load, error recovery, or an
+ *   explicit device-tab override).
+ */
+export function shouldApplySnapshot(
+  current: Pick<MultiDeviceSnapshot, 'revision' | 'hostEpoch'>,
+  next: Pick<MultiDeviceSnapshot, 'revision' | 'hostEpoch'>,
+  force = false,
+): boolean {
+  const epochChanged = next.hostEpoch !== undefined && next.hostEpoch !== current.hostEpoch
+  if (epochChanged) return true
+  if (next.revision < current.revision) return false
+  if (next.revision === current.revision && !force) return false
+  return true
+}
+
 function readStoredActiveNativeDevice(): DeviceId | undefined {
   try {
     if (typeof localStorage === 'undefined') return undefined
@@ -341,15 +368,11 @@ class MultiDeviceClientStore {
     snap: MultiDeviceSnapshot,
     activeOverride?: DeviceId | null,
   ): void {
-    if (snap.revision < this.state.snapshot.revision) return
-    if (
-      snap.revision === this.state.snapshot.revision &&
-      activeOverride === undefined &&
-      !this.state.loading &&
-      this.state.error === undefined
-    ) {
-      return
-    }
+    const previous = this.state.snapshot
+    const force = activeOverride !== undefined ||
+      this.state.loading ||
+      this.state.error !== undefined
+    if (!shouldApplySnapshot(previous, snap, force)) return
     const configuredIds = new Set(snap.devices.map(device => device.id))
     const keepAliveEligible = new Set(
       snap.devices.filter(device => device.keepNativeAlive !== false).map(device => device.id),
@@ -619,6 +642,23 @@ class MultiDeviceClientStore {
     if (!res.ok) return false
     this.applyIncomingSnapshot(res.value.snapshot)
     return res.value.changed
+  }
+
+  /**
+   * Clear every unread marker owned by one device (本机 included).
+   *
+   * The per-Session read signal depends on a page the Host can observe. When a
+   * device is read outside that path (another browser, or a native page whose
+   * bridge never became ready), this is the explicit way out.
+   */
+  async markDeviceRead(deviceId: DeviceId): Promise<{ ok: boolean; changed: number; error?: string }> {
+    const res = await this.callControlPlane<{ changed: number; snapshot: MultiDeviceSnapshot }>({
+      action: 'markDeviceRead',
+      payload: { deviceId },
+    })
+    if (!res.ok) return { ok: false, changed: 0, error: res.error }
+    this.applyIncomingSnapshot(res.value.snapshot)
+    return { ok: true, changed: res.value.changed }
   }
 
   // ==========================================================================

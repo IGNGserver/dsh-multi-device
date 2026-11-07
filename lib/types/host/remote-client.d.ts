@@ -25,6 +25,25 @@ export interface RemoteWorkspaceItem {
     readonly createdAt: string;
     readonly updatedAt: string;
 }
+/** Device counts split by what the sidebar can actually render. */
+export interface VisibleSessionCounts {
+    /** Sessions with a sidebar row: not archived and not a subagent child. */
+    readonly sessionCount: number;
+    /** Running Sessions among {@link sessionCount}. */
+    readonly runningSessionCount: number;
+    /** Every catalog row, including archived and subagent Sessions. */
+    readonly allSessionCount: number;
+    /** Every running catalog row. */
+    readonly allRunningSessionCount: number;
+}
+/**
+ * Count a device's Sessions the way the tab bar must show them.
+ *
+ * Archived rows are collapsed by default and subagent children render under
+ * their parent's catalog, so counting them would claim running work the sidebar
+ * cannot show. The raw totals stay available for Diagnostics.
+ */
+export declare function countVisibleSessions(summaries: readonly RemoteSessionSummary[], archivedSessionIds: readonly string[]): VisibleSessionCounts;
 export interface RemotePendingInteraction {
     readonly eventId: string;
     readonly namespacedEventId: string;

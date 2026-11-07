@@ -15,6 +15,22 @@ import type { ControlPlaneRequest, DiagnosticsClientReport, MultiDeviceDiagnosti
 export type HubTabId = 'native' | 'devices' | 'git';
 /** Decode the owning device of a remote Session, or undefined for local/empty. */
 export declare function remoteDeviceForSession(sessionId: string | undefined): DeviceId | undefined;
+/**
+ * Decide whether an incoming Host snapshot may replace the current one.
+ *
+ * `revision` only orders snapshots from one Host process; a restart resets it
+ * to 1. When `hostEpoch` changes, the sequence starts over and the next
+ * snapshot must be accepted even though its number is lower — otherwise a page
+ * left open across a restart would drop every update and freeze its counts.
+ * Older Hosts omit the epoch, in which case the plain revision comparison
+ * applies.
+ *
+ * @param current - the snapshot the store currently holds.
+ * @param next - the incoming snapshot.
+ * @param force - accept an equal revision (initial load, error recovery, or an
+ *   explicit device-tab override).
+ */
+export declare function shouldApplySnapshot(current: Pick<MultiDeviceSnapshot, 'revision' | 'hostEpoch'>, next: Pick<MultiDeviceSnapshot, 'revision' | 'hostEpoch'>, force?: boolean): boolean;
 /** Map device connection lifecycle states to official DSH `StateDot` states. */
 export declare function deviceStateToDotState(state: DeviceConnectionState): StateDotState;
 /**
@@ -127,6 +143,18 @@ declare class MultiDeviceClientStore {
     clearActiveSession(sessionId: string): void;
     /** Ask the Host to clear one Session's unread marker. */
     markSessionRead(sessionId: string): Promise<boolean>;
+    /**
+     * Clear every unread marker owned by one device (本机 included).
+     *
+     * The per-Session read signal depends on a page the Host can observe. When a
+     * device is read outside that path (another browser, or a native page whose
+     * bridge never became ready), this is the explicit way out.
+     */
+    markDeviceRead(deviceId: DeviceId): Promise<{
+        ok: boolean;
+        changed: number;
+        error?: string;
+    }>;
     callControlPlane<T = unknown>(request: ControlPlaneRequest): Promise<{
         ok: true;
         value: T;

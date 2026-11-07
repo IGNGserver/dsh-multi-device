@@ -145,6 +145,7 @@ export interface ControlPlaneRequest {
     | 'cancelGitMatch'
     | 'setActiveSession'
     | 'markSessionRead'
+    | 'markDeviceRead'
     | 'setUiPreferences'
   readonly payload?: Record<string, unknown>
 }
@@ -201,6 +202,9 @@ export interface DiagnosticsDevice {
   readonly authState?: DeviceView['authState']
   readonly sessionCount: number
   readonly runningSessionCount: number
+  /** Raw catalog totals, including archived and subagent Sessions. */
+  readonly allSessionCount: number
+  readonly allRunningSessionCount: number
   readonly workspaceCount: number
   readonly pendingApprovalCount: number
   readonly catalogStale: boolean
@@ -224,6 +228,8 @@ export interface MultiDeviceDiagnostics {
     readonly logicalWorkspaces: number
     readonly physicalWorkspaces: number
     readonly runningSessions: number
+    /** Raw catalog total, including archived and subagent Sessions. */
+    readonly allRunningSessions: number
   }
   readonly devices: readonly DiagnosticsDevice[]
   readonly client?: DiagnosticsClientReport
@@ -311,6 +317,8 @@ export function buildDiagnostics(
     ...(device.authState !== undefined ? { authState: device.authState } : {}),
     sessionCount: device.sessionCount,
     runningSessionCount: device.runningSessionCount,
+    allSessionCount: device.allSessionCount ?? device.sessionCount,
+    allRunningSessionCount: device.allRunningSessionCount ?? device.runningSessionCount,
     workspaceCount: device.workspaceCount,
     pendingApprovalCount: device.pendingApprovalCount,
     catalogStale: device.catalogStale === true,
@@ -331,6 +339,7 @@ export function buildDiagnostics(
       logicalWorkspaces: snapshot.logicalWorkspaces.length,
       physicalWorkspaces: snapshot.allPhysicalWorkspaces.length,
       runningSessions: devices.reduce((total, device) => total + device.runningSessionCount, 0),
+      allRunningSessions: devices.reduce((total, device) => total + device.allRunningSessionCount, 0),
     },
     devices,
     ...(client !== undefined ? { client } : {}),
@@ -379,6 +388,18 @@ export class MultiDeviceControlPlane {
             return { ok: false, error: 'sessionId is required' }
           }
           const changed = this.registry.markSessionRead(sessionId)
+          return {
+            ok: true,
+            value: { changed, snapshot: this.registry.snapshot() },
+          }
+        }
+
+        case 'markDeviceRead': {
+          const deviceId = typeof payload.deviceId === 'string' ? payload.deviceId.trim() : ''
+          if (deviceId === '') {
+            return { ok: false, error: 'deviceId is required' }
+          }
+          const changed = this.registry.markDeviceRead(String(deviceId) as DeviceId)
           return {
             ok: true,
             value: { changed, snapshot: this.registry.snapshot() },

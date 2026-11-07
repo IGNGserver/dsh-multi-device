@@ -46,6 +46,17 @@ export declare class ReadStateTracker {
     /** Mark a Session read; returns true when an unread marker was removed. */
     markRead(sessionId: string, now?: number): boolean;
     /**
+     * Mark every matching Session read in one transition.
+     *
+     * The explicit "clear unread" action must not emit one snapshot revision per
+     * reminder: read state is published as a set, so one unread change is enough
+     * for every client and framed page to pick up the new state.
+     *
+     * @param predicate - return true to mark the Session read.
+     * @returns the IDs whose unread marker was removed.
+     */
+    markManyRead(predicate: (sessionId: string) => boolean, now?: number): string[];
+    /**
      * Merge one entry from another Host's shared file. The newest timestamp wins;
      * a read at the same instant wins over unread so a cleared dot cannot come
      * back merely because two Hosts replayed the same completion.
@@ -63,7 +74,21 @@ export declare class ReadStateTracker {
      * Host restart, and the result is capped like a live set.
      */
     hydrate(value: unknown): void;
+    /** Forget one Session; a removed unread marker notifies like a read. */
     remove(sessionId: string): void;
+    /**
+     * Drop entries the caller can no longer observe.
+     *
+     * A deleted Session, a device that was removed, or a catalog that no longer
+     * lists an id must not leave a badge behind: the unread count is a projection
+     * of this set, and an orphaned entry can never be read again. Pruned unread
+     * markers notify like a read so every client and framed page stops counting
+     * them in the same revision.
+     *
+     * @param predicate - return true to keep the entry.
+     * @returns number of unread markers that were dropped.
+     */
+    prune(predicate: (sessionId: string, state: SessionReadState) => boolean): number;
     /** Drop entries whose Session no longer belongs to a configured device. */
     retain(predicate: (sessionId: string) => boolean): void;
     /** Keep the most recently touched entries bounded. */

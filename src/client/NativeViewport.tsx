@@ -98,21 +98,43 @@ function KeepAliveDeviceFrame({
 
   // The frame is cross-origin, so the shell tells it whether its tab/pane is
   // currently displayed. The bridge uses this signal to gate unread clearing;
-  // IntersectionObserver remains the fallback for Electron guests.
+  // IntersectionObserver remains the fallback when the guest cannot be reached.
   useEffect(() => {
     if (targetUrl === undefined) return
+    const message = { __dshMdVisibility: true, visible: active }
     const postVisibility = (): void => {
-      const iframe = frameRef.current?.querySelector('iframe')
-      if (iframe === null || iframe === undefined) return
-      let origin = '*'
-      try { origin = new URL(targetUrl).origin } catch { /* keep wildcard */ }
+      const wrapper = frameRef.current
+      if (wrapper === null) return
+      const iframe = wrapper.querySelector('iframe')
+      if (iframe !== null) {
+        let origin = '*'
+        try { origin = new URL(targetUrl).origin } catch { /* keep wildcard */ }
+        try {
+          iframe.contentWindow?.postMessage(message, origin)
+        } catch { /* frame may be navigating */ }
+        return
+      }
+      // Electron `<webview>` guests expose no `contentWindow`; post the same
+      // message from inside the guest so a desktop tab does not depend on the
+      // in-page IntersectionObserver alone to report visibility.
+      const webview = wrapper.querySelector<HTMLElement & {
+        executeJavaScript?: (code: string) => Promise<unknown>
+      }>('webview')
       try {
-        iframe.contentWindow?.postMessage({ __dshMdVisibility: true, visible: active }, origin)
-      } catch { /* frame may be navigating */ }
+        const pending = webview?.executeJavaScript?.(
+          `window.postMessage(${JSON.stringify(message)}, '*')`,
+        )
+        if (pending !== undefined) void pending.catch(() => { /* guest not ready */ })
+      } catch { /* guest may not be attached yet */ }
     }
     postVisibility()
-    const timer = window.setTimeout(postVisibility, 150)
-    return () => window.clearTimeout(timer)
+    const first = window.setTimeout(postVisibility, 150)
+    // A cold `<webview>` can finish loading its guest after the first probe.
+    const second = window.setTimeout(postVisibility, 800)
+    return () => {
+      window.clearTimeout(first)
+      window.clearTimeout(second)
+    }
   }, [active, targetUrl])
 
   // Switching a tab changes visibility, but does not move DOM focus. Without a
@@ -322,11 +344,14 @@ export function NativeTabBar({
   if (state.displayMode !== 'native') return null
 
   // Count only unread Sessions that DSH can actually show as rows: archived
-  // completions and subagent children never appear in the sidebar.
+  // completions and subagent children never appear in the sidebar, and a
+  // remote ID that is no longer in any catalog is a deleted Session whose
+  // persisted marker must not keep the badge alive.
   const unread = countableUnreadIds(
     state.snapshot.unreadSessionIds,
     state.snapshot.archivedSessionIds,
     state.snapshot.subagentSessionIds,
+    sessionId => state.snapshot.sessionOrigins[sessionId] !== undefined,
   )
   const localUnread = unreadCountForDevice(unread, LOCAL_DEVICE_ID)
 

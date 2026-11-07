@@ -298,6 +298,21 @@ function applyHost(
     return typeof dispose === 'function' ? dispose : () => {}
   }, 'dsh-multi-device: local session status')
 
+  // A deleted local Session must not leave an unread marker behind: the badge
+  // would keep counting a conversation the sidebar can no longer open.
+  ctx.effect(() => {
+    const on = (ctx as unknown as {
+      on?: (event: string, listener: (sessionId: string) => void) => (() => void) | void
+    }).on
+    if (typeof on !== 'function') return () => {}
+    const dispose = on.call(ctx, 'api-session/removed', (sessionId) => {
+      if (typeof sessionId === 'string' && sessionId !== '') {
+        registry.forgetLocalSession(sessionId)
+      }
+    })
+    return typeof dispose === 'function' ? dispose : () => {}
+  }, 'dsh-multi-device: local session removal')
+
   if (features.autoGitAggregate === false) {
     registry.aggregator.setConfig({ autoGitAggregate: false })
   }

@@ -21,6 +21,7 @@
 import {
   Button,
   DisclosureRow,
+  IconCheckCircleFillRegular,
   IconEditOutlineRegular,
   IconPlusOutlineRegular,
   IconRefreshOutlineRegular,
@@ -645,11 +646,13 @@ export function MultiDeviceHubPanel({
   const state = useMultiDeviceState()
   const { snapshot } = state
   // Same visibility rules as the sidebar: archived rows and subagent children
-  // have no standalone row, so they must not inflate a device's reminder count.
+  // have no standalone row, and a remote ID missing from every catalog is a
+  // deleted Session, so none of them may inflate a device's reminder count.
   const unread = countableUnreadIds(
     snapshot.unreadSessionIds,
     snapshot.archivedSessionIds,
     snapshot.subagentSessionIds,
+    sessionId => snapshot.sessionOrigins[sessionId] !== undefined,
   )
   const modeSegId = useId()
 
@@ -1107,6 +1110,7 @@ export function MultiDeviceHubPanel({
           <ul className="dsh-md-rows">
             {snapshot.devices.map((dev) => {
               const isEditing = editingDeviceId === dev.id
+              const deviceUnread = unreadCountForDevice(unread, dev.id)
               return (
                 <li key={dev.id} className="dsh-md-card">
                   <div className="dsh-md-row-head">
@@ -1114,7 +1118,7 @@ export function MultiDeviceHubPanel({
                       <StateDot state={deviceStateToDotState(dev.state)} size={8} />
                       <span className="dsh-md-row-name">{dev.name}</span>
                       <UnreadCountBadge
-                        count={unreadCountForDevice(unread, dev.id)}
+                        count={deviceUnread}
                         t={t}
                       />
                       <span className="dsh-md-device-endpoint" title={formatCompactDeviceTarget(dev)}>
@@ -1159,6 +1163,30 @@ export function MultiDeviceHubPanel({
                       </Button>
 
                       <div className="dsh-md-icon-actions-group">
+                        {deviceUnread > 0 && (
+                          <Tooltip label={t('clearUnread')} side="top">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              aria-label={t('clearUnread')}
+                              onClick={() => {
+                                void clientStore.markDeviceRead(dev.id).then((res) => {
+                                  if (res.ok) {
+                                    pushToast(
+                                      t('clearedUnreadNotice').replace('{count}', String(res.changed)),
+                                      'success',
+                                    )
+                                  } else {
+                                    pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
+                                  }
+                                })
+                              }}
+                            >
+                              <IconCheckCircleFillRegular size={14} />
+                            </Button>
+                          </Tooltip>
+                        )}
+
                         <Tooltip label={t('reconnect')} side="top">
                           <Button
                             variant="ghost"
