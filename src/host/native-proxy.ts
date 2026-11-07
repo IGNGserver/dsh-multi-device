@@ -1004,7 +1004,7 @@ export class NativeDeviceProxy {
     }
 
     ws.on('message', (raw) => {
-      if (this.stopped || state.navigationOwner !== ws) return
+      if (this.stopped || !this.bridgeClients.has(ws)) return
       let message: NativeBridgeInbound
       try {
         const parsed: unknown = JSON.parse(raw.toString())
@@ -1013,9 +1013,16 @@ export class NativeDeviceProxy {
       } catch {
         return
       }
+      // Older still-connected pages retain their own READ/ACK and visibility
+      // lifetimes. Only navigation/selection and shared navigation lifecycle
+      // reports are owned by the latest container socket.
+      if (state.navigationOwner !== ws &&
+          (message.type === 'failed' || message.type === 'navigation' || message.type === 'selection')) return
       if (message.type === 'ready') {
-        this.clearBridgeTimer(clientId)
-        this.setBridgeState('ready', undefined, clientId)
+        if (state.navigationOwner === ws) {
+          this.clearBridgeTimer(clientId)
+          this.setBridgeState('ready', undefined, clientId)
+        }
         // Initialization belongs to this new socket, never existing pages.
         this.sendToSocket(ws, { type: 'set-embedded', enabled: state.embedded })
         this.sendToSocket(ws, { type: 'group-expansion', groups: this.groupState })
@@ -1025,7 +1032,7 @@ export class NativeDeviceProxy {
           unreadSessionIds: this.hooks.getUnreadState?.(this.device.id) ?? this.unreadState,
           ...(tokens !== undefined ? { readCompletions: sanitizeReadCompletions(tokens) } : {}),
         })
-        if (state.pendingOpenSession !== undefined) {
+        if (state.navigationOwner === ws && state.pendingOpenSession !== undefined) {
           this.sendToSocket(ws, { type: 'open-session', sessionId: state.pendingOpenSession,
             ...(state.pendingRequestSeq === undefined ? {} : { requestSeq: state.pendingRequestSeq }) })
         }

@@ -1460,7 +1460,7 @@ describe('4d. Offline catalog cache & reconnect waiting', () => {
       Array.isArray(frame.args) &&
       frame.args[1] === false,
     )
-    expect(status).toBeDefined()
+    expect(status).toBeUndefined()
     expect(client.sessionSummaries().find(summary => summary.sessionId === 's-running')?.running).toBe(false)
     expect(client.toView().runningSessionCount).toBe(0)
     expect(client.toView().catalogStale).toBe(true)

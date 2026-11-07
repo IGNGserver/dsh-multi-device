@@ -38,7 +38,7 @@ function setup(count = 1) {
   }))
   const client = { id: 'dev', get connectionGeneration() { return generation }, catalogFresh: true,
     isConnected: () => true, sessionSummaries: () => rows,
-    pendingInteractionList: () => [], archivedIds: () => [], workspaceItems: () => [],
+    pendingInteractionList: () => [], archivedIds: () => [], pinnedIds: () => [], workspaceItems: () => [],
     namespaceSummary: (row: RemoteSessionSummary) => ({ ...row, sessionId: encodeRemoteSessionId(DeviceId('dev'), row.sessionId) }),
     toView: () => ({ id: 'dev', state: 'connected', remoteHome: '/home/test' }),
     catalogSnapshot: () => ({ syncedAt: 0, sessions: [], workspaces: [] }), stop() {},
