@@ -257,6 +257,8 @@ export class DeviceRegistry {
   private readonly authStates = new Map<DeviceId, { state: DeviceAuthState; error?: string }>()
   /** Durable mirror of each device catalog (see {@link DeviceCatalogCache}). */
   private readonly catalogs = new Map<DeviceId, DeviceCatalogCache>()
+  /** Why one device's summaries could not be projected into the merged `session.list`. */
+  private readonly sessionListErrors = new Map<DeviceId, string>()
   /** Injected Native Pane bridge lifecycle, last page selection/title, and visibility per device. */
   private readonly nativePanes = new Map<DeviceId, {
     state: NativePaneState
@@ -370,6 +372,29 @@ export class DeviceRegistry {
   onWorkspacesChanged(listener: () => void): () => void {
     this.workspaceListeners.add(listener)
     return () => this.workspaceListeners.delete(listener)
+  }
+
+  /**
+   * Record that one device's summaries could not be projected into the merged
+   * `session.list`. The rest of the list still ships, and the failing device
+   * says why in the sidebar/diagnostics instead of silently blanking every
+   * remote Workspace.
+   */
+  noteSessionListError(deviceId: DeviceId, message: string): void {
+    if (this.sessionListErrors.get(deviceId) === message) return
+    this.sessionListErrors.set(deviceId, message)
+    this.bumpRevision()
+  }
+
+  /** Clear the recorded projection failure after a successful merge. */
+  clearSessionListError(deviceId: DeviceId): void {
+    if (!this.sessionListErrors.delete(deviceId)) return
+    this.bumpRevision()
+  }
+
+  /** Last recorded projection failure for one device, if any. */
+  sessionListErrorFor(deviceId: DeviceId): string | undefined {
+    return this.sessionListErrors.get(deviceId)
   }
 
   /**
@@ -1643,7 +1668,11 @@ export class DeviceRegistry {
         ...(this.aggregatedGatewayError !== undefined ? { aggregatedGatewayError: this.aggregatedGatewayError } : {}),
         nativeProxyActive: this.nativeProxyActive,
       },
-      devices: [...this.clients.values()].map(c => this.withNativePane(this.withAuthState(c.toView()))),
+      devices: [...this.clients.values()].map(c => {
+        const view = this.withNativePane(this.withAuthState(c.toView()))
+        const sessionListError = this.sessionListErrors.get(view.id)
+        return sessionListError === undefined ? view : { ...view, sessionListError }
+      }),
       sshConfigHosts: listSshConfigHosts(),
       aggregationConfig: this.aggregator.getConfig(),
       logicalWorkspaces,

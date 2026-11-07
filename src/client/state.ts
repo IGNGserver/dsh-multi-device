@@ -29,6 +29,7 @@ import {
 import type { ControlPlaneRequest, DiagnosticsClientReport, MultiDeviceDiagnostics } from '../runtime.ts'
 import { readNativeBarMetrics } from './barMetrics.ts'
 import { getClientServices } from './clientServices.ts'
+import { readSessionLinkReport } from './sessionLinkRepair.ts'
 
 export type HubTabId = 'native' | 'devices' | 'git'
 
@@ -922,7 +923,10 @@ class MultiDeviceClientStore {
 export function collectClientDiagnosticsReport(): DiagnosticsClientReport | undefined {
   if (typeof window === 'undefined') return undefined
   const bar = readNativeBarMetrics()
-  const report: DiagnosticsClientReport = {
+  // The repair loop runs in the browser and owns the only view of the Session
+  // store, so it contributes the evidence the Host cannot see.
+  const sessionLink = readSessionLinkReport()
+  return {
     innerWidth: window.innerWidth,
     innerHeight: window.innerHeight,
     ...(Number.isFinite(window.devicePixelRatio) ? { devicePixelRatio: window.devicePixelRatio } : {}),
@@ -937,8 +941,22 @@ export function collectClientDiagnosticsReport(): DiagnosticsClientReport | unde
     ...(typeof navigator !== 'undefined' && typeof navigator.userAgent === 'string'
       ? { userAgent: navigator.userAgent }
       : {}),
+    ...(sessionLink !== undefined
+      ? {
+          sessionLink: {
+            referenced: sessionLink.referenced,
+            missing: sessionLink.missing,
+            byDevice: sessionLink.byDevice,
+            sample: sessionLink.sample,
+            connectedDevices: sessionLink.connectedDevices,
+            attempts: sessionLink.attempts,
+            resolved: sessionLink.resolved,
+            ...(sessionLink.refreshedAt !== undefined ? { refreshedAt: sessionLink.refreshedAt } : {}),
+            ...(sessionLink.lastError !== undefined ? { lastError: sessionLink.lastError } : {}),
+          },
+        }
+      : {}),
   }
-  return report
 }
 
 export const clientStore = new MultiDeviceClientStore()

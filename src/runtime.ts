@@ -166,6 +166,26 @@ export interface DiagnosticsClientReport {
   readonly barClampedWidth?: number
   readonly compact?: boolean
   readonly userAgent?: string
+  /**
+   * Whether the cached Workspace projection resolves inside the browser's
+   * Session store. `missing > 0` is the mechanical cause of a "Workspace
+   * expands but shows no conversations" report.
+   */
+  readonly sessionLink?: DiagnosticsSessionLink
+}
+
+/** Session-store link evidence volunteered by the browser. */
+export interface DiagnosticsSessionLink {
+  readonly referenced: number
+  readonly missing: number
+  readonly byDevice: Readonly<Record<string, number>>
+  readonly sample: readonly string[]
+  readonly connectedDevices: number
+  readonly attempts: number
+  readonly resolved: boolean
+  readonly refreshedAt?: number
+  /** Last `sessions.refresh()` failure, when the Host could not answer. */
+  readonly lastError?: string
 }
 
 /** One device row of the Diagnostics report. */
@@ -186,6 +206,8 @@ export interface DiagnosticsDevice {
   readonly catalogStale: boolean
   readonly lastSyncedAt?: number
   readonly lastError?: string
+  /** Why this device was dropped from the merged `session.list`, if it was. */
+  readonly sessionListError?: string
 }
 
 /** Aggregated snapshot of everything a support report needs to explain a UI state. */
@@ -232,8 +254,37 @@ export function readDiagnosticsClientReport(raw: unknown): DiagnosticsClientRepo
       : {}),
     ...(typeof record.compact === 'boolean' ? { compact: record.compact } : {}),
     ...(optionalString(record.userAgent) !== undefined ? { userAgent: optionalString(record.userAgent) } : {}),
+    ...(readDiagnosticsSessionLink(record.sessionLink) !== undefined
+      ? { sessionLink: readDiagnosticsSessionLink(record.sessionLink) }
+      : {}),
   }
   return Object.keys(report).length === 0 ? undefined : report
+}
+
+/** Parse the browser's Session-store link evidence; unknown fields are dropped. */
+export function readDiagnosticsSessionLink(raw: unknown): DiagnosticsSessionLink | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const record = raw as Record<string, unknown>
+  const byDevice: Record<string, number> = {}
+  if (typeof record.byDevice === 'object' && record.byDevice !== null) {
+    for (const [deviceId, count] of Object.entries(record.byDevice as Record<string, unknown>)) {
+      if (typeof count === 'number' && Number.isFinite(count)) byDevice[deviceId] = count
+    }
+  }
+  const sample = Array.isArray(record.sample)
+    ? record.sample.filter((id): id is string => typeof id === 'string').slice(0, 16)
+    : []
+  return {
+    referenced: optionalNumber(record.referenced) ?? 0,
+    missing: optionalNumber(record.missing) ?? 0,
+    byDevice,
+    sample,
+    connectedDevices: optionalNumber(record.connectedDevices) ?? 0,
+    attempts: optionalNumber(record.attempts) ?? 0,
+    resolved: record.resolved === true,
+    ...(optionalNumber(record.refreshedAt) !== undefined ? { refreshedAt: optionalNumber(record.refreshedAt) } : {}),
+    ...(optionalString(record.lastError) !== undefined ? { lastError: optionalString(record.lastError) } : {}),
+  }
 }
 
 /**
@@ -265,6 +316,7 @@ export function buildDiagnostics(
     catalogStale: device.catalogStale === true,
     ...(device.lastSyncedAt !== undefined ? { lastSyncedAt: device.lastSyncedAt } : {}),
     ...(device.lastError !== undefined ? { lastError: device.lastError } : {}),
+    ...(device.sessionListError !== undefined ? { sessionListError: device.sessionListError } : {}),
   }))
   return {
     kind: 'dsh-multi-device/diagnostics',

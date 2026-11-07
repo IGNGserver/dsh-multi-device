@@ -335,11 +335,29 @@ export function installAggregatedGateway02(
     }
 
     for (const client of registry.clientList()) {
-      for (const rawSummary of client.sessionSummaries()) {
-        const nsSummary = client.namespaceSummary(rawSummary)
-        if (seen.has(nsSummary.sessionId)) continue
-        seen.add(nsSummary.sessionId)
-        merged.push(nsSummary as unknown as Record<string, unknown>)
+      // One device must never fail the whole merged list: `session.list` is a
+      // single RPC, and a browser that receives an error keeps its old
+      // (local-only) store, which blanks every remote Workspace row. Project
+      // each device on its own and report the offender instead.
+      try {
+        const projected: Record<string, unknown>[] = []
+        for (const rawSummary of client.sessionSummaries()) {
+          const nsSummary = client.namespaceSummary(rawSummary)
+          if (seen.has(nsSummary.sessionId)) continue
+          seen.add(nsSummary.sessionId)
+          projected.push(nsSummary as unknown as Record<string, unknown>)
+        }
+        merged.push(...projected)
+        registry.clearSessionListError(client.id)
+      } catch (error) {
+        // Roll back this device's claims so a retry can add them again.
+        for (const rawSummary of client.sessionSummaries()) {
+          seen.delete(encodeRemoteSessionId(client.id, rawSummary.sessionId))
+        }
+        registry.noteSessionListError(
+          client.id,
+          error instanceof Error ? error.message : String(error),
+        )
       }
     }
 
@@ -1506,22 +1524,57 @@ async function* multiplexRemoteEventsStream(
   const queue = new BoundedStreamQueue<unknown>()
   let readySent = false
   const deliveredWaterfalls = new Set<string>()
+  /** Devices already replayed into this generation's Session store. */
+  let replayedDevices = new Set<string>()
 
   const push = (item: unknown): void => {
     queue.push(item)
   }
 
-  const pushRemoteSessionSummaries = (): void => {
-    if (!registry.isAggregatedMode()) return
+  const connectedDeviceIds = (): Set<string> =>
+    new Set(
+      registry
+        .clientList()
+        .filter(client => client.isConnected())
+        .map(client => String(client.id)),
+    )
+
+  /**
+   * Replay remote Session summaries as `api-session/added`, optionally only for
+   * the given devices. Returns the devices that actually had something to
+   * replay: a device that is connected but whose catalog has not synced yet
+   * must stay pending so the next revision retries instead of silently
+   * skipping the replay forever.
+   */
+  const pushRemoteSessionSummaries = (onlyDeviceIds?: ReadonlySet<string>): Set<string> => {
+    const replayed = new Set<string>()
+    if (!registry.isAggregatedMode()) return replayed
     for (const client of registry.clientList()) {
-      for (const summary of client.sessionSummaries()) {
-        push({
-          type: 'emit',
-          event: 'api-session/added',
-          args: [client.namespaceSummary(summary)],
-        })
+      if (onlyDeviceIds !== undefined && !onlyDeviceIds.has(String(client.id))) continue
+      const summaries = client.sessionSummaries()
+      if (summaries.length === 0) continue
+      // Same isolation as `session.list`: one device whose projection throws
+      // must not stop the replay for the others.
+      try {
+        const frames: unknown[] = []
+        for (const summary of summaries) {
+          frames.push({
+            type: 'emit',
+            event: 'api-session/added',
+            args: [client.namespaceSummary(summary)],
+          })
+        }
+        for (const frame of frames) push(frame)
+        replayed.add(String(client.id))
+        registry.clearSessionListError(client.id)
+      } catch (error) {
+        registry.noteSessionListError(
+          client.id,
+          error instanceof Error ? error.message : String(error),
+        )
       }
     }
+    return replayed
   }
 
   const pushPendingRemoteWaterfalls = (): void => {
@@ -1558,8 +1611,31 @@ async function* multiplexRemoteEventsStream(
     // Returning from Native Mode does not reconnect `$events`, and the sidebar
     // hides every workspace session id that has no summary. Replay the catalogs
     // the same way the opening `ready` frame does.
-    pushRemoteSessionSummaries()
+    replayedDevices = pushRemoteSessionSummaries()
     pushPendingRemoteWaterfalls()
+  })
+
+  /**
+   * A device that finishes its SSH handshake *after* this generation was
+   * opened has no summary in DSH's Session store yet, so its Workspaces render
+   * expanded-but-empty until something else refreshes the list. Replay exactly
+   * that device once it turns connected; the set keeps `onSnapshotChanged`
+   * (which also fires for unrelated revisions) from replaying in a loop, and a
+   * device whose catalog has not synced stays pending for the next revision.
+   */
+  const offSnapshot = registry.onSnapshotChanged(() => {
+    if (!readySent || !registry.isAggregatedMode()) return
+    const connected = connectedDeviceIds()
+    const fresh = new Set<string>()
+    for (const deviceId of connected) {
+      if (!replayedDevices.has(deviceId)) fresh.add(deviceId)
+    }
+    if (fresh.size === 0) return
+    for (const deviceId of pushRemoteSessionSummaries(fresh)) replayedDevices.add(deviceId)
+    // Forget devices that dropped out so a reconnect replays again.
+    for (const deviceId of [...replayedDevices]) {
+      if (!connected.has(deviceId)) replayedDevices.delete(deviceId)
+    }
   })
 
   let localDone = false
@@ -1577,7 +1653,7 @@ async function* multiplexRemoteEventsStream(
             // finished connecting. Replay every known remote summary into this
             // generation; without it, workspace rows point at Session ids the
             // sidebar has no summary for and silently hides those rows.
-            pushRemoteSessionSummaries()
+            replayedDevices = pushRemoteSessionSummaries()
             // A fresh browser generation starts with the local model catalog
             // cached; make it refetch the active remote Session's catalog.
             if (registry.activeSessionScope().kind === 'remote') {
@@ -1617,6 +1693,7 @@ async function* multiplexRemoteEventsStream(
     signal.removeEventListener('abort', onAbort)
     offRemote()
     offMode()
+    offSnapshot()
     await pumpLocal.catch(() => {})
   }
 }

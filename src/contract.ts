@@ -215,6 +215,15 @@ export interface DeviceView {
   readonly latencyMs?: number
   readonly connectedAt?: number
   readonly lastError?: string
+  /**
+   * Why this device's summaries were dropped from the merged `session.list`.
+   *
+   * The merged list is one RPC: before failure isolation, a single device that
+   * could not be projected failed the whole call, so the browser kept its old
+   * (local-only) Session store and every remote Workspace expanded empty. The
+   * offending device is reported here instead.
+   */
+  readonly sessionListError?: string
   readonly reconnectAttempt: number
   readonly sessionCount: number
   readonly runningSessionCount: number
