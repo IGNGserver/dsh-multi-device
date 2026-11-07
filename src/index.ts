@@ -227,9 +227,16 @@ function applyHost(
       localSessionUpdatedAt: () => {
         const map = new Map<string, number>(localSessionActivity)
         try {
+          const live = new Set<string>()
           for (const s of getLocalSessions()?.list?.() ?? []) {
             const id = String(s.id)
+            live.add(id)
             if (!map.has(id)) map.set(id, s.header?.createdAt ?? 0)
+          }
+          // The activity map only ever grows; a deleted Session would
+          // otherwise keep contributing a stale recency forever.
+          for (const id of localSessionActivity.keys()) {
+            if (!live.has(id)) localSessionActivity.delete(id)
           }
         } catch {
           // Ignore
@@ -423,6 +430,14 @@ function applyHost(
               `[dsh-multi-device] Aggregated Mode Gateway degraded (${msg}); Native Mode remains fully operational.`,
             )
             registry.setGatewayStatus(false, msg)
+            // Staying in Aggregated Mode without a gateway is a broken
+            // pseudo-aggregate: remote Sessions vanish and the repair loop
+            // can never heal them. Fall back to Native Mode so the UI never
+            // sits in a state that silently drops remote data.
+            if (registry.isAggregatedMode()) {
+              console.error('[dsh-multi-device] Reverting to Native Mode: the aggregated gateway is unavailable.')
+              registry.setDisplayMode('native')
+            }
             return () => {}
           }
         }, 'dsh-multi-device: aggregated-gateway-02')

@@ -1957,6 +1957,9 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
         mockWorkspaceRegistry,
         { workspaceReplaceFrames: true },
       )
+      // Production marks the gateway healthy right after installing it; the
+      // control plane refuses Aggregated Mode while the gateway is degraded.
+      registry.setGatewayStatus(true)
 
       // 1) Merged session.list
       const listed = await mockSessionController.list({}, new AbortController().signal)
@@ -2027,6 +2030,84 @@ describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, 
         Array.isArray(frame.args) &&
         (frame.args[0] as { sessionId?: string } | undefined)?.sessionId === remoteSessionId,
       )).toBe(true)
+
+      // 1b-1) Workspace frames republish the Session summaries they reference.
+      // Regression: a lost `api-session/added` left aggregated Workspaces
+      // expanded-but-empty until an unrelated refresh; every Workspace frame
+      // now asks the live `$events` generations to publish their `sessionIds`
+      // first, and each generation dedups against what it already pushed.
+      {
+        const publishSpy: string[][] = []
+        const originalPublish = registry.requestSessionPublish.bind(registry)
+        registry.requestSessionPublish = ((ids: readonly string[]) => {
+          publishSpy.push([...ids])
+          originalPublish(ids)
+        }) as typeof registry.requestSessionPublish
+
+        const healAbort = new AbortController()
+        const healTimer = setTimeout(() => healAbort.abort(), 2_000)
+        const healStream = await mockGateway.wireStream.open(
+          '$events',
+          {},
+          (async function* () {})(),
+          undefined,
+          healAbort.signal,
+        )
+        const healIterator = healStream[Symbol.asyncIterator]()
+        try {
+          // Consume ready + replay: rsess-1 enters this generation's ledger.
+          for (;;) {
+            const next = await healIterator.next()
+            if (next.done) throw new Error('events stream closed before replay')
+            const frame = next.value as Record<string, unknown>
+            if (
+              frame.type === 'emit' &&
+              frame.event === 'api-session/added' &&
+              Array.isArray(frame.args) &&
+              (frame.args[0] as { sessionId?: string } | undefined)?.sessionId === remoteSessionId
+            ) break
+          }
+
+          // A Workspace baseline names both member Sessions; the frame push
+          // must route them through requestSessionPublish before the client
+          // sees the frame.
+          const publishAbort = new AbortController()
+          const publishFollow = mockWorkspaceController
+            .follow(publishAbort.signal)[Symbol.asyncIterator]()
+          const publishBaseline = await publishFollow.next()
+          expect(publishBaseline.done).toBe(false)
+          expect(publishBaseline.value.type).toBe('baseline')
+          expect(
+            publishSpy.some(ids => ids.includes(remoteSessionId)),
+          ).toBe(true)
+
+          // rsess-1 is already in the generation ledger: no duplicate replay.
+          await new Promise(r => setTimeout(r, 60))
+          const duplicates: unknown[] = []
+          for (;;) {
+            const next = await Promise.race([
+              healIterator.next(),
+              new Promise<{ done: true }>(r => setTimeout(() => r({ done: true }), 60)),
+            ])
+            if (next.done) break
+            const frame = next.value as Record<string, unknown>
+            if (
+              frame.type === 'emit' &&
+              frame.event === 'api-session/added' &&
+              Array.isArray(frame.args) &&
+              (frame.args[0] as { sessionId?: string } | undefined)?.sessionId === remoteSessionId
+            ) duplicates.push(frame)
+          }
+          expect(duplicates).toHaveLength(0)
+
+          // Unknown ids are ignored without failing the generation.
+          registry.requestSessionPublish([encodeRemoteSessionId(devId, 'ghost-session')])
+          await new Promise(r => setTimeout(r, 60))
+        } finally {
+          clearTimeout(healTimer)
+          healAbort.abort()
+        }
+      }
 
       // 1c) Explicit per-session device selection creates on the chosen device.
       const created = await registry.createRemoteSession({

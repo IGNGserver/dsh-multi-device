@@ -46,6 +46,12 @@ export interface SessionLinkReport extends SessionLinkGap {
   readonly lastError?: string
   /** Whether the last check found every referenced id resolvable. */
   readonly resolved: boolean
+  /**
+   * The initial backoff budget is spent but ids are still missing: the loop
+   * now retries at the persistent interval. Surfaced so the UI can tell
+   * "healing soon" apart from "silently broken".
+   */
+  readonly exhausted: boolean
 }
 
 /** Injectable side effects so the loop is testable without a browser. */
@@ -59,8 +65,15 @@ export interface SessionLinkRepairDeps {
 }
 
 export interface SessionLinkRepairOptions {
-  /** Delays between attempts. The length is the attempt budget. */
+  /** Delays between attempts. The length is the initial attempt budget. */
   readonly delaysMs?: readonly number[]
+  /**
+   * After the initial budget is spent, keep retrying at this interval instead
+   * of giving up silently. A lost replay used to leave Workspaces empty until
+   * the next device-state change; a persistent slow retry heals them no
+   * matter when the Host finally projects the missing summaries.
+   */
+  readonly persistentRetryMs?: number
   /** How many missing ids to keep in the report sample. */
   readonly maxSample?: number
   readonly setTimeoutFn?: (fn: () => void, ms: number) => unknown
@@ -122,6 +135,7 @@ export function computeSessionLinkGap(
  */
 export class SessionLinkRepair {
   private readonly delays: readonly number[]
+  private readonly persistentRetryMs: number
   private readonly maxSample: number
   private readonly setTimeoutFn: (fn: () => void, ms: number) => unknown
   private readonly clearTimeoutFn: (handle: unknown) => void
@@ -140,6 +154,7 @@ export class SessionLinkRepair {
     options: SessionLinkRepairOptions = {},
   ) {
     this.delays = options.delaysMs ?? DEFAULT_REPAIR_DELAYS_MS
+    this.persistentRetryMs = options.persistentRetryMs ?? 60_000
     this.maxSample = options.maxSample ?? 8
     this.setTimeoutFn = options.setTimeoutFn ?? ((fn, ms) => globalThis.setTimeout(fn, ms))
     this.clearTimeoutFn = options.clearTimeoutFn ?? (handle => {
@@ -149,20 +164,25 @@ export class SessionLinkRepair {
     this.onReport = options.onReport
   }
 
+  /** Delay before the next attempt once the initial budget is spent. */
+  private nextDelay(): number {
+    return this.attempts < this.delays.length
+      ? this.delays[this.attempts] ?? this.delays[this.delays.length - 1] ?? 0
+      : this.persistentRetryMs
+  }
+
   /** Recompute the gap and schedule a refresh when it is non-empty. */
   noteChange(): SessionLinkReport | undefined {
     if (this.disposed) return this.lastReport
     const report = this.check()
     if (report.missing === 0) return report
     if (this.inFlight || this.timer !== undefined) return report
-    if (this.attempts >= this.delays.length) return report
     const gate = this.deps.canRepair()
     if (!gate.ok) return report
-    const delay = this.delays[this.attempts] ?? this.delays[this.delays.length - 1] ?? 0
     this.timer = this.setTimeoutFn(() => {
       this.timer = undefined
       void this.attempt()
-    }, delay)
+    }, this.nextDelay())
     return report
   }
 
@@ -200,6 +220,7 @@ export class SessionLinkRepair {
       ...(this.lastReport?.refreshedAt !== undefined ? { refreshedAt: this.lastReport.refreshedAt } : {}),
       ...(this.refreshError !== undefined ? { lastError: this.refreshError } : {}),
       resolved: gap.missing === 0,
+      exhausted: gap.missing > 0 && this.attempts >= this.delays.length,
     }
     this.lastReport = report
     this.onReport?.(report)
@@ -223,12 +244,11 @@ export class SessionLinkRepair {
     }
     if (this.disposed) return
     const report = this.check()
-    if (report.missing > 0 && this.attempts < this.delays.length && this.deps.canRepair().ok) {
-      const delay = this.delays[this.attempts] ?? this.delays[this.delays.length - 1] ?? 0
+    if (report.missing > 0 && this.deps.canRepair().ok) {
       this.timer = this.setTimeoutFn(() => {
         this.timer = undefined
         void this.attempt()
-      }, delay)
+      }, this.nextDelay())
     }
   }
 }

@@ -277,7 +277,12 @@ export function installAggregatedGateway02(
   }
 
   const patchMethod = <T extends object, K extends keyof T>(target: T, key: K, replacement: T[K]): void => {
+    // Skip methods a newer/older shell does not implement instead of creating
+    // them as plain own properties: synthesizing `openWorkspacePath` (or any
+    // future method) on a controller object that never had it would look
+    // "supported" to feature probes while breaking the real call path.
     const original = target[key]
+    if (typeof original !== 'function') return
     target[key] = replacement
     disposers.push(() => {
       target[key] = original
@@ -339,25 +344,30 @@ export function installAggregatedGateway02(
       // single RPC, and a browser that receives an error keeps its old
       // (local-only) store, which blanks every remote Workspace row. Project
       // each device on its own and report the offender instead.
+      const projected: Record<string, unknown>[] = []
+      let projectedOk = false
       try {
-        const projected: Record<string, unknown>[] = []
         for (const rawSummary of client.sessionSummaries()) {
           const nsSummary = client.namespaceSummary(rawSummary)
           if (seen.has(nsSummary.sessionId)) continue
           seen.add(nsSummary.sessionId)
           projected.push(nsSummary as unknown as Record<string, unknown>)
         }
-        merged.push(...projected)
-        registry.clearSessionListError(client.id)
+        projectedOk = true
       } catch (error) {
-        // Roll back this device's claims so a retry can add them again.
-        for (const rawSummary of client.sessionSummaries()) {
-          seen.delete(encodeRemoteSessionId(client.id, rawSummary.sessionId))
-        }
+        // Roll back this device's claims so a retry can add them again. Use
+        // the id list captured *before* the projection, not a fresh
+        // `sessionSummaries()` call: the same failure that broke the first
+        // pass would rethrow here and take the whole merged RPC down.
+        for (const nsId of projected.map(p => p.sessionId)) seen.delete(String(nsId))
         registry.noteSessionListError(
           client.id,
           error instanceof Error ? error.message : String(error),
         )
+      }
+      if (projectedOk) {
+        merged.push(...projected)
+        registry.clearSessionListError(client.id)
       }
     }
 
@@ -433,6 +443,11 @@ export function installAggregatedGateway02(
             },
           })) as { sessionId: string; agentPreset?: string }
           registry.nativeProxyManager.requestRefresh(owner.client.id)
+          // A new remote Session enters the local store only via an
+          // `api-session/added` replay; if that event is lost the Workspace
+          // row shows an invisible child. Reconcile the catalog now so the
+          // summary reaches every live `$events` generation immediately.
+          void owner.client.refreshSessionCatalog().catch(() => {})
           return {
             sessionId: encodeRemoteSessionId(owner.client.id, created.sessionId),
             ...(created.agentPreset !== undefined ? { agentPreset: created.agentPreset } : {}),
@@ -476,6 +491,7 @@ export function installAggregatedGateway02(
             },
           })) as { sessionId: string; agentPreset?: string }
           registry.nativeProxyManager.requestRefresh(remoteClient.id)
+          void remoteClient.refreshSessionCatalog().catch(() => {})
           return {
             sessionId: encodeRemoteSessionId(remoteClient.id, created.sessionId),
             ...(created.agentPreset !== undefined ? { agentPreset: created.agentPreset } : {}),
@@ -500,6 +516,7 @@ export function installAggregatedGateway02(
             },
           })) as { sessionId: string; agentPreset?: string }
           registry.nativeProxyManager.requestRefresh(remoteClient.id)
+          void remoteClient.refreshSessionCatalog().catch(() => {})
           return {
             sessionId: encodeRemoteSessionId(remoteClient.id, created.sessionId),
             ...(created.agentPreset !== undefined ? { agentPreset: created.agentPreset } : {}),
@@ -1347,7 +1364,31 @@ async function* multiplexWorkspaceFollow(
   let prevPinned = ''
 
   const push = (item: Record<string, unknown>): void => {
+    publishFrameSessions(item)
     queue.push(item)
+  }
+
+  /**
+   * The sidebar skips Workspace children that have no summary in the Session
+   * store, so every frame carrying `sessionIds` must be preceded by an
+   * `api-session/added` for those ids on the multiplexed `$events` stream.
+   * The events generation dedupes; cross-stream order is best-effort but the
+   * store update re-renders the row either way.
+   */
+  const publishFrameSessions = (frame: Record<string, unknown>): void => {
+    if (!registry.isAggregatedMode()) return
+    const collect = (items: unknown): void => {
+      if (!Array.isArray(items)) return
+      for (const item of items) {
+        if (!isRecord(item) || !Array.isArray(item.sessionIds)) continue
+        registry.requestSessionPublish(item.sessionIds.filter((id): id is string => typeof id === 'string'))
+      }
+    }
+    if (frame.type === 'baseline' || frame.type === 'replace') {
+      collect(isRecord(frame.value) ? frame.value.items : undefined)
+    } else if (frame.type === 'upsert') {
+      collect([frame.workspace])
+    }
   }
 
   const computeCurrentState = (): WorkspaceFollowState => {
@@ -1382,8 +1423,11 @@ async function* multiplexWorkspaceFollow(
     sessionIds: item.sessionIds,
   })
 
+  let prevUpdatedAtById = new Map<string, string>()
+
   const installPrevState = (state: WorkspaceFollowState): void => {
     prevById = new Map(state.items.map(item => [item.workspaceId, fingerprintOf(item)]))
+    prevUpdatedAtById = new Map(state.items.map(item => [item.workspaceId, item.updatedAt]))
     prevOrder = state.items.map(item => item.workspaceId).join('\0')
     prevArchived = state.archivedSessionIds.join('\0')
     prevPinned = state.pinnedSessionIds.join('\0')
@@ -1425,13 +1469,23 @@ async function* multiplexWorkspaceFollow(
       const fingerprint = fingerprintOf(item)
       nextById.set(item.workspaceId, fingerprint)
       if (prevById.get(item.workspaceId) !== fingerprint) {
+        // Keep the aggregator's own recency (latest member Session touch).
+        // Bumping `updatedAt` to "now" on every fingerprint change used to
+        // re-sort the sidebar on stale arrivals — a reconnect adopting an old
+        // Session jumped its Workspace to the top. Bump only when recency did
+        // not advance (e.g. a pure title rename), which ClientWorkspaceModel
+        // would otherwise ignore for a stale timestamp.
+        const prevUpdatedAt = prevUpdatedAtById.get(item.workspaceId)
+        const updatedAt = prevUpdatedAt !== undefined && item.updatedAt <= prevUpdatedAt
+          ? new Date().toISOString()
+          : item.updatedAt
+        prevUpdatedAtById.set(item.workspaceId, updatedAt)
         push({
           type: 'upsert',
-          workspace: {
-            ...item,
-            updatedAt: new Date().toISOString(),
-          },
+          workspace: { ...item, updatedAt },
         })
+      } else {
+        prevUpdatedAtById.set(item.workspaceId, item.updatedAt)
       }
     }
 
@@ -1531,6 +1585,14 @@ async function* multiplexRemoteEventsStream(
     queue.push(item)
   }
 
+  /**
+   * Namespaced Session ids this generation already pushed an `api-session/added`
+   * for. Workspace frames request publication through
+   * `registry.requestSessionPublish`; without this ledger every frame would
+   * replay the whole catalog.
+   */
+  const publishedSessionIds = new Set<string>()
+
   const connectedDeviceIds = (): Set<string> =>
     new Set(
       registry
@@ -1558,10 +1620,12 @@ async function* multiplexRemoteEventsStream(
       try {
         const frames: unknown[] = []
         for (const summary of summaries) {
+          const namespaced = client.namespaceSummary(summary)
+          publishedSessionIds.add(namespaced.sessionId)
           frames.push({
             type: 'emit',
             event: 'api-session/added',
-            args: [client.namespaceSummary(summary)],
+            args: [namespaced],
           })
         }
         for (const frame of frames) push(frame)
@@ -1575,6 +1639,46 @@ async function* multiplexRemoteEventsStream(
       }
     }
     return replayed
+  }
+
+  /**
+   * Publish `api-session/added` for requested ids this generation has not
+   * pushed yet. Called by the aggregated Workspace stream before a frame
+   * carrying `sessionIds` reaches the client, so the sidebar never renders an
+   * expanded-but-empty Workspace because the summary replay was lost.
+   */
+  const publishRequestedSummaries = (sessionIds: readonly string[]): void => {
+    if (!readySent || !registry.isAggregatedMode()) return
+    const missing = sessionIds.filter(id => !publishedSessionIds.has(id))
+    if (missing.length === 0) return
+    const byDevice = new Map<DeviceId, string[]>()
+    for (const id of missing) {
+      const decoded = decodeSessionId(id)
+      if (!decoded.isRemote) continue
+      const list = byDevice.get(decoded.deviceId) ?? []
+      list.push(decoded.rawSessionId)
+      byDevice.set(decoded.deviceId, list)
+    }
+    for (const [deviceId, rawIds] of byDevice) {
+      const client = registry.client(deviceId)
+      if (client === undefined) continue
+      const wanted = new Set(rawIds)
+      try {
+        for (const summary of client.sessionSummaries()) {
+          if (!wanted.has(summary.sessionId)) continue
+          const namespaced = client.namespaceSummary(summary)
+          if (publishedSessionIds.has(namespaced.sessionId)) continue
+          publishedSessionIds.add(namespaced.sessionId)
+          push({ type: 'emit', event: 'api-session/added', args: [namespaced] })
+        }
+        registry.clearSessionListError(deviceId)
+      } catch (error) {
+        registry.noteSessionListError(
+          deviceId,
+          error instanceof Error ? error.message : String(error),
+        )
+      }
+    }
   }
 
   const pushPendingRemoteWaterfalls = (): void => {
@@ -1604,8 +1708,20 @@ async function* multiplexRemoteEventsStream(
     if (isRecord(frame) && frame.type === 'waterfall' && typeof frame.eventId === 'string') {
       deliveredWaterfalls.add(frame.eventId)
     }
+    if (isRecord(frame) && frame.type === 'emit') {
+      if (frame.event === 'api-session/added' && Array.isArray(frame.args)) {
+        const summary = frame.args[0]
+        if (isRecord(summary) && typeof summary.sessionId === 'string') {
+          publishedSessionIds.add(summary.sessionId)
+        }
+      } else if (frame.event === 'api-session/removed' && Array.isArray(frame.args)) {
+        // A removed Session may be re-added later; allow the next publish.
+        if (typeof frame.args[0] === 'string') publishedSessionIds.delete(frame.args[0])
+      }
+    }
     push(frame)
   })
+  const offPublishRequest = registry.onSessionPublishRequest(publishRequestedSummaries)
   const offMode = registry.onDisplayModeChanged((mode) => {
     if (!readySent || mode !== 'aggregated') return
     // Returning from Native Mode does not reconnect `$events`, and the sidebar
@@ -1694,6 +1810,7 @@ async function* multiplexRemoteEventsStream(
     offRemote()
     offMode()
     offSnapshot()
+    offPublishRequest()
     await pumpLocal.catch(() => {})
   }
 }

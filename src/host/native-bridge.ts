@@ -622,10 +622,23 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
   var sidebarScheduled = false;
 
   function findSidebar() {
-    // Prefer the direct child of the app frame; fall back to the first match
-    // for shells whose CSS-module prefix changed.
-    return document.querySelector('[class*="_frame"] > [class*="_sidebarCol"]')
-      || document.querySelector('[class*="_sidebarCol"]');
+    // CSS-module prefixes change between DSH builds, so probe from the most
+    // specific selector to the most generic. A miss only degrades pane
+    // embedding (the remote sidebar stays visible); it never breaks driving
+    // Sessions, which goes through the captured client Context.
+    var selectors = [
+      '[class*="_frame"] > [class*="_sidebarCol"]',
+      '[class*="_sidebarCol"]',
+      '[data-side="sidebar"]',
+      '[data-shell-leading]',
+      'aside',
+      '[role="navigation"]'
+    ];
+    for (var i = 0; i < selectors.length; i += 1) {
+      var el = document.querySelector(selectors[i]);
+      if (el) return el;
+    }
+    return null;
   }
 
   function ensureEmbeddedStyleTag() {

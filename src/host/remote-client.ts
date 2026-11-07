@@ -1269,7 +1269,12 @@ export class RemoteDeviceClient {
 
   private async refreshLegacy01Lists(signal: AbortSignal): Promise<void> {
     const previousSummaries = new Map(this.summaries.map(summary => [summary.sessionId, summary]))
-    const sRes = await this.rawRpcPost('session.list', {}, signal, 'session.list')
+    // The two lists are independent: fetch them in parallel so a 0.1 device
+    // with a large catalog reconciles in one round-trip instead of two.
+    const [sRes, wRes] = await Promise.all([
+      this.rawRpcPost('session.list', {}, signal, 'session.list'),
+      this.rawRpcPost('workspace.list', {}, signal, 'workspace.list'),
+    ])
     if (sRes.ok && isRecord(sRes.value) && Array.isArray(sRes.value.items)) {
       this.summaries = (sRes.value.items as Record<string, unknown>[]).map(item => ({
         sessionId: String(item.sessionId ?? ''),
@@ -1290,7 +1295,6 @@ export class RemoteDeviceClient {
           : {}),
       }))
     }
-    const wRes = await this.rawRpcPost('workspace.list', {}, signal, 'workspace.list')
     if (wRes.ok && isRecord(wRes.value) && Array.isArray(wRes.value.items)) {
       this.workspaces = wRes.value.items as RemoteWorkspaceItem[]
       if (Array.isArray(wRes.value.archivedSessionIds)) {

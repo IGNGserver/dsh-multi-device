@@ -210,6 +210,25 @@ export interface MultiDeviceClientState {
    * the conversation the user was actually looking at.
    */
   readonly pendingAggregatedSessionId?: string
+  /**
+   * Distilled Session-link repair status. `missing > 0` means at least one
+   * aggregated Workspace references Sessions the browser store has no summary
+   * for — the "expanded but empty" symptom. Surfaced as a banner so a stuck
+   * repair is never silent.
+   */
+  readonly sessionLinkStatus?: SessionLinkStatus
+}
+
+/** Reactive distillation of {@link SessionLinkReport} for banner rendering. */
+export interface SessionLinkStatus {
+  /** Referenced ids with no summary in the Session store. */
+  readonly missing: number
+  /** The initial fast-retry budget is spent; retries continue at a slow pace. */
+  readonly exhausted: boolean
+  /** Owning device id → missing count. */
+  readonly byDevice: Readonly<Record<string, number>>
+  /** Last `sessions.refresh()` failure, when any. */
+  readonly lastError?: string
 }
 
 const MAX_KEEP_ALIVE_PAGES = 6
@@ -303,6 +322,25 @@ class MultiDeviceClientStore {
     for (const listener of this.listeners) {
       try { listener() } catch { /* ignore */ }
     }
+  }
+
+  /**
+   * Publish the Session-link repair status. Diffs against the previous value
+   * so the per-change `check()` does not churn React renders.
+   */
+  updateSessionLinkStatus(status: SessionLinkStatus | undefined): void {
+    const previous = this.state.sessionLinkStatus
+    if (
+      previous === status ||
+      (previous !== undefined && status !== undefined &&
+        previous.missing === status.missing &&
+        previous.exhausted === status.exhausted &&
+        previous.lastError === status.lastError &&
+        JSON.stringify(previous.byDevice) === JSON.stringify(status.byDevice))
+    ) {
+      return
+    }
+    this.setState({ sessionLinkStatus: status })
   }
 
   start(): () => void {
@@ -442,14 +480,20 @@ class MultiDeviceClientStore {
 
   /**
    * A completion can arrive while its conversation is already the main view.
-   * The Host has no reliable cross-client presence signal, so every viewing
-   * client clears the marker as soon as it sees it. The next snapshot removes
-   * the dot everywhere; the round-trip is short enough to avoid a lingering
-   * reminder and keeps the "main view is read" rule identical to DSH's.
+   * The Host has no reliable cross-client presence signal, so every *visible*
+   * viewing client clears the marker as soon as it sees it. The next snapshot
+   * removes the dot everywhere; the round-trip is short enough to avoid a
+   * lingering reminder and keeps the "main view is read" rule identical to
+   * DSH's.
+   *
+   * A hidden tab must NOT clear: nobody is looking at it, so consuming the
+   * unread marker would silently drop the only reminder the user had. The
+   * regular snapshot poll clears it as soon as the tab becomes visible.
    */
   private clearUnreadForActiveSession(snap: MultiDeviceSnapshot): void {
     const active = this.state.activeSessionId
     if (active === undefined) return
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
     const unread = snap.unreadSessionIds ?? []
     if (!unread.includes(active)) return
     if (this.unreadClearInFlight.has(active)) return

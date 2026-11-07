@@ -803,6 +803,37 @@ export function NativeViewport({
           onOpenSettings={onOpenSettings}
         />
       )}
+      {(() => {
+        // A failed bridge used to leave a blank stage with no explanation.
+        // Surface the reason and a reload action; the automatic reload-on-reconnect
+        // logic above stays as the recovery path for transient failures.
+        const failedDevice = isNative ? activeDevice : paneDevice
+        if (failedDevice === undefined || failedDevice.nativePaneState !== 'failed') return null
+        const error = failedDevice.nativePaneError
+        return (
+          <div className="dsh-md-bridge-failed" role="status">
+            <IconWarningOutlineRegular size={16} />
+            <div className="dsh-md-bridge-failed-text">
+              <span className="dsh-md-bridge-failed-title">
+                {t('bridgeFailedTitle').replace('{name}', failedDevice.name)}
+              </span>
+              {error !== undefined && error !== '' && (
+                <span className="dsh-md-bridge-failed-error" title={error}>
+                  {t('bridgeFailedError').replace('{error}', error)}
+                </span>
+              )}
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              icon={<IconRefreshOutlineRegular size={14} />}
+              onClick={() => clientStore.reloadNativeDevice(failedDevice.id)}
+            >
+              {t('bridgeFailedReload')}
+            </Button>
+          </div>
+        )
+      })()}
       <div className="dsh-md-native-stage-body">
         {mountedDevices.map((device) => (
           <KeepAliveDeviceFrame
