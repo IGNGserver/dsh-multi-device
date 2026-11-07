@@ -40,6 +40,7 @@ import {
   type SessionStatusSource,
 } from './readState.ts'
 import { SessionDeviceChip } from './SessionDeviceChip.tsx'
+import { SessionLinkBanner } from './SessionLinkBanner.tsx'
 import { SessionRowDeviceMarker } from './SessionRowDeviceMarker.tsx'
 import {
   computeSessionLinkGap,
@@ -372,6 +373,14 @@ function installSessionLinkRepair(ctx: ClientContextLike): () => void {
     refresh: async () => {
       await sessions?.refresh?.()
     },
+  }, {
+    // Keep the user informed instead of silently retrying: the banner reads
+    // this status and stays up until every referenced id resolves.
+    onReport: (report) => {
+      clientStore.updateSessionLinkStatus(report.missing > 0
+        ? { missing: report.missing, exhausted: report.exhausted, byDevice: report.byDevice, ...(report.lastError !== undefined ? { lastError: report.lastError } : {}) }
+        : undefined)
+    },
   })
   setActiveSessionLinkRepair(repair)
 
@@ -398,6 +407,7 @@ function installSessionLinkRepair(ctx: ClientContextLike): () => void {
     unsubscribeStore()
     unsubscribeSessions?.()
     setActiveSessionLinkRepair(undefined)
+    clientStore.updateSessionLinkStatus(undefined)
     repair.dispose()
   }
 }
@@ -540,6 +550,19 @@ function applyClient(ctx: ClientContextLike): void {
           t={props.t ?? getTranslate()}
           onOpenSettings={handleOpenSettings}
         />
+      ),
+    ),
+  )
+  ctx.slots.inject('shell.overlay', () =>
+    ctx.slots.register(
+      {
+        name: 'shell.overlay',
+        id: 'multi-device-session-link-banner',
+        order: 45,
+        locale: LOCALE_NS,
+      },
+      (props: { t?: (k: MultiDeviceLocaleKey) => string }) => (
+        <SessionLinkBanner t={props.t ?? getTranslate()} onOpenSettings={handleOpenSettings} />
       ),
     ),
   )

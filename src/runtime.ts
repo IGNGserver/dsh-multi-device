@@ -411,6 +411,15 @@ export class MultiDeviceControlPlane {
           if (mode !== 'aggregated' && mode !== 'native') {
             return { ok: false, error: 'displayMode must be "aggregated" or "native"' }
           }
+          if (mode === 'aggregated') {
+            const health = this.registry.aggregatedGatewayHealth()
+            if (!health.ok) {
+              return {
+                ok: false,
+                error: `Aggregated Mode is unavailable: ${health.error ?? 'the aggregated gateway is not active'}`,
+              }
+            }
+          }
           this.registry.setDisplayMode(mode)
           return { ok: true, value: { snapshot: this.registry.snapshot() } }
         }

@@ -145,7 +145,7 @@ describe('SessionLinkRepair', () => {
     repair.dispose()
   })
 
-  it('spends exactly one budget of attempts when the store never heals', async () => {
+  it('keeps retrying persistently once the initial budget is spent', async () => {
     const clock = makeClock()
     const missing = encodeRemoteSessionId(UBUNTU, 'stuck')
     let refreshes = 0
@@ -162,11 +162,47 @@ describe('SessionLinkRepair', () => {
     )
 
     repair.noteChange()
+    // Fast backoff (400/1500/4000/10000/20000) then one persistent 60s retry
+    // inside the 120s window; the loop must never give up silently.
     await clock.advance(120_000)
 
-    expect(refreshes).toBe(5)
+    expect(refreshes).toBe(6)
     expect(repair.report()?.missing).toBe(1)
-    expect(repair.report()?.attempts).toBe(5)
+    expect(repair.report()?.attempts).toBe(6)
+    expect(repair.report()?.exhausted).toBe(true)
+
+    // Persistent retries keep arriving every 60s until the gap heals.
+    await clock.advance(60_000)
+    expect(refreshes).toBe(7)
+    repair.dispose()
+  })
+
+  it('heals a stuck gap during the persistent phase and stops', async () => {
+    const clock = makeClock()
+    const missing = encodeRemoteSessionId(UBUNTU, 'heals-late')
+    const known = new Set<string>()
+    let refreshes = 0
+
+    const repair = new SessionLinkRepair(
+      {
+        computeGap: () => computeSessionLinkGap([workspace([missing])], known),
+        canRepair: () => ({ ok: true, connectedDevices: 1 }),
+        refresh: async () => {
+          refreshes += 1
+          // The Host finally projects the summary during the persistent phase.
+          if (refreshes >= 6) known.add(missing)
+        },
+      },
+      { setTimeoutFn: clock.set, clearTimeoutFn: clock.clear, now: clock.now },
+    )
+
+    repair.noteChange()
+    await clock.advance(120_000)
+    expect(refreshes).toBe(6)
+    expect(repair.report()?.resolved).toBe(true)
+    expect(repair.report()?.exhausted).toBe(false)
+    await clock.advance(180_000)
+    expect(refreshes).toBe(6)
     repair.dispose()
   })
 
@@ -219,7 +255,7 @@ describe('SessionLinkRepair', () => {
 
     repair.noteChange()
     await clock.advance(120_000)
-    expect(refreshes).toBe(5)
+    expect(refreshes).toBe(6)
 
     // A device that connects later starts a fresh budget; this time the store
     // answers, which is the real-world recovery path.

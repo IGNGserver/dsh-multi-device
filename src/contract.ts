@@ -304,6 +304,11 @@ export interface DeviceCatalogCache {
   readonly workspaces: readonly CachedWorkspace[]
   readonly archivedSessionIds: readonly string[]
   readonly pinnedSessionIds: readonly string[]
+  /**
+   * True when this cache was cut down to the persistence limits, i.e. the
+   * aggregated view is known to be missing older Sessions after a restart.
+   */
+  readonly catalogTruncated?: boolean
 }
 
 /** A local private key discovered under `~/.ssh` for the device form. */
@@ -567,6 +572,20 @@ export interface MultiDeviceSnapshot {
   readonly gitMatch: GitMatchRun
   /** Persisted display preferences; optional so older Hosts still parse. */
   readonly ui?: MultiDeviceUiPreferences
+  /**
+   * Why one device's Sessions could not be projected into the aggregated
+   * view, keyed by device id. Empty when every device merged cleanly. The
+   * client renders this as Workspace-load warnings so a silently partial
+   * aggregation is never mistaken for "this project really has no sessions".
+   * Optional so an older Client still parses a newer Host's snapshot.
+   */
+  readonly workspaceLoadErrors?: Readonly<Record<string, string>>
+  /**
+   * True when at least one device catalog was trimmed to the session limit,
+   * so the aggregated list/sidebar is known to be incomplete. Optional so an
+   * older Client still parses a newer Host's snapshot.
+   */
+  readonly catalogTruncated?: boolean
 }
 
 // ============================================================================

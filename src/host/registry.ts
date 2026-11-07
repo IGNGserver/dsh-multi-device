@@ -269,6 +269,11 @@ export class DeviceRegistry {
   private readonly catalogs = new Map<DeviceId, DeviceCatalogCache>()
   /** Why one device's summaries could not be projected into the merged `session.list`. */
   private readonly sessionListErrors = new Map<DeviceId, string>()
+  /**
+   * Live `$events` generations that must be told to (re)publish Session
+   * summaries before a Workspace row referencing them reaches the sidebar.
+   */
+  private readonly sessionPublishListeners = new Set<(sessionIds: readonly string[]) => void>()
   /** Injected Native Pane bridge lifecycle, last page selection/title, and visibility per device. */
   private readonly nativePanes = new Map<DeviceId, {
     state: NativePaneState
@@ -359,6 +364,18 @@ export class DeviceRegistry {
     this.bumpRevision()
   }
 
+  /**
+   * Whether entering Aggregated Mode is safe right now. Without the gateway
+   * the mode is a broken pseudo-aggregate: no merged `session.list`, no
+   * multiplexed streams, and every remote Workspace renders empty while the
+   * repair loop can never close the gap.
+   */
+  aggregatedGatewayHealth(): { readonly ok: boolean; readonly error?: string } {
+    return this.aggregatedGatewayActive
+      ? { ok: true }
+      : { ok: false, ...(this.aggregatedGatewayError !== undefined ? { error: this.aggregatedGatewayError } : {}) }
+  }
+
   onSnapshotChanged(listener: () => void): () => void {
     this.listeners.add(listener)
     return () => this.listeners.delete(listener)
@@ -387,6 +404,34 @@ export class DeviceRegistry {
   onWorkspacesChanged(listener: () => void): () => void {
     this.workspaceListeners.add(listener)
     return () => this.workspaceListeners.delete(listener)
+  }
+
+  /**
+   * Ask every live multiplexed `$events` generation to publish
+   * `api-session/added` for the given namespaced Session ids.
+   *
+   * The sidebar silently skips Workspace children that have no summary in the
+   * browser's Session store, so a Workspace frame must never outrun the
+   * summaries it references. The aggregated `workspace/follow` stream calls
+   * this before emitting any frame that carries `sessionIds`; each event
+   * generation dedupes against the ids it already pushed. Cross-stream wire
+   * order is not guaranteed, but the store update re-renders the row, so the
+   * "expanded but empty" state can only last milliseconds, never forever.
+   */
+  requestSessionPublish(sessionIds: readonly string[]): void {
+    if (sessionIds.length === 0) return
+    for (const listener of this.sessionPublishListeners) {
+      try {
+        listener(sessionIds)
+      } catch {
+        // One failing generation must not block the others.
+      }
+    }
+  }
+
+  onSessionPublishRequest(listener: (sessionIds: readonly string[]) => void): () => void {
+    this.sessionPublishListeners.add(listener)
+    return () => this.sessionPublishListeners.delete(listener)
   }
 
   /**
@@ -1806,6 +1851,14 @@ export class DeviceRegistry {
       subagentSessionIds: [...subagentSessionIds].sort(),
       gitMatch: this.gitMatchRun,
       ui: this.uiPreferences,
+      // A partial merge is a first-class snapshot fact: the client warns
+      // instead of presenting an incomplete aggregation as the truth.
+      ...(this.sessionListErrors.size > 0
+        ? { workspaceLoadErrors: Object.fromEntries(this.sessionListErrors) }
+        : {}),
+      ...([...this.catalogs.values()].some(cache => cache.catalogTruncated === true)
+        ? { catalogTruncated: true }
+        : {}),
     }
   }
 
@@ -2199,14 +2252,23 @@ function trimCatalog(cache: DeviceCatalogCache): DeviceCatalogCache {
         .sort((a, b) => b.updatedAt - a.updatedAt)
         .slice(0, CATALOG_SESSION_LIMIT)
     : cache.sessions
+  const workspaces = cache.workspaces.length > CATALOG_WORKSPACE_LIMIT
+    ? cache.workspaces.slice(0, CATALOG_WORKSPACE_LIMIT)
+    : cache.workspaces
+  const archivedSessionIds = cache.archivedSessionIds.slice(0, CATALOG_ID_LIMIT)
+  const pinnedSessionIds = cache.pinnedSessionIds.slice(0, CATALOG_ID_LIMIT)
+  const trimmed =
+    sessions !== cache.sessions ||
+    workspaces !== cache.workspaces ||
+    archivedSessionIds !== cache.archivedSessionIds ||
+    pinnedSessionIds !== cache.pinnedSessionIds
   return {
     ...cache,
     sessions,
-    workspaces: cache.workspaces.length > CATALOG_WORKSPACE_LIMIT
-      ? cache.workspaces.slice(0, CATALOG_WORKSPACE_LIMIT)
-      : cache.workspaces,
-    archivedSessionIds: cache.archivedSessionIds.slice(0, CATALOG_ID_LIMIT),
-    pinnedSessionIds: cache.pinnedSessionIds.slice(0, CATALOG_ID_LIMIT),
+    workspaces,
+    archivedSessionIds,
+    pinnedSessionIds,
+    ...(trimmed ? { catalogTruncated: true } : {}),
   }
 }
 

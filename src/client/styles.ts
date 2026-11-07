@@ -1478,6 +1478,67 @@ html[data-platform='darwin'] .dsh-md-native-bar {
   line-height: 18px;
 }
 
+/* Session-link repair banner: a floating notice so an empty aggregated
+   Workspace is never the only signal that a repair is pending. */
+.dsh-md-session-link-banner {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(560px, calc(100vw - 32px));
+  padding: 8px 12px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-2);
+  box-shadow: var(--dsw-shadow-l2, 0 4px 16px rgba(0, 0, 0, 0.12));
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.dsh-md-session-link-banner[data-exhausted='true'] {
+  border-color: var(--dsw-alias-state-warning-primary, var(--dsw-alias-border-l2));
+}
+
+/* Bridge-failed banner at the top of the native stage: a failed bridge used
+   to leave a blank stage with no explanation and no recovery action. */
+.dsh-md-bridge-failed {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-state-error-primary, var(--dsw-alias-label-secondary));
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.dsh-md-bridge-failed-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.dsh-md-bridge-failed-title {
+  color: var(--dsw-alias-label-primary);
+  font-weight: 500;
+}
+
+.dsh-md-bridge-failed-error {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+}
+
 .dsh-md-offline-banner > :first-child {
   margin-top: 4px;
   flex: none;

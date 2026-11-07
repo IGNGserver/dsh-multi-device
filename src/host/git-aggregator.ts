@@ -460,7 +460,13 @@ export class WorkspaceAggregator {
         effectiveTargetPath: entry.input.path,
         effectiveTargetOnline: isOnline(entry.input.deviceId),
         members: [entry.memberRef],
-        sessionIds: entry.namespacedSessionIds,
+        // Same recency ordering as merged Workspaces, so the sidebar shows a
+        // consistent newest-first list whether a project spans one device or many.
+        sessionIds: [...entry.namespacedSessionIds].sort((a, b) => {
+          const ta = sessionUpdatedAtMap.get(a) ?? 0
+          const tb = sessionUpdatedAtMap.get(b) ?? 0
+          return tb - ta
+        }),
         createdAt: entry.input.createdAt,
         updatedAt: entry.input.updatedAt,
       })
