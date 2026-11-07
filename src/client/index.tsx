@@ -403,12 +403,32 @@ function installSessionLinkRepair(ctx: ClientContextLike): () => void {
 }
 
 export function apply(ctx: ClientContextLike): void {
+  try {
+    applyClient(ctx)
+  } catch (error) {
+    // The desktop crash log captures renderer `console.error` output; without
+    // this line a client entry that throws is reduced to "did not activate".
+    console.error('[dsh-multi-device] client entry failed to activate', error)
+    throw error
+  }
+}
+
+function applyClient(ctx: ClientContextLike): void {
   adoptMultiDeviceStyles()
 
   ctx.effect(() => ctx.locale.register(LOCALE_NS, { zh, en }), 'dsh-multi-device: locales')
   ctx.effect(() => clientStore.start(), 'dsh-multi-device: client-store')
   ctx.effect(() => installWindowTitle(), 'dsh-multi-device: window title')
-  ctx.effect(() => installSessionLinkRepair(ctx), 'dsh-multi-device: session link repair')
+  // A repair loop that cannot install must never take the whole client entry
+  // down with it: the sidebar and settings have to keep working.
+  ctx.effect(() => {
+    try {
+      return installSessionLinkRepair(ctx)
+    } catch (error) {
+      console.error('[dsh-multi-device] session link repair failed to install', error)
+      return () => {}
+    }
+  }, 'dsh-multi-device: session link repair')
 
   const getTranslate = (): ((key: MultiDeviceLocaleKey) => string) => {
     try {
