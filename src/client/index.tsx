@@ -50,6 +50,7 @@ import {
 import { clientStore, useMultiDeviceState } from './state.ts'
 import { adoptMultiDeviceStyles } from './styles.ts'
 import { installWindowTitle } from './windowTitle.ts'
+import { installScopedCatalog, type CatalogRpc } from './modelCatalog.ts'
 
 export const SETTINGS_SECTION_ID = 'multi-device'
 /** Retained alias for backwards compatibility with external callers. */
@@ -74,9 +75,10 @@ function translateFallback(key: MultiDeviceLocaleKey): string {
 function refreshModelCatalog(ctx: ClientContextLike): void {
   try {
     const models = ctx.get?.('modelDirectories') as
-      | { catalog?: { refresh?: () => void } }
+      | { catalog?: { refresh?: () => void; resetGeneration?: () => void } }
       | undefined
-    models?.catalog?.refresh?.()
+    if (models?.catalog?.resetGeneration !== undefined) models.catalog.resetGeneration()
+    else models?.catalog?.refresh?.()
   } catch {
     // Private DSH service shape; the Host event remains the primary path.
   }
@@ -297,6 +299,7 @@ function installModeSideEffects(ctx: ClientContextLike): () => void {
   const syncMainSession = (): string | undefined => {
     const list = ctx.sessions?.list.getSnapshot()
     const current = list === undefined ? undefined : currentMainSessionId(list)
+    clientStore.setMainViewVisible(!isGlobalPanelActive())
     if (isGlobalPanelActive()) {
       void clientStore.setActiveSession(undefined)
       return current
@@ -455,6 +458,42 @@ function applyClient(ctx: ClientContextLike): void {
     openSettingsSection(ctx, SETTINGS_SECTION_ID)
   }
   const refreshCatalog = (): void => refreshModelCatalog(ctx)
+
+  ctx.inject(['connection'], (scope) => {
+    scope.effect(() => {
+      const connection = scope.get?.('connection') as { rpc?: CatalogRpc } | undefined
+      if (connection?.rpc === undefined) return () => {}
+      return installScopedCatalog(connection.rpc,
+        () => clientStore.effectiveSessionId(),
+        id => decodeSessionId(id).isRemote,
+        async (sessionId, signal) => {
+          try {
+            const response = await fetch('/multi-device/api', {
+              method: 'POST', headers: { 'content-type': 'application/json' }, signal,
+              body: JSON.stringify({ action: 'modelCatalog', payload: { sessionId, clientId: clientStore.clientId } }),
+            })
+            const result = await response.json() as { ok: boolean; value?: unknown; error?: string }
+            if (result.ok) return { ok: true, value: result.value }
+            return { ok: false, error: { code: 'dsh-md/model-catalog', message: result.error ?? 'Catalog unavailable', details: {} } }
+          } catch (error) {
+            return { ok: false, error: { code: 'dsh-md/model-catalog', message: error instanceof Error ? error.message : String(error), details: {} } }
+          }
+        })
+    }, 'dsh-multi-device: browser scoped catalog')
+  })
+  ctx.inject(['modelDirectories'], scope => {
+    scope.effect(() => {
+      let previous = clientStore.effectiveSessionId()
+      const refresh = (): void => {
+        const next = clientStore.effectiveSessionId()
+        if (next === previous) return
+        previous = next
+        refreshModelCatalog(scope)
+      }
+      refreshModelCatalog(scope)
+      return clientStore.subscribe(refresh)
+    }, 'dsh-multi-device: catalog generation')
+  })
 
   // Sidebar project rows get a device dot + device name / device count.
   ctx.effect(

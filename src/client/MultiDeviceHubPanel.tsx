@@ -253,7 +253,7 @@ function DeviceEditorForm({
   const [sshProxyJump, setSshProxyJump] = useState(device?.ssh?.proxyJump ?? '')
   const [remoteDshHome, setRemoteDshHome] = useState(device?.ssh?.remoteDshHome ?? '')
   const [bootstrapCredentials, setBootstrapCredentials] = useState(
-    device?.ssh?.bootstrapFromRemoteCredentials !== false,
+    device === undefined || device.ssh?.bootstrapFromRemoteCredentials === true,
   )
   const [deviceEnabled, setDeviceEnabled] = useState(device?.enabled !== false)
 
@@ -294,7 +294,7 @@ function DeviceEditorForm({
         ...(sshProxyJump.trim() !== '' ? { proxyJump: sshProxyJump.trim() } : {}),
         remotePort: parsedRemotePort > 0 ? parsedRemotePort : 3080,
         ...(remoteDshHome.trim() !== '' ? { remoteDshHome: remoteDshHome.trim() } : {}),
-        ...(bootstrapCredentials ? { bootstrapFromRemoteCredentials: true } : {}),
+        bootstrapFromRemoteCredentials: bootstrapCredentials,
         engine: device?.ssh?.engine ?? 'auto',
       },
       auth: {

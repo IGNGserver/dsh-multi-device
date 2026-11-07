@@ -42,6 +42,10 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
   var params;
   try { params = new URL(script.src).searchParams; } catch (error) { return; }
   var deviceId = params.get('device') || '';
+  // The script URL is shared/cached by all pages; ownership comes from the
+  // containing frame URL supplied by NativeViewport, not script.src.
+  var clientId = '';
+  try { clientId = new URLSearchParams(location.search || '').get('md_client') || ''; } catch (error) {}
 
   var initialGroups = {};
   var initialUnread = [];
@@ -822,7 +826,7 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
   function connect() {
     var protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     try {
-      socket = new WebSocket(protocol + '//' + location.host + '/__md/bridge?device=' + encodeURIComponent(deviceId));
+      socket = new WebSocket(protocol + '//' + location.host + '/__md/bridge?device=' + encodeURIComponent(deviceId) + (clientId ? '&client=' + encodeURIComponent(clientId) : ''));
     } catch (error) {
       socket = null;
       schedule();

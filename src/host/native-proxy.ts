@@ -43,7 +43,13 @@ import {
 } from './native-bridge.ts'
 
 const PROXY_TOKEN_QUERY = 'md_token'
-const PROXY_COOKIE_NAME = 'dsh-md-native'
+const PROXY_COOKIE_PREFIX = 'dsh-md-native-'
+const LEGACY_CLIENT_ID = 'legacy'
+
+/** Omitted IDs are legacy only, never a wildcard for every bridge. */
+function bridgeClientId(value: string | null | undefined): string {
+  return value === undefined || value === null || value === '' ? LEGACY_CLIENT_ID : value
+}
 
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
@@ -148,13 +154,14 @@ export interface NativeProxyHooks {
     deviceId: DeviceId,
     state: NativePaneState,
     error?: string,
+    clientId?: string,
   ) => void
   /** Report the raw remote Session the framed page currently shows. */
-  readonly onBridgeSelection?: (deviceId: DeviceId, sessionId: string | undefined) => void
+  readonly onBridgeSelection?: (deviceId: DeviceId, sessionId: string | undefined, clientId?: string) => void
   /** Report the framed page's own `document.title` (empty means no title). */
-  readonly onBridgeTitle?: (deviceId: DeviceId, title: string | undefined) => void
+  readonly onBridgeTitle?: (deviceId: DeviceId, title: string | undefined, clientId?: string) => void
   /** Report whether at least one framed page for this device is actually visible. */
-  readonly onBridgeVisibility?: (deviceId: DeviceId, visible: boolean) => void
+  readonly onBridgeVisibility?: (deviceId: DeviceId, visible: boolean, clientId?: string) => void
   /** Persist the port a proxy actually bound, so the next restart keeps the origin. */
   readonly onPortAllocated?: (deviceId: DeviceId, port: number) => void
   /** Last Host-owned workspace fold state for the bridge's first render. */
@@ -175,6 +182,20 @@ const MAX_INJECTABLE_HTML_BYTES = 20 * 1024 * 1024
 /** How long a framed page may take to report bridge readiness. */
 const BRIDGE_READY_TIMEOUT_MS = 15_000
 
+export interface NativeBridgeSnapshot {
+  state: NativePaneState
+  error?: string
+  sessionId?: string
+  title?: string
+}
+
+interface ClientBridgeState extends NativeBridgeSnapshot {
+  visible: boolean
+  embedded: boolean
+  pendingOpenSession?: string
+  readyTimer?: ReturnType<typeof setTimeout>
+}
+
 export class NativeDeviceProxy {
   private server: Server | undefined
   private localPort: number | undefined
@@ -185,18 +206,12 @@ export class NativeDeviceProxy {
   private authRecoveryInFlight: Promise<boolean> | undefined
   private readonly token = randomUUID().replaceAll('-', '')
   private bridgeServer: WebSocketServer | undefined
-  private readonly bridgeClients = new Set<WebSocket>()
-  private bridgeState: NativePaneState = 'idle'
-  private bridgeError: string | undefined
-  private bridgeSessionId: string | undefined
-  private bridgeTitle: string | undefined
-  private bridgeVisible = false
-  /** Per-bridge page visibility; the device is visible if any bridge is. */
+  // Cookies ignore ports: one name per proxy prevents device A/B overwriting
+  // each other's loopback bootstrap cookie in the same browser cookie jar.
+  private readonly cookieName = `${PROXY_COOKIE_PREFIX}${randomUUID().replaceAll('-', '')}`
+  private readonly bridgeClients = new Map<WebSocket, string>()
+  private readonly clientStates = new Map<string, ClientBridgeState>()
   private readonly bridgeVisibility = new Map<WebSocket, boolean>()
-  private bridgeReadyTimer: ReturnType<typeof setTimeout> | undefined
-  private pendingOpenSession: string | undefined
-  /** Pane mode hides the remote sidebar; native full mode restores it. */
-  private bridgeEmbedded = false
   /** Host-owned workspace fold state, applied before the remote page's first render. */
   private groupState: Record<string, boolean> = {}
   /** Host-owned raw Session IDs whose completion is unread. */
@@ -344,22 +359,26 @@ export class NativeDeviceProxy {
 
   stop(): void {
     this.stopped = true
-    this.clearBridgeTimer()
-    for (const client of this.bridgeClients) {
+    for (const [clientId, state] of this.clientStates) {
+      this.clearBridgeTimer(clientId)
+      if (state.visible) {
+        state.visible = false
+        this.hooks.onBridgeVisibility?.(this.device.id, false, clientId)
+      }
+      if (state.title !== undefined) {
+        state.title = undefined
+        this.hooks.onBridgeTitle?.(this.device.id, undefined, clientId)
+      }
+      this.resetBridgeSelection(clientId)
+      this.setBridgeState('idle', undefined, clientId)
+    }
+    for (const client of this.bridgeClients.keys()) {
       try { client.close() } catch { /* ignore */ }
     }
     this.bridgeClients.clear()
     this.bridgeServer?.close()
     this.bridgeServer = undefined
     this.bridgeVisibility.clear()
-    if (this.bridgeVisible) {
-      this.bridgeVisible = false
-      this.hooks.onBridgeVisibility?.(this.device.id, false)
-    }
-    if (this.bridgeTitle !== undefined) {
-      this.bridgeTitle = undefined
-      this.hooks.onBridgeTitle?.(this.device.id, undefined)
-    }
     for (const socket of this.sockets) {
       try { socket.destroy() } catch { /* ignore */ }
     }
@@ -367,26 +386,32 @@ export class NativeDeviceProxy {
     this.server?.close()
     this.server = undefined
     this.localPort = undefined
-    this.setBridgeState('idle')
   }
 
-  /** Current bridge lifecycle, for the Host snapshot. */
-  bridgeSnapshot(): { state: NativePaneState; error?: string; sessionId?: string } {
+  private clientState(clientId = LEGACY_CLIENT_ID): ClientBridgeState {
+    let state = this.clientStates.get(clientId)
+    if (state === undefined) {
+      state = { state: 'idle', visible: false, embedded: false }
+      this.clientStates.set(clientId, state)
+    }
+    return state
+  }
+
+  /** Current bridge lifecycle for this client only (legacy never aggregates). */
+  bridgeSnapshot(clientId = LEGACY_CLIENT_ID): NativeBridgeSnapshot {
+    const state = this.clientStates.get(clientId)
     return {
-      state: this.bridgeState,
-      ...(this.bridgeError !== undefined ? { error: this.bridgeError } : {}),
-      ...(this.bridgeSessionId !== undefined ? { sessionId: this.bridgeSessionId } : {}),
+      state: state?.state ?? 'idle',
+      ...(state?.error !== undefined ? { error: state.error } : {}),
+      ...(state?.sessionId !== undefined ? { sessionId: state.sessionId } : {}),
+      ...(state?.title !== undefined ? { title: state.title } : {}),
     }
   }
 
-  /**
-   * Ask the framed page to open one raw remote Session. The command is held
-   * until the bridge reports readiness so a not-yet-loaded frame still lands on
-   * the Session the aggregated sidebar selected.
-   */
-  openSession(sessionId: string): void {
-    this.pendingOpenSession = sessionId
-    this.sendToBridge({ type: 'open-session', sessionId })
+  /** Queue/replay navigation only within the requesting browser client. */
+  openSession(sessionId: string, clientId = LEGACY_CLIENT_ID): void {
+    this.clientState(clientId).pendingOpenSession = sessionId
+    this.sendToBridge({ type: 'open-session', sessionId }, clientId)
   }
 
   /** Ask the framed page to refresh its own Session list (after fork/create). */
@@ -395,10 +420,11 @@ export class NativeDeviceProxy {
   }
 
   /** Switch the same framed page between embedded pane and full native mode. */
-  setEmbedded(enabled: boolean): void {
-    if (this.bridgeEmbedded === enabled) return
-    this.bridgeEmbedded = enabled
-    this.sendToBridge({ type: 'set-embedded', enabled })
+  setEmbedded(enabled: boolean, clientId = LEGACY_CLIENT_ID): void {
+    const state = this.clientState(clientId)
+    if (state.embedded === enabled) return
+    state.embedded = enabled
+    this.sendToBridge({ type: 'set-embedded', enabled }, clientId)
   }
 
   /** Apply Host-owned fold state to the framed page and every open client. */
@@ -422,43 +448,54 @@ export class NativeDeviceProxy {
     this.sendToBridge({ type: 'read-state', unreadSessionIds: next })
   }
 
-  /** Reset the cached bridge command target (device switched away). */
-  clearPendingSession(): void {
-    this.pendingOpenSession = undefined
+  /** Reset only this client's cached command target (device switched away). */
+  clearPendingSession(clientId = LEGACY_CLIENT_ID): void {
+    const state = this.clientStates.get(clientId)
+    if (state !== undefined) state.pendingOpenSession = undefined
   }
 
-  private sendToBridge(message: NativeBridgeOutbound): void {
-    const data = JSON.stringify(message)
-    for (const client of this.bridgeClients) {
-      if (client.readyState !== WebSocket.OPEN) continue
-      try { client.send(data) } catch { /* ignore */ }
+  private sendToSocket(client: WebSocket, message: NativeBridgeOutbound): void {
+    if (client.readyState !== WebSocket.OPEN) return
+    try { client.send(JSON.stringify(message)) } catch { /* ignore */ }
+  }
+
+  private sendToBridge(message: NativeBridgeOutbound, clientId?: string): void {
+    // Only shared catalog/read/group updates may omit the target. Navigation
+    // and embedding must always be addressed, including the legacy partition.
+    if (clientId === undefined && (message.type === 'open-session' || message.type === 'set-embedded')) return
+    for (const [client, owner] of this.bridgeClients) {
+      if (clientId !== undefined && owner !== clientId) continue
+      this.sendToSocket(client, message)
     }
   }
 
-  private setBridgeState(state: NativePaneState, error?: string): void {
+  private setBridgeState(state: NativePaneState, error?: string, clientId = LEGACY_CLIENT_ID): void {
+    const current = this.clientState(clientId)
     const nextError = error?.trim() === '' ? undefined : error
-    if (this.bridgeState === state && this.bridgeError === nextError) return
-    this.bridgeState = state
-    this.bridgeError = nextError
-    this.hooks.onBridgeState?.(this.device.id, state, nextError)
+    if (current.state === state && current.error === nextError) return
+    current.state = state
+    current.error = nextError
+    this.hooks.onBridgeState?.(this.device.id, state, nextError, clientId)
   }
 
-  private clearBridgeTimer(): void {
-    if (this.bridgeReadyTimer !== undefined) {
-      clearTimeout(this.bridgeReadyTimer)
-      this.bridgeReadyTimer = undefined
+  private clearBridgeTimer(clientId = LEGACY_CLIENT_ID): void {
+    const state = this.clientStates.get(clientId)
+    if (state?.readyTimer !== undefined) {
+      clearTimeout(state.readyTimer)
+      state.readyTimer = undefined
     }
   }
 
-  private armBridgeTimer(): void {
-    this.clearBridgeTimer()
+  private armBridgeTimer(clientId = LEGACY_CLIENT_ID): void {
+    this.clearBridgeTimer(clientId)
+    const state = this.clientState(clientId)
     const timer = setTimeout(() => {
-      this.bridgeReadyTimer = undefined
-      if (this.bridgeState === 'ready') return
-      this.setBridgeState('failed', 'the framed page never reported a ready bridge')
+      state.readyTimer = undefined
+      if (state.state === 'ready') return
+      this.setBridgeState('failed', 'the framed page never reported a ready bridge', clientId)
     }, BRIDGE_READY_TIMEOUT_MS)
     timer.unref?.()
-    this.bridgeReadyTimer = timer
+    state.readyTimer = timer
   }
 
   private async handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -483,14 +520,22 @@ export class NativeDeviceProxy {
       return
     }
 
+    // Same fence as both WebSocket paths, before bootstrap or upstream auth.
+    if (!this.isAllowedCallerOrigin(req.headers.origin)) {
+      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+      res.end('Native proxy caller origin is not allowed')
+      return
+    }
+
     const rawTarget = stripProxyTokenFromRawTarget(req.url ?? '/')
     const requestUrl = new URL(req.url ?? '/', proxyOrigin)
+    const clientId = bridgeClientId(requestUrl.searchParams.get('md_client'))
     const queryToken = requestUrl.searchParams.get(PROXY_TOKEN_QUERY)
-    const cookieToken = readCookie(req.headers.cookie, PROXY_COOKIE_NAME)
+    const cookieToken = readCookie(req.headers.cookie, this.cookieName)
     if (queryToken === this.token && cookieToken !== this.token) {
       res.writeHead(302, {
         location: rawTarget,
-        'set-cookie': `${PROXY_COOKIE_NAME}=${this.token}; Path=/; HttpOnly; SameSite=Lax`,
+        'set-cookie': `${this.cookieName}=${this.token}; Path=/; HttpOnly; SameSite=Lax`,
         'cache-control': 'no-store',
       })
       res.end()
@@ -653,9 +698,9 @@ export class NativeDeviceProxy {
             && typeof contentType === 'string'
             && contentType.toLowerCase().includes('text/html')
           if (shouldInject) {
-            this.setBridgeState('loading')
-            this.armBridgeTimer()
-            this.streamInjectedHtml(proxyRes, res, status, resHeaders)
+            this.setBridgeState('loading', undefined, clientId)
+            this.armBridgeTimer(clientId)
+            this.streamInjectedHtml(proxyRes, res, status, resHeaders, clientId)
             return
           }
 
@@ -696,6 +741,7 @@ export class NativeDeviceProxy {
     res: ServerResponse,
     status: number,
     baseHeaders: Record<string, string | string[]>,
+    clientId: string,
   ): void {
     const chunks: Buffer[] = []
     let size = 0
@@ -719,9 +765,9 @@ export class NativeDeviceProxy {
       if (tooLarge) {
         // The buffered prefix is not a valid document; never send a truncated
         // body as if it were the page. The pane falls back to the local mirror.
-        this.clearBridgeTimer()
-        this.resetBridgeSelection()
-        this.setBridgeState('failed', 'the remote HTML document was too large to inject the native bridge')
+        this.clearBridgeTimer(clientId)
+        this.resetBridgeSelection(clientId)
+        this.setBridgeState('failed', 'the remote HTML document was too large to inject the native bridge', clientId)
         res.writeHead(502, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
         res.end(renderUnavailableHtml(this.device.name, 'The remote page is too large to inject the native bridge.'))
         return
@@ -738,11 +784,12 @@ export class NativeDeviceProxy {
         injected = true
       }
       if (!injected) {
-        this.clearBridgeTimer()
-        this.resetBridgeSelection()
+        this.clearBridgeTimer(clientId)
+        this.resetBridgeSelection(clientId)
         this.setBridgeState(
           'failed',
           `the remote HTML document used an unsupported content-encoding (${encoding ?? 'unknown'})`,
+          clientId,
         )
       }
       removeHeader(headers, 'content-length')
@@ -764,7 +811,7 @@ export class NativeDeviceProxy {
   private handleBridgeUpgrade(req: IncomingMessage, clientSocket: Duplex, head: Buffer): void {
     const parsed = parseOriginForm(req.url)
     const proxyOrigin = this.proxyOrigin()
-    const cookieToken = readCookie(req.headers.cookie, PROXY_COOKIE_NAME)
+    const cookieToken = readCookie(req.headers.cookie, this.cookieName)
     if (parsed === undefined || proxyOrigin === undefined || cookieToken !== this.token) {
       clientSocket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
       return
@@ -784,17 +831,21 @@ export class NativeDeviceProxy {
       return
     }
     bridgeServer.handleUpgrade(req, clientSocket, head, (ws) => {
-      this.attachBridge(ws)
+      this.attachBridge(ws, bridgeClientId(new URLSearchParams(parsed.search).get('client')))
     })
   }
 
   /** Own one framed page's bridge socket, its readiness and its selection reports. */
-  private attachBridge(ws: WebSocket): void {
-    this.bridgeClients.add(ws)
+  private attachBridge(ws: WebSocket, clientId: string): void {
+    const state = this.clientState(clientId)
+    const first = ![...this.bridgeClients.values()].includes(clientId)
+    this.bridgeClients.set(ws, clientId)
     this.bridgeVisibility.set(ws, false)
-    this.resetBridgeSelection()
-    this.setBridgeState('loading')
-    this.armBridgeTimer()
+    if (first) {
+      this.resetBridgeSelection(clientId)
+      this.setBridgeState('loading', undefined, clientId)
+      this.armBridgeTimer(clientId)
+    }
 
     ws.on('message', (raw) => {
       let message: NativeBridgeInbound
@@ -806,31 +857,32 @@ export class NativeDeviceProxy {
         return
       }
       if (message.type === 'ready') {
-        this.clearBridgeTimer()
-        this.setBridgeState('ready')
-        this.sendToBridge({ type: 'set-embedded', enabled: this.bridgeEmbedded })
-        this.sendToBridge({ type: 'group-expansion', groups: this.groupState })
-        this.sendToBridge({
+        this.clearBridgeTimer(clientId)
+        this.setBridgeState('ready', undefined, clientId)
+        // Initialization belongs to this new socket, never existing pages.
+        this.sendToSocket(ws, { type: 'set-embedded', enabled: state.embedded })
+        this.sendToSocket(ws, { type: 'group-expansion', groups: this.groupState })
+        this.sendToSocket(ws, {
           type: 'read-state',
           unreadSessionIds: this.hooks.getUnreadState?.(this.device.id) ?? this.unreadState,
         })
-        if (this.pendingOpenSession !== undefined) {
-          this.sendToBridge({ type: 'open-session', sessionId: this.pendingOpenSession })
+        if (state.pendingOpenSession !== undefined) {
+          this.sendToSocket(ws, { type: 'open-session', sessionId: state.pendingOpenSession })
         }
         return
       }
       if (message.type === 'failed') {
-        this.clearBridgeTimer()
-        this.setBridgeState('failed', message.error ?? 'the framed page could not start the native bridge')
+        this.clearBridgeTimer(clientId)
+        this.setBridgeState('failed', message.error ?? 'the framed page could not start the native bridge', clientId)
         return
       }
       if (message.type === 'selection') {
         const sessionId = typeof message.sessionId === 'string' && message.sessionId !== ''
           ? message.sessionId
           : undefined
-        if (sessionId === this.bridgeSessionId) return
-        this.bridgeSessionId = sessionId
-        this.hooks.onBridgeSelection?.(this.device.id, sessionId)
+        if (sessionId === state.sessionId) return
+        state.sessionId = sessionId
+        this.hooks.onBridgeSelection?.(this.device.id, sessionId, clientId)
         return
       }
       if (message.type === 'group-expansion') {
@@ -849,9 +901,9 @@ export class NativeDeviceProxy {
       }
       if (message.type === 'title') {
         const title = sanitizeBridgeTitle(message.title)
-        if (title === this.bridgeTitle) return
-        this.bridgeTitle = title
-        this.hooks.onBridgeTitle?.(this.device.id, title)
+        if (title === state.title) return
+        state.title = title
+        this.hooks.onBridgeTitle?.(this.device.id, title, clientId)
         return
       }
       if (message.type === 'visibility') {
@@ -862,20 +914,16 @@ export class NativeDeviceProxy {
     ws.on('close', () => {
       this.bridgeClients.delete(ws)
       this.bridgeVisibility.delete(ws)
-      const aggregateVisible = this.anyBridgeVisible()
-      if (aggregateVisible !== this.bridgeVisible) {
-        this.bridgeVisible = aggregateVisible
-        this.hooks.onBridgeVisibility?.(this.device.id, aggregateVisible)
+      this.reportBridgeVisibility(clientId)
+      if ([...this.bridgeClients.values()].includes(clientId)) return
+      if (state.title !== undefined) {
+        state.title = undefined
+        this.hooks.onBridgeTitle?.(this.device.id, undefined, clientId)
       }
-      if (this.bridgeClients.size > 0) return
-      if (this.bridgeTitle !== undefined) {
-        this.bridgeTitle = undefined
-        this.hooks.onBridgeTitle?.(this.device.id, undefined)
-      }
-      this.clearBridgeTimer()
-      this.resetBridgeSelection()
-      if (this.bridgeState === 'ready' || this.bridgeState === 'loading') {
-        this.setBridgeState('idle')
+      this.clearBridgeTimer(clientId)
+      this.resetBridgeSelection(clientId)
+      if (state.state === 'ready' || state.state === 'loading') {
+        this.setBridgeState('idle', undefined, clientId)
       }
     })
     ws.on('error', () => {
@@ -883,26 +931,27 @@ export class NativeDeviceProxy {
     })
   }
 
-  private anyBridgeVisible(): boolean {
-    for (const visible of this.bridgeVisibility.values()) {
-      if (visible) return true
-    }
-    return false
+  private reportBridgeVisibility(clientId: string): void {
+    const state = this.clientState(clientId)
+    const visible = [...this.bridgeClients].some(([ws, owner]) =>
+      owner === clientId && this.bridgeVisibility.get(ws) === true)
+    if (visible === state.visible) return
+    state.visible = visible
+    this.hooks.onBridgeVisibility?.(this.device.id, visible, clientId)
   }
 
   private updateBridgeVisibility(ws: WebSocket, visible: boolean): void {
     if (this.bridgeVisibility.get(ws) === visible) return
     this.bridgeVisibility.set(ws, visible)
-    const aggregateVisible = this.anyBridgeVisible()
-    if (aggregateVisible === this.bridgeVisible) return
-    this.bridgeVisible = aggregateVisible
-    this.hooks.onBridgeVisibility?.(this.device.id, aggregateVisible)
+    const clientId = this.bridgeClients.get(ws)
+    if (clientId !== undefined) this.reportBridgeVisibility(clientId)
   }
 
-  private resetBridgeSelection(): void {
-    if (this.bridgeSessionId === undefined) return
-    this.bridgeSessionId = undefined
-    this.hooks.onBridgeSelection?.(this.device.id, undefined)
+  private resetBridgeSelection(clientId = LEGACY_CLIENT_ID): void {
+    const state = this.clientStates.get(clientId)
+    if (state?.sessionId === undefined) return
+    state.sessionId = undefined
+    this.hooks.onBridgeSelection?.(this.device.id, undefined, clientId)
   }
 
   private async ensureAuthenticated(upstreamBase: string): Promise<void> {
@@ -969,7 +1018,7 @@ export class NativeDeviceProxy {
     }
 
     const proxyOrigin = this.proxyOrigin()
-    const cookieToken = readCookie(req.headers.cookie, PROXY_COOKIE_NAME)
+    const cookieToken = readCookie(req.headers.cookie, this.cookieName)
     if (proxyOrigin === undefined || cookieToken !== this.token) {
       clientSocket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
       return
@@ -1094,15 +1143,15 @@ export class NativeProxyManager {
   }
 
   /** Current injected-bridge lifecycle for one device. */
-  bridgeSnapshot(deviceId: DeviceId): { state: NativePaneState; error?: string; sessionId?: string } {
-    return this.proxies.get(deviceId)?.bridgeSnapshot() ?? { state: 'idle' }
+  bridgeSnapshot(deviceId: DeviceId, clientId = LEGACY_CLIENT_ID): NativeBridgeSnapshot {
+    return this.proxies.get(deviceId)?.bridgeSnapshot(clientId) ?? { state: 'idle' }
   }
 
   /** Navigate the framed page to one raw remote Session (queued until ready). */
-  openSession(deviceId: DeviceId, sessionId: string): boolean {
+  openSession(deviceId: DeviceId, sessionId: string, clientId = LEGACY_CLIENT_ID): boolean {
     const proxy = this.proxies.get(deviceId)
     if (proxy === undefined) return false
-    proxy.openSession(sessionId)
+    proxy.openSession(sessionId, clientId)
     return true
   }
 
@@ -1115,8 +1164,8 @@ export class NativeProxyManager {
   }
 
   /** Toggle the remote sidebar for pane vs full native rendering. */
-  setEmbedded(deviceId: DeviceId, enabled: boolean): void {
-    this.proxies.get(deviceId)?.setEmbedded(enabled)
+  setEmbedded(deviceId: DeviceId, enabled: boolean, clientId = LEGACY_CLIENT_ID): void {
+    this.proxies.get(deviceId)?.setEmbedded(enabled, clientId)
   }
 
   /** Push Host-owned fold state to the device's framed page(s). */

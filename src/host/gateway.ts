@@ -294,7 +294,6 @@ export function installAggregatedGateway02(
   const origSessionSearch = sessionController.search.bind(sessionController)
   const origSessionCreate = sessionController.create.bind(sessionController)
   const origSessionSelectModel = sessionController.selectModel.bind(sessionController)
-  const origSessionModelCatalog = sessionController.modelCatalog.bind(sessionController)
   const origSessionRename = sessionController.rename.bind(sessionController)
   const origSessionFork = sessionController.fork.bind(sessionController)
   const origSessionPrompt = sessionController.prompt.bind(sessionController)
@@ -542,37 +541,8 @@ export function installAggregatedGateway02(
     })) as { selected: Record<string, unknown> }
   })
 
-  // The DSH model picker asks the process-level catalog, so use the active
-  // Session's owner as the scope. A remote conversation must see exactly that
-  // remote DSH's models; merging local groups makes local-only models look
-  // selectable and hides the remote's real provider ids.
-  patchMethod(sessionController, 'modelCatalog', async () => {
-    if (!registry.isAggregatedMode()) {
-      // Native Mode's local tab is strictly local; never expose a remote
-      // Session's catalog (or a merged one) here.
-      return origSessionModelCatalog() as Promise<Record<string, unknown>>
-    }
-    const scope = registry.activeSessionScope()
-    if (scope.kind === 'local') {
-      return origSessionModelCatalog() as Promise<Record<string, unknown>>
-    }
-    if (scope.client === undefined || scope.client.toView().state !== 'connected') {
-      return unavailableRemoteCatalog(scope.deviceName, 'remote device is not connected') as unknown as Record<string, unknown>
-    }
-    try {
-      return (await scope.client.invokeUnary(
-        'session',
-        'modelCatalog',
-        {},
-      )) as Record<string, unknown>
-    } catch (error) {
-      return unavailableRemoteCatalog(
-        scope.deviceName,
-        error instanceof Error ? error.message : String(error),
-      ) as unknown as Record<string, unknown>
-    }
-  })
-
+  // The official endpoint has no Session argument and browser Peers are shared.
+  // Keep it local; the plugin's Client adapter uses an explicit scoped endpoint.
   patchMethod(sessionController, 'rename', async (request) => {
     if (!registry.isAggregatedMode()) return origSessionRename(request)
     const owner = registry.resolveSessionOwner(request.sessionId)
@@ -1770,11 +1740,7 @@ async function* multiplexRemoteEventsStream(
             // generation; without it, workspace rows point at Session ids the
             // sidebar has no summary for and silently hides those rows.
             replayedDevices = pushRemoteSessionSummaries()
-            // A fresh browser generation starts with the local model catalog
-            // cached; make it refetch the active remote Session's catalog.
-            if (registry.activeSessionScope().kind === 'remote') {
-              push({ type: 'emit', event: 'llm/adapters-updated', args: [] })
-            }
+
           }
         }
       }

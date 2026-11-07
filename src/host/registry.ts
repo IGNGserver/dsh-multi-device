@@ -247,13 +247,9 @@ export class DeviceRegistry {
   private readonly modelCatalogListeners = new Set<() => void>()
   private readonly modeListeners = new Set<(mode: DisplayMode) => void>()
 
-  private activeSessionSeq = -1
-  private activeSessionClientId: string | undefined
-  private activeSessionIsRemote = false
-  private activeSessionDeviceId: DeviceId | undefined
-  private activeSessionId: string | undefined
-  /** The one framed device currently rendered as the aggregated pane. */
-  private paneEmbeddedDeviceId: DeviceId | undefined
+  /** Navigation belongs to a browser instance, never to the Host process. */
+  private readonly activeSessions = new Map<string, { sessionId?: string; seq: number }>()
+  private readonly paneEmbeddedDevices = new Map<string, DeviceId>()
 
   private revision = 1
   private displayMode: DisplayMode = 'aggregated'
@@ -275,7 +271,7 @@ export class DeviceRegistry {
    */
   private readonly sessionPublishListeners = new Set<(sessionIds: readonly string[]) => void>()
   /** Injected Native Pane bridge lifecycle, last page selection/title, and visibility per device. */
-  private readonly nativePanes = new Map<DeviceId, {
+  private readonly nativePanes = new Map<string, {
     state: NativePaneState
     error?: string
     sessionId?: string
@@ -327,17 +323,17 @@ export class DeviceRegistry {
         onAuthState: (deviceId, state, error) => {
           this.setAuthState(deviceId, state, error)
         },
-        onBridgeState: (deviceId, state, error) => {
-          this.setNativePaneState(deviceId, state, error)
+        onBridgeState: (deviceId, state, error, clientId) => {
+          this.setNativePaneState(deviceId, state, error, clientId)
         },
-        onBridgeSelection: (deviceId, sessionId) => {
-          this.setNativePaneSelection(deviceId, sessionId)
+        onBridgeSelection: (deviceId, sessionId, clientId) => {
+          this.setNativePaneSelection(deviceId, sessionId, clientId)
         },
-        onBridgeTitle: (deviceId, title) => {
-          this.setNativePaneTitle(deviceId, title)
+        onBridgeTitle: (deviceId, title, clientId) => {
+          this.setNativePaneTitle(deviceId, title, clientId)
         },
-        onBridgeVisibility: (deviceId, visible) => {
-          this.setNativePaneVisibility(deviceId, visible)
+        onBridgeVisibility: (deviceId, visible, clientId) => {
+          this.setNativePaneVisibility(deviceId, visible, clientId)
         },
         onPortAllocated: (deviceId, port) => {
           this.persistNativeProxyPort(deviceId, port)
@@ -477,30 +473,21 @@ export class DeviceRegistry {
     requestSeq = 0,
     clientId = '',
   ): boolean {
-    // A different tab starts its own sequence at 1; do not compare it with the
-    // previous tab's counter.
-    const sameClient = clientId === '' || clientId === this.activeSessionClientId
-    if (sameClient && requestSeq > 0 && requestSeq <= this.activeSessionSeq) return false
-    if (clientId !== '') this.activeSessionClientId = clientId
-    if (requestSeq > 0) this.activeSessionSeq = requestSeq
-
-    const previousKind = this.activeSessionIsRemote ? 'remote' : 'local'
-    const previousDeviceId = this.activeSessionDeviceId
-    const next = sessionId === undefined || sessionId === '' ? undefined : sessionId
-    const decoded = next !== undefined ? decodeSessionId(next) : undefined
-    this.activeSessionId = next
-    this.activeSessionIsRemote = decoded?.isRemote === true
-    this.activeSessionDeviceId = decoded?.isRemote === true ? decoded.deviceId : undefined
-
-    const changed =
-      previousKind !== (this.activeSessionIsRemote ? 'remote' : 'local') ||
-      previousDeviceId !== this.activeSessionDeviceId
-    if (changed) this.notifyModelCatalogChanged()
-    if (this.activeSessionIsRemote && this.activeSessionDeviceId !== undefined) {
-      this.publishNativePaneSession(this.activeSessionDeviceId)
+    const key = clientId || 'legacy'
+    const previous = this.activeSessions.get(key)
+    if (requestSeq > 0 && previous !== undefined && requestSeq <= previous.seq) return false
+    const next = sessionId || undefined
+    const changed = previous?.sessionId !== next
+    // Bound untrusted browser-instance ids. Eviction loses navigation, not data.
+    if (!this.activeSessions.has(key) && this.activeSessions.size >= 256) {
+      const oldest = this.activeSessions.keys().next().value
+      if (oldest !== undefined) this.activeSessions.delete(oldest)
     }
-    this.syncNativePaneEmbedding()
-    if (next !== undefined) this.readTracker.markRead(next)
+    this.activeSessions.set(key, { sessionId: next, seq: requestSeq })
+    const decoded = next === undefined ? undefined : decodeSessionId(next)
+    if (decoded?.isRemote) this.publishNativePaneSession(decoded.deviceId, key)
+    this.syncNativePaneEmbedding(key)
+    // Selection is not presence. Only a visible viewing client explicitly marks read.
     return changed
   }
 
@@ -534,9 +521,6 @@ export class DeviceRegistry {
   observeLocalSessionStatus(sessionId: string, running: boolean): void {
     if (typeof sessionId !== 'string' || sessionId === '') return
     this.readTracker.observeRunning(sessionId, running)
-    if (!running && sessionId === this.activeSessionId) {
-      this.readTracker.markRead(sessionId)
-    }
   }
 
   /**
@@ -589,24 +573,6 @@ export class DeviceRegistry {
   }
 
   /**
-   * True when the conversation the user is actually looking at owns this
-   * Session. A completion then counts as read instead of leaving a reminder.
-   */
-  private isCurrentlyViewedSession(sessionId: string): boolean {
-    if (sessionId === this.activeSessionId) return true
-    const decoded = decodeSessionId(sessionId)
-    if (!decoded.isRemote) return false
-    const pane = this.nativePanes.get(decoded.deviceId)
-    if (pane?.state !== 'ready' || pane.sessionId !== decoded.rawSessionId) return false
-    // A hidden keep-alive page (another Native tab, or an unselected device)
-    // must not absorb a completion. The bridge reports visibility explicitly;
-    // the aggregated pane keeps its existing embedded fallback because that is
-    // the local main view even before the first visibility frame arrives.
-    if (pane.visible === true) return true
-    return this.displayMode === 'aggregated' && this.paneEmbeddedDeviceId === decoded.deviceId
-  }
-
-  /**
    * Reconcile running flags from the authoritative list. DSH can miss a
    * `api-session/status` frame across a stream gap; the list refresh still
    * carries the final flag, and a live `true -> false` there is a completion
@@ -619,9 +585,6 @@ export class DeviceRegistry {
     for (const summary of client.sessionSummaries()) {
       const namespacedId = encodeRemoteSessionId(deviceId, summary.sessionId)
       this.readTracker.observeRunning(namespacedId, summary.running)
-      if (!summary.running && this.isCurrentlyViewedSession(namespacedId)) {
-        this.readTracker.markRead(namespacedId)
-      }
     }
     this.pruneDeviceReadState(deviceId)
   }
@@ -703,9 +666,6 @@ export class DeviceRegistry {
     const client = this.clients.get(deviceId)
     if (client === undefined || !client.isConnected()) return
     this.readTracker.observeRunning(sessionId, running)
-    if (!running && this.isCurrentlyViewedSession(sessionId)) {
-      this.readTracker.markRead(sessionId)
-    }
   }
 
   /**
@@ -875,53 +835,49 @@ export class DeviceRegistry {
    * Keep exactly one device frame in embedded mode (remote sidebar hidden) and
    * restore every other frame's sidebar for full native rendering.
    */
-  private syncNativePaneEmbedding(): void {
-    const next = this.displayMode === 'aggregated' &&
-      this.uiPreferences.nativePane &&
-      this.activeSessionIsRemote &&
-      this.activeSessionDeviceId !== undefined
-      ? this.activeSessionDeviceId
-      : undefined
-    if (next === this.paneEmbeddedDeviceId) return
-    const previous = this.paneEmbeddedDeviceId
-    this.paneEmbeddedDeviceId = next
-    if (previous !== undefined && previous !== next) {
-      this.nativeProxyManager.setEmbedded(previous, false)
-    }
-    if (next !== undefined) this.nativeProxyManager.setEmbedded(next, true)
-  }
-
-  /**
-   * Ask the framed page of the active remote device to show the selected
-   * Session. Called on every selection and when a bridge becomes ready; the
-   * proxy queues the command until then, so an iframe that is still loading
-   * still lands on the right conversation.
-   */
-  private publishNativePaneSession(deviceId: DeviceId): void {
-    if (this.displayMode !== 'aggregated') return
-    if (!this.uiPreferences.nativePane) return
-    if (this.activeSessionDeviceId !== deviceId || this.activeSessionId === undefined) return
-    const decoded = decodeSessionId(this.activeSessionId)
-    if (!decoded.isRemote || decoded.deviceId !== deviceId) return
-    this.nativeProxyManager.openSession(deviceId, decoded.rawSessionId)
-  }
-
-  /** Ask the native frame on the active remote Session's device to open it. */
-  private openActiveRemoteSessionInNative(): void {
-    if (!this.activeSessionIsRemote || this.activeSessionDeviceId === undefined || this.activeSessionId === undefined) {
+  private syncNativePaneEmbedding(clientId?: string): void {
+    if (clientId === undefined) {
+      for (const key of this.activeSessions.keys()) this.syncNativePaneEmbedding(key)
       return
     }
-    const decoded = decodeSessionId(this.activeSessionId)
-    if (!decoded.isRemote || decoded.deviceId !== this.activeSessionDeviceId) return
-    this.nativeProxyManager.openSession(decoded.deviceId, decoded.rawSessionId)
+    const decoded = decodeSessionId(this.activeSessions.get(clientId)?.sessionId ?? '')
+    const next = this.displayMode === 'aggregated' && this.uiPreferences.nativePane && decoded.isRemote
+      ? decoded.deviceId : undefined
+    const previous = this.paneEmbeddedDevices.get(clientId)
+    if (previous !== undefined && previous !== next) this.nativeProxyManager.setEmbedded(previous, false, clientId)
+    if (next === undefined) this.paneEmbeddedDevices.delete(clientId)
+    else {
+      this.paneEmbeddedDevices.set(clientId, next)
+      this.nativeProxyManager.setEmbedded(next, true, clientId)
+    }
+  }
+
+  private publishNativePaneSession(deviceId: DeviceId, clientId = 'legacy'): void {
+    if (this.displayMode !== 'aggregated' || !this.uiPreferences.nativePane) return
+    const decoded = decodeSessionId(this.activeSessions.get(clientId)?.sessionId ?? '')
+    if (decoded.isRemote && decoded.deviceId === deviceId) {
+      this.nativeProxyManager.openSession(deviceId, decoded.rawSessionId, clientId)
+    }
+  }
+
+  private openActiveRemoteSessionInNative(): void {
+    for (const [clientId, active] of this.activeSessions) {
+      const decoded = decodeSessionId(active.sessionId ?? '')
+      if (decoded.isRemote) this.nativeProxyManager.openSession(decoded.deviceId, decoded.rawSessionId, clientId)
+    }
+  }
+
+  private paneKey(deviceId: DeviceId, clientId = 'legacy'): string {
+    return `${clientId}\0${deviceId}`
   }
 
   private setNativePaneState(
     deviceId: DeviceId,
     state: NativePaneState,
     error?: string,
+    clientId = 'legacy',
   ): void {
-    const previous = this.nativePanes.get(deviceId)
+    const previous = this.nativePanes.get(this.paneKey(deviceId, clientId))
     const nextError = error?.trim() === '' ? undefined : error
     const nextSessionId = state === 'ready' ? previous?.sessionId : undefined
     const nextTitle = state === 'ready' ? previous?.title : undefined
@@ -935,7 +891,7 @@ export class DeviceRegistry {
     ) {
       return
     }
-    this.nativePanes.set(deviceId, {
+    this.nativePanes.set(this.paneKey(deviceId, clientId), {
       state,
       ...(nextError !== undefined ? { error: nextError } : {}),
       ...(nextSessionId !== undefined ? { sessionId: nextSessionId } : {}),
@@ -944,19 +900,19 @@ export class DeviceRegistry {
     })
     this.bumpRevision()
     if (state === 'ready') {
-      this.publishNativePaneSession(deviceId)
+      this.publishNativePaneSession(deviceId, clientId)
       // The proxy may have started after the selection; replay the pane mode
       // so the remote sidebar is hidden for the aggregated pane.
-      if (this.paneEmbeddedDeviceId === deviceId) {
-        this.nativeProxyManager.setEmbedded(deviceId, true)
+      if (this.paneEmbeddedDevices.get(clientId) === deviceId) {
+        this.nativeProxyManager.setEmbedded(deviceId, true, clientId)
       }
     }
   }
 
-  private setNativePaneSelection(deviceId: DeviceId, sessionId: string | undefined): void {
-    const previous = this.nativePanes.get(deviceId)
+  private setNativePaneSelection(deviceId: DeviceId, sessionId: string | undefined, clientId = 'legacy'): void {
+    const previous = this.nativePanes.get(this.paneKey(deviceId, clientId))
     if (previous?.sessionId === sessionId) return
-    this.nativePanes.set(deviceId, {
+    this.nativePanes.set(this.paneKey(deviceId, clientId), {
       state: previous?.state ?? 'idle',
       ...(previous?.error !== undefined ? { error: previous.error } : {}),
       ...(sessionId !== undefined ? { sessionId } : {}),
@@ -971,12 +927,12 @@ export class DeviceRegistry {
   }
 
   /** Persist the framed page's own document title for window chrome. */
-  private setNativePaneTitle(deviceId: DeviceId, title: string | undefined): void {
-    const previous = this.nativePanes.get(deviceId)
+  private setNativePaneTitle(deviceId: DeviceId, title: string | undefined, clientId = 'legacy'): void {
+    const previous = this.nativePanes.get(this.paneKey(deviceId, clientId))
     const next = sanitizeBridgeTitle(title)
     if (previous === undefined && next === undefined) return
     if (previous?.title === next) return
-    this.nativePanes.set(deviceId, {
+    this.nativePanes.set(this.paneKey(deviceId, clientId), {
       state: previous?.state ?? 'idle',
       ...(previous?.error !== undefined ? { error: previous.error } : {}),
       ...(previous?.sessionId !== undefined ? { sessionId: previous.sessionId } : {}),
@@ -991,11 +947,11 @@ export class DeviceRegistry {
    * Read clearing and "currently viewed" detection must not treat a hidden
    * keep-alive page as if the user were reading it.
    */
-  private setNativePaneVisibility(deviceId: DeviceId, visible: boolean): void {
-    const previous = this.nativePanes.get(deviceId)
+  private setNativePaneVisibility(deviceId: DeviceId, visible: boolean, clientId = 'legacy'): void {
+    const previous = this.nativePanes.get(this.paneKey(deviceId, clientId))
     if (previous === undefined && !visible) return
     if (previous?.visible === visible) return
-    this.nativePanes.set(deviceId, {
+    this.nativePanes.set(this.paneKey(deviceId, clientId), {
       state: previous?.state ?? 'idle',
       ...(previous?.error !== undefined ? { error: previous.error } : {}),
       ...(previous?.sessionId !== undefined ? { sessionId: previous.sessionId } : {}),
@@ -1013,8 +969,8 @@ export class DeviceRegistry {
     this.schedulePersist()
   }
 
-  private withNativePane(view: DeviceView): DeviceView {
-    const pane = this.nativePanes.get(view.id)
+  private withNativePane(view: DeviceView, clientId = 'legacy'): DeviceView {
+    const pane = this.nativePanes.get(this.paneKey(view.id, clientId))
     if (pane === undefined) return view
     return {
       ...view,
@@ -1026,17 +982,17 @@ export class DeviceRegistry {
   }
 
   /** Scope `session/modelCatalog` to the Session currently shown on the right. */
-  activeSessionScope(): ActiveSessionScope {
-    if (!this.activeSessionIsRemote || this.activeSessionDeviceId === undefined) {
-      return { kind: 'local' }
-    }
-    const client = this.clients.get(this.activeSessionDeviceId)
-    return {
-      kind: 'remote',
-      deviceId: this.activeSessionDeviceId,
-      deviceName: client?.toView().name ?? String(this.activeSessionDeviceId),
-      client,
-    }
+  activeSessionScope(clientId = 'legacy'): ActiveSessionScope {
+    return this.sessionScope(this.activeSessions.get(clientId)?.sessionId)
+  }
+
+  /** Explicit request scope; official browser Peers are shared, not tab identities. */
+  sessionScope(sessionId: string | undefined): ActiveSessionScope {
+    const decoded = decodeSessionId(sessionId ?? '')
+    if (!decoded.isRemote) return { kind: 'local' }
+    const client = this.clients.get(decoded.deviceId)
+    return { kind: 'remote', deviceId: decoded.deviceId,
+      deviceName: client?.toView().name ?? String(decoded.deviceId), client }
   }
 
   private notifyModelCatalogChanged(): void {
@@ -1211,7 +1167,9 @@ export class DeviceRegistry {
     this.authManager.removeDevice(deviceId)
     this.authStates.delete(deviceId)
     this.catalogs.delete(deviceId)
-    this.nativePanes.delete(deviceId)
+    for (const key of this.nativePanes.keys()) {
+      if (key.endsWith(`\0${deviceId}`)) this.nativePanes.delete(key)
+    }
     this.nativeGroups.delete(deviceId)
     this.sharedReadStateInitialized.delete(deviceId)
     const pendingPush = this.sharedReadStatePushTimers.get(deviceId)
@@ -1224,7 +1182,9 @@ export class DeviceRegistry {
       return !decoded.isRemote || decoded.deviceId !== deviceId
     })
     this.lastDeviceStates.delete(deviceId)
-    if (this.paneEmbeddedDeviceId === deviceId) this.paneEmbeddedDeviceId = undefined
+    for (const [key, value] of this.paneEmbeddedDevices) {
+      if (value === deviceId) this.paneEmbeddedDevices.delete(key)
+    }
     this.saveToDisk()
     this.bumpRevision()
     this.notifyWorkspacesChanged()
@@ -1725,7 +1685,7 @@ export class DeviceRegistry {
   }
 
   /** Build the complete snapshot for the Client UI and Aggregated Gateway. */
-  snapshot(): MultiDeviceSnapshot {
+  snapshot(clientId = 'legacy'): MultiDeviceSnapshot {
     const physicalInputs: PhysicalWorkspaceInput[] = [...this.localHost.localWorkspaces()]
     const updatedAtMap = this.localHost.localSessionUpdatedAt()
     const sessionOrigins: Record<string, SessionOriginMetadata> = Object.create(null)
@@ -1837,7 +1797,7 @@ export class DeviceRegistry {
         nativeProxyActive: this.nativeProxyActive,
       },
       devices: [...this.clients.values()].map(c => {
-        const view = this.withNativePane(this.withAuthState(c.toView()))
+        const view = this.withNativePane(this.withAuthState(c.toView()), clientId)
         const sessionListError = this.sessionListErrors.get(view.id)
         return sessionListError === undefined ? view : { ...view, sessionListError }
       }),
@@ -1959,16 +1919,14 @@ export class DeviceRegistry {
         // Connecting/disconnecting the device that owns the open Session also
         // changes which catalog is authoritative for that conversation.
         if (
-          this.activeSessionIsRemote &&
-          this.activeSessionDeviceId === deviceId
+          [...this.activeSessions.values()].some(active => this.sessionScope(active.sessionId).kind === 'remote' && decodeSessionId(active.sessionId ?? '').deviceId === deviceId)
         ) {
           this.notifyModelCatalogChanged()
         }
       },
       onModelCatalogChanged: (deviceId) => {
         if (
-          this.activeSessionIsRemote &&
-          this.activeSessionDeviceId === deviceId
+          [...this.activeSessions.values()].some(active => this.sessionScope(active.sessionId).kind === 'remote' && decodeSessionId(active.sessionId ?? '').deviceId === deviceId)
         ) {
           this.notifyModelCatalogChanged()
         }

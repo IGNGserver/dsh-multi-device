@@ -278,9 +278,7 @@ export class RemoteDeviceClient {
               ...(this.config.transport.remoteDshHome !== undefined
                 ? { remoteDshHome: this.config.transport.remoteDshHome }
                 : {}),
-              ...(this.config.transport.bootstrapFromRemoteCredentials === true
-                ? { bootstrapFromRemoteCredentials: true }
-                : {}),
+              bootstrapFromRemoteCredentials: this.config.transport.bootstrapFromRemoteCredentials === true,
               ...(this.config.transport.engine !== undefined ? { engine: this.config.transport.engine } : {}),
             },
           }

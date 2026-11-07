@@ -83,7 +83,16 @@ function KeepAliveDeviceFrame({
   t: (key: MultiDeviceLocaleKey) => string
   onOpenSettings: () => void
 }): React.ReactElement {
-  const targetUrl = resolveSameSiteProxyUrl(device.nativeProxyUrl)
+  const proxyUrl = resolveSameSiteProxyUrl(device.nativeProxyUrl)
+  const targetUrl = proxyUrl === undefined ? undefined : (() => {
+    try {
+      const url = new URL(proxyUrl)
+      url.searchParams.set('md_client', clientStore.clientId)
+      return url.href
+    } catch {
+      return proxyUrl
+    }
+  })()
   const authRequired = device.authState === 'required' || device.authState === 'error'
   const containerRef = useRef<HTMLDivElement | null>(null)
   const frameRef = useRef<HTMLDivElement | null>(null)
