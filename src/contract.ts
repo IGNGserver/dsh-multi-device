@@ -7,6 +7,7 @@
  *
  * @module dsh-multi-device/contract
  */
+import type { DeviceAttentionView } from './attention.ts'
 
 /** Branded string helper compatible with `@deepseek-ai/dsh-brand`. */
 export type Branded<T extends string> = string & { readonly __brand?: T }
@@ -554,6 +555,10 @@ export interface MultiDeviceSnapshot {
    * client and both UI modes agree on read state.
    */
   readonly unreadSessionIds: readonly string[]
+  /** Opaque completion identities; read requests may only consume the identity they observed. */
+  readonly readCompletions?: Readonly<Record<string, string>>
+  /** Shared sidebar-policy projection, including local; members make badges explainable. */
+  readonly attentionByDevice?: Readonly<Record<string, DeviceAttentionView>>
   /**
    * Sessions archived on their owning device. Local Session IDs are plain;
    * remote ones are namespaced. DSH hides archived rows by default, so the

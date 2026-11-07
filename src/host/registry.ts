@@ -34,6 +34,8 @@ import {
   type UpsertDeviceInput,
   type WorkspaceAggregationConfig,
 } from '../contract.ts'
+import { emptyDeviceAttention, selectDeviceAttention, type SessionAttentionFact } from '../attention.ts'
+import { readRemoteCompletionIdentity } from './completion-identity.ts'
 import { DeviceAuthManager } from './auth.ts'
 import { JsonSnapshotFile } from './storage.ts'
 import {
@@ -189,6 +191,8 @@ function sanitizeNativeGroups(value: unknown): Record<DeviceId, Record<string, b
 }
 
 export interface LocalHostProvider {
+  /** Full persisted + live identities. Undefined means unavailable, never an authoritative empty list. */
+  readonly localSessionCatalog?: (signal?: AbortSignal) => Promise<readonly SessionAttentionFact[] | undefined>
   /** Local webserver port, used for self-loop prevention. */
   readonly localPort: () => number | undefined
   /** Read current local workspaces from `ctx.workspaceRegistry`. */
@@ -251,6 +255,14 @@ export class DeviceRegistry {
   private readonly paneEmbeddedDevices = new Map<string, DeviceId>()
 
   private revision = 1
+  private disposed = false
+  private readonly lifetime = new AbortController()
+  private localCatalog: readonly SessionAttentionFact[] | undefined
+  private localCatalogFresh = false
+  private localCatalogInflight: Promise<void> | undefined
+  private localCatalogMutations: Array<(rows: readonly SessionAttentionFact[]) => readonly SessionAttentionFact[]> | undefined
+  private readonly localStatus = new Map<string, boolean>()
+  private readonly localPending = new Map<string, { sessionId: string; kind: 'approval' | 'question' | 'plan-review' }>()
   private displayMode: DisplayMode = 'aggregated'
   private gitMatchRunner: GitMatchRunner | undefined
   private gitMatchRun: GitMatchRun = createIdleGitMatch()
@@ -281,8 +293,18 @@ export class DeviceRegistry {
   private readonly lastDeviceStates = new Map<DeviceId, DeviceConnectionState>()
   /** Host-owned fold state per device, restored into the framed page before its first render. */
   private readonly nativeGroups = new Map<DeviceId, Record<string, boolean>>()
+  private readonly remoteRunningEvidence = new Map<string, number>()
+  private readonly completionBindings = new Map<string, { completionId: string; generation: number }>()
+  private readonly completionBindingOffsets = new Map<DeviceId, number>()
+  private readonly sharedReadStateDirty = new Set<DeviceId>()
   /** Host-owned read/unread state for namespaced remote Sessions. */
-  private readonly readTracker = new ReadStateTracker((sessionId, _state, unreadChanged) => {
+  private readonly readTracker = new ReadStateTracker((sessionId, state, unreadChanged) => {
+    const decoded = decodeSessionId(sessionId)
+    const generation = decoded.isRemote ? this.clients.get(decoded.deviceId)?.connectionGeneration : undefined
+    if (state.unread && state.completionId !== undefined && !state.completionId.startsWith('legacy:') && !state.completionId.startsWith('turn:') && generation !== undefined && this.remoteRunningEvidence.get(sessionId) === generation) {
+      this.completionBindings.set(sessionId, { completionId: state.completionId, generation })
+      while (this.completionBindings.size > 2_000) this.completionBindings.delete(this.completionBindings.keys().next().value!)
+    }
     this.schedulePersist()
     if (unreadChanged) this.bumpRevision()
     this.publishUnreadState(sessionId)
@@ -293,7 +315,6 @@ export class DeviceRegistry {
   private readonly hostEpoch: string = randomUUID()
   /** Low-frequency catalog refresh that heals lost running-status frames. */
   private runningReconcileTimer: ReturnType<typeof setInterval> | undefined
-  private readonly catalogRefreshInFlight = new Set<DeviceId>()
   private uiPreferences: MultiDeviceUiPreferences = { ...DEFAULT_UI_PREFERENCES }
   private catalogPersistTimer: ReturnType<typeof setTimeout> | undefined
   private persistTimer: ReturnType<typeof setTimeout> | undefined
@@ -345,8 +366,11 @@ export class DeviceRegistry {
           this.setNativeGroupState(deviceId, groups)
         },
         getUnreadState: deviceId => this.unreadForDevice(deviceId),
-        onBridgeRead: (deviceId, sessionId) => {
-          this.readTracker.markRead(encodeRemoteSessionId(deviceId, sessionId))
+        getReadCompletions: deviceId => this.completionsForDevice(deviceId),
+        onBridgeRead: (deviceId, sessionId, expectedCompletionId) => {
+          const id = encodeRemoteSessionId(deviceId, sessionId)
+          if (expectedCompletionId !== undefined) return this.readTracker.readCompletion(id, expectedCompletionId)
+          this.readTracker.markRead(id)
         },
       },
     )
@@ -498,8 +522,8 @@ export class DeviceRegistry {
    * actually removed a marker, so callers can distinguish a real transition
    * from a redundant read touch.
    */
-  markSessionRead(sessionId: string): boolean {
-    return this.readTracker.markRead(sessionId)
+  markSessionRead(sessionId: string, expectedCompletionId?: string): boolean {
+    return this.readTracker.markRead(sessionId, Date.now(), expectedCompletionId)
   }
 
   /**
@@ -521,8 +545,81 @@ export class DeviceRegistry {
 
   /** Local DSH session status, observed through this Host's own event bus. */
   observeLocalSessionStatus(sessionId: string, running: boolean): void {
-    if (typeof sessionId !== 'string' || sessionId === '') return
+    if (this.disposed || typeof sessionId !== 'string' || sessionId === '' || decodeSessionId(sessionId).isRemote) return
+    this.localStatus.set(sessionId, running)
+    const mutation = (rows: readonly SessionAttentionFact[]): readonly SessionAttentionFact[] => rows.map(row =>
+      row.sessionId === sessionId ? { ...row, running } : row)
+    this.localCatalogMutations?.push(mutation)
+    if (this.localCatalog !== undefined) this.localCatalog = mutation(this.localCatalog)
     this.readTracker.observeRunning(sessionId, running)
+    this.bumpRevision()
+  }
+
+  /** A local live summary was added or changed; a full query supplies persisted identities. */
+  observeLocalSessionAdded(fact: SessionAttentionFact): void {
+    if (this.disposed || decodeSessionId(fact.sessionId).isRemote) return
+    const mutation = (rows: readonly SessionAttentionFact[]): readonly SessionAttentionFact[] =>
+      [...rows.filter(row => row.sessionId !== fact.sessionId), { ...fact, deviceId: LOCAL_DEVICE_ID }]
+    this.localCatalogMutations?.push(mutation)
+    if (this.localCatalog !== undefined) this.localCatalog = mutation(this.localCatalog)
+    this.observeLocalSessionStatus(fact.sessionId, fact.running)
+    void this.refreshLocalCatalog()
+  }
+
+  /** Internal adapter for the local gateway's still-pending requests; never persists requests. */
+  observeLocalPending(requests: readonly { eventId: string; sessionId: string; kind: 'approval' | 'question' | 'plan-review' }[]): void {
+    if (this.disposed) return
+    const next = new Map(requests.filter(request => !decodeSessionId(request.sessionId).isRemote).map(request => [request.eventId, request]))
+    if (next.size === this.localPending.size && [...next].every(([id, request]) => {
+      const old = this.localPending.get(id)
+      return old?.sessionId === request.sessionId && old.kind === request.kind
+    })) return
+    this.localPending.clear()
+    for (const [id, request] of next) this.localPending.set(id, request)
+    this.bumpRevision()
+  }
+
+  /** Complete, successful persisted+live query only; failed/unavailable reads never mean deleted. */
+  refreshLocalCatalog(): Promise<void> {
+    if (this.disposed || this.localHost.localSessionCatalog === undefined) return Promise.resolve()
+    if (this.localCatalogInflight !== undefined) return this.localCatalogInflight
+    const mutations: NonNullable<DeviceRegistry['localCatalogMutations']> = []
+    this.localCatalogMutations = mutations
+    const operation = Promise.resolve().then(() => this.localHost.localSessionCatalog!(this.lifetime.signal)).then(rows => {
+      if (this.disposed || this.localCatalogMutations !== mutations) return
+      if (rows === undefined) {
+        this.localCatalogFresh = false
+        this.bumpRevision()
+        return
+      }
+      this.localCatalogFresh = true
+      let current: readonly SessionAttentionFact[] = rows.filter(row => row.sessionId !== '' && !decodeSessionId(row.sessionId).isRemote)
+      for (const mutation of mutations) current = mutation(current)
+      this.localCatalog = current
+      const known = new Set(current.map(row => row.sessionId))
+      this.readTracker.prune(id => decodeSessionId(id).isRemote || known.has(id))
+      for (const id of this.localStatus.keys()) if (!known.has(id)) this.localStatus.delete(id)
+      for (const [id, request] of this.localPending) if (!known.has(request.sessionId)) this.localPending.delete(id)
+      this.localStatus.clear()
+      for (const row of current) {
+        this.localStatus.set(row.sessionId, row.running)
+        this.readTracker.observeRunning(row.sessionId, row.running)
+      }
+      this.schedulePersist()
+      this.bumpRevision()
+    }).catch(() => {
+      if (!this.disposed && this.localCatalogMutations === mutations) {
+        this.localCatalogFresh = false
+        this.bumpRevision()
+      }
+    }).finally(() => {
+      if (this.localCatalogMutations === mutations) {
+        this.localCatalogMutations = undefined
+        this.localCatalogInflight = undefined
+      }
+    })
+    this.localCatalogInflight = operation
+    return operation
   }
 
   /**
@@ -533,6 +630,13 @@ export class DeviceRegistry {
     if (sessionId === '') return
     if (decodeSessionId(sessionId).isRemote) return
     this.readTracker.remove(sessionId)
+    this.localStatus.delete(sessionId)
+    const mutation = (rows: readonly SessionAttentionFact[]): readonly SessionAttentionFact[] => rows.filter(row => row.sessionId !== sessionId)
+    this.localCatalogMutations?.push(mutation)
+    if (this.localCatalog !== undefined) this.localCatalog = mutation(this.localCatalog)
+    for (const [id, request] of this.localPending) if (request.sessionId === sessionId) this.localPending.delete(id)
+    this.schedulePersist()
+    this.bumpRevision()
   }
 
   /** Persisted fold state for one device; the bridge injection uses this map. */
@@ -566,11 +670,20 @@ export class DeviceRegistry {
     return out
   }
 
+  private completionsForDevice(deviceId: DeviceId): Record<string, string> {
+    const out: Record<string, string> = Object.create(null)
+    for (const [id, completion] of Object.entries(this.readTracker.completionIds())) {
+      const decoded = decodeSessionId(id)
+      if (decoded.isRemote && decoded.deviceId === deviceId) out[decoded.rawSessionId] = completion
+    }
+    return out
+  }
+
   /** Push the new unread set to the owning device's framed page. */
   private publishUnreadState(sessionId: string): void {
     const decoded = decodeSessionId(sessionId)
     if (!decoded.isRemote) return
-    this.nativeProxyManager.setUnreadState(decoded.deviceId, this.unreadForDevice(decoded.deviceId))
+    this.nativeProxyManager.setUnreadState(decoded.deviceId, this.unreadForDevice(decoded.deviceId), this.completionsForDevice(decoded.deviceId))
     this.scheduleSharedReadStatePush(decoded.deviceId)
   }
 
@@ -582,11 +695,13 @@ export class DeviceRegistry {
    */
   private reconcileRunningForDevice(deviceId: DeviceId): void {
     const client = this.clients.get(deviceId)
-    if (client === undefined || !client.isConnected()) return
+    if (this.disposed || client === undefined || !client.isConnected()) return
     if (client.toView().catalogStale === true) return
     for (const summary of client.sessionSummaries()) {
       const namespacedId = encodeRemoteSessionId(deviceId, summary.sessionId)
+      if (summary.running) this.remoteRunningEvidence.set(namespacedId, client.connectionGeneration)
       this.readTracker.observeRunning(namespacedId, summary.running)
+      if (!summary.running) this.remoteRunningEvidence.delete(namespacedId)
     }
     this.pruneDeviceReadState(deviceId)
   }
@@ -598,8 +713,7 @@ export class DeviceRegistry {
    */
   private pruneDeviceReadState(deviceId: DeviceId): void {
     const client = this.clients.get(deviceId)
-    if (client === undefined || !client.isConnected()) return
-    if (client.toView().catalogStale === true) return
+    if (this.disposed || client === undefined || !client.catalogFresh) return
     const known = new Set(
       client.sessionSummaries().map(summary => encodeRemoteSessionId(deviceId, summary.sessionId)),
     )
@@ -609,6 +723,7 @@ export class DeviceRegistry {
       if (decoded.deviceId !== deviceId) return true
       return known.has(sessionId)
     })
+    this.schedulePersist()
   }
 
   /**
@@ -629,17 +744,13 @@ export class DeviceRegistry {
   }
 
   private refreshConnectedCatalogs(): void {
+    if (this.disposed) return
+    void this.refreshLocalCatalog()
     for (const client of this.clients.values()) {
       if (!client.isConnected()) continue
-      if (this.catalogRefreshInFlight.has(client.id)) continue
-      this.catalogRefreshInFlight.add(client.id)
-      void client.refreshSessionCatalog()
-        .catch(() => {
-          // The next tick retries; a transient Remote failure is not fatal.
-        })
-        .finally(() => {
-          this.catalogRefreshInFlight.delete(client.id)
-        })
+      void client.refreshSessionCatalog(this.lifetime.signal).catch(() => {
+        // The next tick retries; client owns single-flight and generation fences.
+      })
     }
   }
 
@@ -656,7 +767,10 @@ export class DeviceRegistry {
     // it again, so the badge would stay pinned until the Host restarted.
     if (frame.event === 'api-session/removed') {
       const [removedId] = frame.args
-      if (typeof removedId === 'string') this.readTracker.remove(removedId)
+      if (typeof removedId === 'string') {
+        this.readTracker.remove(removedId)
+        this.schedulePersist()
+      }
       return
     }
     if (frame.event !== 'api-session/status') return
@@ -667,7 +781,9 @@ export class DeviceRegistry {
     // turn the transition into an unread reminder.
     const client = this.clients.get(deviceId)
     if (client === undefined || !client.isConnected()) return
+    if (running) this.remoteRunningEvidence.set(sessionId, client.connectionGeneration)
     this.readTracker.observeRunning(sessionId, running)
+    if (!running) this.remoteRunningEvidence.delete(sessionId)
   }
 
   /**
@@ -710,8 +826,11 @@ export class DeviceRegistry {
   }
 
   private scheduleSharedReadStatePush(deviceId: DeviceId, delayMs = 1_500): void {
-    if (!this.uiPreferences.crossHostReadState) return
-    if (this.sharedReadStateInFlight.has(deviceId)) return
+    if (!this.uiPreferences.crossHostReadState || this.disposed) return
+    if (this.sharedReadStateInFlight.has(deviceId)) {
+      this.sharedReadStateDirty.add(deviceId)
+      return
+    }
     if (this.sharedReadStatePushTimers.has(deviceId)) return
     const timer = setTimeout(() => {
       this.sharedReadStatePushTimers.delete(deviceId)
@@ -721,24 +840,59 @@ export class DeviceRegistry {
     this.sharedReadStatePushTimers.set(deviceId, timer)
   }
 
+  /** Resolve only a bounded batch of idle completions using real durable terminal events. */
+  private async promoteSharedCompletions(deviceId: DeviceId): Promise<void> {
+    const client = this.clients.get(deviceId)
+    if (this.disposed || !this.uiPreferences.crossHostReadState || client === undefined || !client.catalogFresh) return
+    const generation = client.connectionGeneration
+    const entries = this.readTracker.entriesSnapshot()
+    const eligible = client.sessionSummaries().filter(summary => {
+      const id = encodeRemoteSessionId(deviceId, summary.sessionId)
+      const entry = entries[id]
+      const binding = this.completionBindings.get(id)
+      return !summary.running && entry?.completionId !== undefined && !entry.completionId.startsWith('turn:') && entry.deleted !== true &&
+        binding?.completionId === entry.completionId && binding.generation === generation
+    })
+    const offset = (this.completionBindingOffsets.get(deviceId) ?? 0) % Math.max(1, eligible.length)
+    const candidates = [...eligible.slice(offset), ...eligible.slice(0, offset)].slice(0, 8)
+    this.completionBindingOffsets.set(deviceId, offset + candidates.length)
+    for (const summary of candidates) {
+      const id = encodeRemoteSessionId(deviceId, summary.sessionId)
+      const expected = entries[id]!.completionId!
+      try {
+        const signal = AbortSignal.any([this.lifetime.signal, AbortSignal.timeout(5_000)])
+        const identity = await readRemoteCompletionIdentity(client, summary.sessionId, signal)
+        if (this.disposed || this.clients.get(deviceId) !== client || generation !== client.connectionGeneration || !client.catalogFresh) return
+        if (identity !== undefined && !client.sessionSummaries().find(row => row.sessionId === summary.sessionId)?.running) {
+          this.readTracker.promoteCompletion(id, expected, identity)
+        }
+      } catch { /* No trustworthy terminal identity: keep the local token, never wall-clock clear it. */ }
+    }
+  }
+
   /** Read the remote file and merge every Host's Session entries locally. */
   private async pullSharedReadState(deviceId: DeviceId): Promise<void> {
     const target = this.sharedReadStateTarget(deviceId)
-    if (target === undefined || this.sharedReadStateInFlight.has(deviceId)) return
+    const client = this.clients.get(deviceId)
+    const generation = client?.connectionGeneration
+    if (this.disposed || target === undefined || this.sharedReadStateInFlight.has(deviceId)) return
     this.sharedReadStateInFlight.add(deviceId)
     try {
+      await this.promoteSharedCompletions(deviceId)
+      if (this.disposed || this.clients.get(deviceId) !== client || client?.connectionGeneration !== generation) return
       const read = await execSshCommand(
         target.transport,
         buildReadSharedStateCommand(target.path),
         8_000,
       )
-      if (!read.ok) return
+      if (!read.ok || this.disposed || this.clients.get(deviceId) !== client || client?.connectionGeneration !== generation) return
       const doc = parseSharedReadDocument(read.stdout)
       if (doc !== undefined) this.mergeSharedReadDocument(deviceId, doc)
     } catch {
       // Cross-Host sync is best-effort; never break the local unread state.
     } finally {
       this.sharedReadStateInFlight.delete(deviceId)
+      if (this.sharedReadStateDirty.delete(deviceId) && !this.disposed) this.scheduleSharedReadStatePush(deviceId, 0)
     }
   }
 
@@ -749,15 +903,19 @@ export class DeviceRegistry {
    */
   private async pushSharedReadState(deviceId: DeviceId): Promise<void> {
     const target = this.sharedReadStateTarget(deviceId)
-    if (target === undefined || this.sharedReadStateInFlight.has(deviceId)) return
+    const client = this.clients.get(deviceId)
+    const generation = client?.connectionGeneration
+    if (this.disposed || target === undefined || this.sharedReadStateInFlight.has(deviceId)) return
     this.sharedReadStateInFlight.add(deviceId)
     try {
+      await this.promoteSharedCompletions(deviceId)
+      if (this.disposed || this.clients.get(deviceId) !== client || client?.connectionGeneration !== generation) return
       const read = await execSshCommand(
         target.transport,
         buildReadSharedStateCommand(target.path),
         8_000,
       )
-      if (!read.ok) return
+      if (!read.ok || this.disposed || this.clients.get(deviceId) !== client || client?.connectionGeneration !== generation) return
       const existing = parseSharedReadDocument(read.stdout)
       if (existing !== undefined) this.mergeSharedReadDocument(deviceId, existing)
 
@@ -778,6 +936,7 @@ export class DeviceRegistry {
       // Best-effort, like the pull path.
     } finally {
       this.sharedReadStateInFlight.delete(deviceId)
+      if (this.sharedReadStateDirty.delete(deviceId) && !this.disposed) this.scheduleSharedReadStatePush(deviceId, 0)
     }
   }
 
@@ -797,6 +956,7 @@ export class DeviceRegistry {
         this.readTracker.mergeEntry(encodeRemoteSessionId(deviceId, rawSessionId), entry)
       }
     }
+    this.readTracker.migrateLegacyIds()
   }
 
   /** Start/stop the 30s remote scan when the preference changes. */
@@ -1041,6 +1201,8 @@ export class DeviceRegistry {
   }
 
   startAll(): void {
+    if (this.disposed) return
+    void this.refreshLocalCatalog()
     for (const config of this.configs.values()) {
       void this.mountClient(config)
     }
@@ -1048,6 +1210,12 @@ export class DeviceRegistry {
   }
 
   dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    this.lifetime.abort()
+    this.localCatalogMutations = undefined
+    this.localCatalogInflight = undefined
+    this.localCatalogFresh = false
     // Persist the last captured catalogs before the timers are torn down.
     try {
       this.flushCatalogCache()
@@ -1075,7 +1243,6 @@ export class DeviceRegistry {
       clearInterval(this.runningReconcileTimer)
       this.runningReconcileTimer = undefined
     }
-    this.catalogRefreshInFlight.clear()
     for (const timer of this.sharedReadStatePushTimers.values()) clearTimeout(timer)
     this.sharedReadStatePushTimers.clear()
     this.nativeProxyManager.dispose()
@@ -1730,11 +1897,36 @@ export class DeviceRegistry {
     const sessionOrigins: Record<string, SessionOriginMetadata> = Object.create(null)
     const archivedSessionIds = new Set<string>(this.localArchivedIds())
     const subagentSessionIds = new Set<string>(this.localSubagentIds())
+    const attentionFacts: SessionAttentionFact[] = (this.localCatalog ?? []).map(row => ({
+      ...row,
+      deviceId: LOCAL_DEVICE_ID,
+      archived: archivedSessionIds.has(row.sessionId),
+      origin: subagentSessionIds.has(row.sessionId) ? 'subagent' : row.origin,
+    }))
+    const localPendingBySession = new Map<string, { count: number; kind: string }>()
+    for (const pending of this.localPending.values()) {
+      const old = localPendingBySession.get(pending.sessionId)
+      localPendingBySession.set(pending.sessionId, { count: (old?.count ?? 0) + 1, kind: pending.kind })
+    }
+    for (let index = 0; index < attentionFacts.length; index += 1) {
+      const row = attentionFacts[index]!
+      const pending = localPendingBySession.get(row.sessionId)
+      if (pending !== undefined) attentionFacts[index] = { ...row, pendingInteractionKind: pending.kind, pendingRequestCount: pending.count }
+    }
 
     for (const client of this.clients.values()) {
       const view = client.toView()
       const summaries = client.sessionSummaries()
       const runningBySession = new Map<string, boolean>()
+      const pendingBySession = new Map<string, { count: number; kind: import('../contract.ts').PendingInteractionKind }>()
+      for (const pending of client.pendingInteractionList()) {
+        const previous = pendingBySession.get(pending.rawSessionId)
+        pendingBySession.set(pending.rawSessionId, { count: (previous?.count ?? 0) + 1, kind: pending.kind })
+      }
+      const childrenByParent = new Map<string, number>()
+      for (const summary of summaries) if (summary.origin === 'subagent' && summary.running && summary.parentSessionId !== undefined) {
+        childrenByParent.set(summary.parentSessionId, (childrenByParent.get(summary.parentSessionId) ?? 0) + 1)
+      }
       const archived = new Set(client.archivedIds())
       for (const archivedId of archived) {
         archivedSessionIds.add(encodeRemoteSessionId(client.id, archivedId))
@@ -1765,7 +1957,13 @@ export class DeviceRegistry {
         updatedAtMap.set(namespacedId, s.updatedAt)
         runningBySession.set(s.sessionId, s.running)
         if (s.origin === 'subagent') subagentSessionIds.add(namespacedId)
-        const pending = client.pendingInteractionList().find(p => p.rawSessionId === s.sessionId)
+        const pending = pendingBySession.get(s.sessionId)
+        attentionFacts.push({
+          sessionId: namespacedId, deviceId: client.id, running: s.running,
+          blank: s.blank, origin: s.origin, archived: archived.has(s.sessionId),
+          runningSubagentCount: childrenByParent.get(s.sessionId) ?? 0,
+          ...(pending !== undefined ? { pendingInteractionKind: pending.kind, pendingRequestCount: pending.count } : {}),
+        })
         sessionOrigins[namespacedId] = {
           namespacedSessionId: namespacedId,
           rawSessionId: s.sessionId,
@@ -1825,6 +2023,18 @@ export class DeviceRegistry {
       }
     }
 
+    const attentionByDevice = selectDeviceAttention(attentionFacts, new Set(this.readTracker.unreadIds()), {
+      currentSessionId: this.activeSessions.get(clientId)?.sessionId,
+    })
+    attentionByDevice[LOCAL_DEVICE_ID] = { ...(attentionByDevice[LOCAL_DEVICE_ID] ?? emptyDeviceAttention()), fresh: this.localCatalogFresh }
+    for (const client of this.clients.values()) {
+      const fresh = client.catalogFresh
+      const rawSelected = this.nativePanes.get(this.paneKey(client.id, clientId))?.sessionId
+      const currentSessionId = rawSelected === undefined ? this.activeSessions.get(clientId)?.sessionId : encodeRemoteSessionId(client.id, rawSelected)
+      const projected = selectDeviceAttention(attentionFacts.filter(fact => fact.deviceId === client.id), new Set(this.readTracker.unreadIds()), { currentSessionId, fresh })
+      attentionByDevice[client.id] = projected[client.id] ?? emptyDeviceAttention(fresh)
+    }
+
     return {
       revision: this.revision,
       hostId: this.hostId,
@@ -1836,7 +2046,12 @@ export class DeviceRegistry {
         nativeProxyActive: this.nativeProxyActive,
       },
       devices: [...this.clients.values()].map(c => {
-        const view = this.withNativePane(this.withAuthState(c.toView()), clientId)
+        const base = c.toView()
+        const attention = attentionByDevice[c.id]!
+        const view = this.withNativePane(this.withAuthState({ ...base,
+          runningSessionCount: attention.runningSessionIds.length,
+          pendingApprovalCount: attention.pendingSessionIds.length,
+        }), clientId)
         const sessionListError = this.sessionListErrors.get(view.id)
         return sessionListError === undefined ? view : { ...view, sessionListError }
       }),
@@ -1846,6 +2061,8 @@ export class DeviceRegistry {
       allPhysicalWorkspaces,
       sessionOrigins,
       unreadSessionIds: this.readTracker.unreadIds(),
+      readCompletions: this.readTracker.completionIds(),
+      attentionByDevice,
       archivedSessionIds: [...archivedSessionIds].sort(),
       subagentSessionIds: [...subagentSessionIds].sort(),
       gitMatch: this.gitMatchRun,

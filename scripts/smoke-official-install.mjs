@@ -269,6 +269,9 @@ class Server {
       check(response.ok, `Control-plane snapshot returned HTTP ${response.status}`)
       const snapshot = await response.json()
       check(snapshot.ok === true && Number.isFinite(snapshot.value?.revision) && Array.isArray(snapshot.value.devices) && snapshot.value.devices.length === 0 && Array.isArray(snapshot.value.logicalWorkspaces) && snapshot.value.hostStatus, 'Invalid/nonempty fresh control-plane snapshot')
+      const attention = snapshot.value.attentionByDevice?.local
+      check(attention && ['eligibleSessionIds', 'runningSessionIds', 'pendingSessionIds', 'unreadSessionIds'].every(key => Array.isArray(attention[key])) && typeof attention.fresh === 'boolean', 'Installed Host did not publish the attention member/freshness protocol')
+      check(snapshot.value.readCompletions && typeof snapshot.value.readCompletions === 'object' && !Array.isArray(snapshot.value.readCompletions), 'Installed Host did not publish completion cursors')
       const combo = await this.get(entry.url)
       check(combo.ok, `Actual graph combo returned HTTP ${combo.status}`)
       check(registrationIds(await combo.text()).includes(NAME), 'Actual graph combo did not register plugin factory')

@@ -275,6 +275,16 @@ const EMPTY_SNAPSHOT: MultiDeviceSnapshot = {
   },
 }
 
+interface ResponseFence {
+  readonly lifecycle: number
+  readonly connection: number
+  host: number
+  readonly request: number
+  readonly key: string
+}
+
+type ControlPlaneResult<T> = ({ ok: true; value: T } | { ok: false; error: string }) & { stale?: true }
+
 export class MultiDeviceClientStore {
   readonly clientId = CLIENT_INSTANCE_ID
   private mainViewVisible = true
@@ -285,6 +295,19 @@ export class MultiDeviceClientStore {
   private sseRetryTimer: ReturnType<typeof setTimeout> | undefined
   private sseAttempt = 0
   private started = false
+  private disposed = false
+  private lifecycleGeneration = 0
+  private connectionGeneration = 0
+  private hostGeneration = 0
+  private requestSequence = 0
+  private readonly latestRequests = new Map<string, number>()
+  private readonly responseFences = new WeakMap<object, ResponseFence>()
+  /** Epochs are opaque identities, never lexically or numerically ordered. */
+  private readonly retiredEpochs = new Set<string>()
+  private visibilityDocument: Document | undefined
+  private readonly onVisibilityChange = (): void => {
+    this.clearUnreadForActiveSession(this.state.snapshot)
+  }
   /** Latest Session reported to the Host, used to dedupe mount/cleanup races. */
   private reportedSessionId: string | undefined
   private hasReportedSession = false
@@ -294,7 +317,7 @@ export class MultiDeviceClientStore {
   private activeSessionSeq = 0
   private lastPollAt = 0
   /** Sessions for which this client already asked the Host to clear unread. */
-  private readonly unreadClearInFlight = new Set<string>()
+  private readonly unreadClearInFlight = new Map<string, { completionId: string | undefined }>()
 
   constructor() {
     this.state = {
@@ -322,6 +345,7 @@ export class MultiDeviceClientStore {
   }
 
   private setState(patch: Partial<MultiDeviceClientState>): void {
+    if (this.disposed) return
     this.state = { ...this.state, ...patch }
     for (const listener of this.listeners) {
       try { listener() } catch { /* ignore */ }
@@ -347,41 +371,93 @@ export class MultiDeviceClientStore {
     this.setState({ sessionLinkStatus: status })
   }
 
+  private resetActiveSessionReport(): void {
+    this.hasReportedSession = false
+    this.reportedSessionId = undefined
+    this.activeSessionSeq += 1
+    this.activeSessionInFlight = undefined
+    this.reportingSessionId = undefined
+  }
+
+  private isFenceCurrent(fence: ResponseFence): boolean {
+    return !this.disposed && fence.lifecycle === this.lifecycleGeneration &&
+      fence.connection === this.connectionGeneration && fence.host === this.hostGeneration &&
+      this.latestRequests.get(fence.key) === fence.request
+  }
+
+  private isResponseCurrent(response: { stale?: true }): boolean {
+    if (response.stale === true || this.disposed) return false
+    const fence = this.responseFences.get(response)
+    return fence === undefined || this.isFenceCurrent(fence)
+  }
+
   start(): () => void {
-    if (this.started) return () => {}
+    if (this.started || this.disposed) return () => {}
     this.started = true
-    void this.refreshSnapshot()
+    const lifecycle = ++this.lifecycleGeneration
+    this.resetActiveSessionReport()
+    this.sseAttempt = 0
+    this.lastPollAt = 0
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+      this.visibilityDocument = document
+      document.addEventListener('visibilitychange', this.onVisibilityChange)
+    }
+    // Establish the connection fence before issuing the initial HTTP request.
     this.connectSse()
+    void this.refreshSnapshot()
+    this.clearUnreadForActiveSession(this.state.snapshot)
     this.pollTimer = setInterval(() => {
+      if (!this.started || lifecycle !== this.lifecycleGeneration) return
       const sseOpen = typeof EventSource !== 'undefined' && this.eventSource?.readyState === EventSource.OPEN
       const now = Date.now()
       if (sseOpen && now - this.lastPollAt < 30_000) return
       this.lastPollAt = now
       void this.refreshSnapshot()
     }, 5_000)
-
     return () => {
-      this.started = false
-      if (this.pollTimer !== undefined) {
-        clearInterval(this.pollTimer)
-        this.pollTimer = undefined
-      }
-      this.eventSource?.close()
-      this.eventSource = undefined
-      if (this.sseRetryTimer !== undefined) {
-        clearTimeout(this.sseRetryTimer)
-        this.sseRetryTimer = undefined
-      }
+      if (lifecycle === this.lifecycleGeneration) this.stop()
     }
   }
 
-  private connectSse(): void {
-    if (typeof EventSource === 'undefined' || !this.started) return
+  private stop(): void {
+    this.started = false
+    this.lifecycleGeneration += 1
+    this.connectionGeneration += 1
+    this.latestRequests.clear()
+    this.resetActiveSessionReport()
+    this.unreadClearInFlight.clear()
+    if (this.pollTimer !== undefined) clearInterval(this.pollTimer)
+    this.pollTimer = undefined
     this.eventSource?.close()
+    this.eventSource = undefined
+    if (this.sseRetryTimer !== undefined) clearTimeout(this.sseRetryTimer)
+    this.sseRetryTimer = undefined
+    this.visibilityDocument?.removeEventListener('visibilitychange', this.onVisibilityChange)
+    this.visibilityDocument = undefined
+  }
+
+  /** Final teardown (including HMR): a disposed store cannot be restarted. */
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    this.stop()
+    this.listeners.clear()
+  }
+
+  private connectSse(): void {
+    if (typeof EventSource === 'undefined' || !this.started || this.disposed) return
+    this.eventSource?.close()
+    const lifecycle = this.lifecycleGeneration
+    const connection = ++this.connectionGeneration
+    this.resetActiveSessionReport()
+    this.unreadClearInFlight.clear()
+    const current = (): boolean => this.started && !this.disposed &&
+      lifecycle === this.lifecycleGeneration && connection === this.connectionGeneration
     try {
       const es = new EventSource(`/multi-device/events?clientId=${encodeURIComponent(this.clientId)}`)
       this.eventSource = es
       es.addEventListener('snapshot', (ev) => {
+        if (!current() || this.eventSource !== es) return
         this.sseAttempt = 0
         try {
           const snap = JSON.parse((ev as MessageEvent<string>).data) as MultiDeviceSnapshot
@@ -391,12 +467,19 @@ export class MultiDeviceClientStore {
         }
       })
       es.onerror = () => {
+        if (!current() || this.eventSource !== es) return
         es.close()
-        if (this.eventSource === es) this.eventSource = undefined
-        if (!this.started || this.sseRetryTimer !== undefined) return
+        this.eventSource = undefined
+        // Retire callbacks and HTTP requests from the failed connection now,
+        // rather than waiting for the retry timer to establish a new one.
+        this.connectionGeneration += 1
+        this.resetActiveSessionReport()
+        this.unreadClearInFlight.clear()
+        if (this.sseRetryTimer !== undefined) return
         const delay = Math.min(15_000, 500 * 2 ** this.sseAttempt)
         this.sseAttempt = Math.min(this.sseAttempt + 1, 6)
         this.sseRetryTimer = setTimeout(() => {
+          if (!this.started || lifecycle !== this.lifecycleGeneration || this.disposed) return
           this.sseRetryTimer = undefined
           this.connectSse()
         }, delay)
@@ -410,18 +493,27 @@ export class MultiDeviceClientStore {
     snap: MultiDeviceSnapshot,
     activeOverride?: DeviceId | null,
   ): void {
+    if (this.disposed) return
+    const fence = this.responseFences.get(snap)
+    if (fence !== undefined && !this.isFenceCurrent(fence)) return
     const previous = this.state.snapshot
+    if (snap.hostEpoch !== undefined && this.retiredEpochs.has(snap.hostEpoch)) return
+    // Once this connection speaks epochs, an unversioned late reply cannot
+    // downgrade it back to the legacy protocol.
+    if (previous.hostEpoch !== undefined && snap.hostEpoch === undefined) return
     const force = activeOverride !== undefined ||
       this.state.loading ||
       this.state.error !== undefined
     if (!shouldApplySnapshot(previous, snap, force)) return
     const epochChanged = snap.hostEpoch !== undefined && snap.hostEpoch !== previous.hostEpoch
     if (epochChanged) {
-      this.hasReportedSession = false
-      this.reportedSessionId = undefined
-      this.activeSessionSeq += 1
-      this.activeSessionInFlight = undefined
-      this.reportingSessionId = undefined
+      if (previous.hostEpoch !== undefined) this.retiredEpochs.add(previous.hostEpoch)
+      this.hostGeneration += 1
+      // The response establishing this epoch belongs to the new generation;
+      // all other outstanding HTTP responses remain fenced out.
+      if (fence !== undefined) fence.host = this.hostGeneration
+      this.resetActiveSessionReport()
+      this.unreadClearInFlight.clear()
     }
     const configuredIds = new Set(snap.devices.map(device => device.id))
     const keepAliveEligible = new Set(
@@ -501,19 +593,23 @@ export class MultiDeviceClientStore {
    *
    * A hidden tab must NOT clear: nobody is looking at it, so consuming the
    * unread marker would silently drop the only reminder the user had. The
-   * regular snapshot poll clears it as soon as the tab becomes visible.
+   * visibilitychange handler clears it immediately when the tab becomes visible.
    */
   private clearUnreadForActiveSession(snap: MultiDeviceSnapshot): void {
+    if (this.disposed) return
     const active = this.state.activeSessionId
     if (active === undefined) return
     if (this.effectiveSessionId() !== active) return
     if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
     const unread = snap.unreadSessionIds ?? []
     if (!unread.includes(active)) return
-    if (this.unreadClearInFlight.has(active)) return
-    this.unreadClearInFlight.add(active)
+    const completionId = this.readCompletionId(snap, active)
+    const previous = this.unreadClearInFlight.get(active)
+    if (previous !== undefined && previous.completionId === completionId) return
+    const pending = { completionId }
+    this.unreadClearInFlight.set(active, pending)
     void this.markSessionRead(active).finally(() => {
-      this.unreadClearInFlight.delete(active)
+      if (this.unreadClearInFlight.get(active) === pending) this.unreadClearInFlight.delete(active)
     })
   }
 
@@ -590,6 +686,7 @@ export class MultiDeviceClientStore {
       action: 'setDisplayMode',
       payload: { displayMode: mode },
     })
+    if (!this.isResponseCurrent(res)) return { ok: false, error: 'stale-response' }
     if (!res.ok) {
       if (mode === 'aggregated') this.setState({ pendingAggregatedSessionId: undefined })
       this.setState({ error: res.error })
@@ -674,9 +771,11 @@ export class MultiDeviceClientStore {
     if (this.mainViewVisible === visible) return
     this.mainViewVisible = visible
     this.setState({})
+    if (visible) this.clearUnreadForActiveSession(this.state.snapshot)
   }
 
   setActiveSession(sessionId: string | undefined): Promise<void> {
+    if (this.disposed) return Promise.resolve()
     const next = sessionId || undefined
     if (this.state.activeSessionId !== next) this.setState({ activeSessionId: next })
     if (next !== undefined && decodeSessionId(next).isRemote) this.ensureKeepAliveDevice(decodeSessionId(next).deviceId)
@@ -688,7 +787,7 @@ export class MultiDeviceClientStore {
     const promise = this.callControlPlane<{ accepted: true }>({
       action: 'setActiveSession', payload: { sessionId: next ?? '', requestSeq },
     }).then(result => {
-      if (result.ok && requestSeq === this.activeSessionSeq) {
+      if (this.isResponseCurrent(result) && result.ok && requestSeq === this.activeSessionSeq) {
         this.reportedSessionId = next
         this.hasReportedSession = true
       }
@@ -706,14 +805,19 @@ export class MultiDeviceClientStore {
     void this.setActiveSession(undefined)
   }
 
-  /** Ask the Host to clear one Session's unread marker. */
+  private readCompletionId(snap: MultiDeviceSnapshot, sessionId: string): string | undefined {
+    return (snap as MultiDeviceSnapshot & { readCompletions?: Readonly<Record<string, string>> }).readCompletions?.[sessionId]
+  }
+
+  /** Ask the Host to clear only the completion this browser actually observed. */
   async markSessionRead(sessionId: string): Promise<boolean> {
     if (sessionId === '') return false
+    const expectedCompletionId = this.readCompletionId(this.state.snapshot, sessionId)
     const res = await this.callControlPlane<{ changed: boolean; snapshot: MultiDeviceSnapshot }>({
       action: 'markSessionRead',
-      payload: { sessionId },
+      payload: { sessionId, ...(expectedCompletionId !== undefined ? { expectedCompletionId } : {}) },
     })
-    if (!res.ok) return false
+    if (!this.isResponseCurrent(res) || !res.ok) return false
     this.applyIncomingSnapshot(res.value.snapshot)
     return res.value.changed
   }
@@ -730,6 +834,7 @@ export class MultiDeviceClientStore {
       action: 'markDeviceRead',
       payload: { deviceId },
     })
+    if (!this.isResponseCurrent(res)) return { ok: false, changed: 0, error: 'stale-response' }
     if (!res.ok) return { ok: false, changed: 0, error: res.error }
     this.applyIncomingSnapshot(res.value.snapshot)
     return { ok: true, changed: res.value.changed }
@@ -741,28 +846,62 @@ export class MultiDeviceClientStore {
 
   async callControlPlane<T = unknown>(
     request: ControlPlaneRequest,
-  ): Promise<{ ok: true; value: T } | { ok: false; error: string }> {
+  ): Promise<ControlPlaneResult<T>> {
+    const payload = request.payload as Record<string, unknown> | undefined
+    const scope = request.action === 'setActiveSession' ? '' :
+      payload?.logicalWorkspaceId ?? payload?.sessionId ?? payload?.deviceId ?? payload?.memberKey ?? payload?.ruleId ?? payload?.id ?? ''
+    const key = `${request.action}:${String(scope)}`
+    const fence: ResponseFence = {
+      lifecycle: this.lifecycleGeneration,
+      connection: this.connectionGeneration,
+      host: this.hostGeneration,
+      request: ++this.requestSequence,
+      key,
+    }
+    this.latestRequests.set(key, fence.request)
+    const stale = (): ControlPlaneResult<T> => ({ ok: false, error: 'stale-response', stale: true })
+    if (this.disposed) return stale()
     try {
       const response = await fetch('/multi-device/api', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ ...request, payload: { ...request.payload, clientId: this.clientId } }),
       })
-      const data = (await response.json()) as { ok: true; value: T } | { ok: false; error: string }
+      const data = (await response.json()) as ControlPlaneResult<T>
+      if (!this.isFenceCurrent(fence)) return stale()
+      if (data.ok && data.value !== null && typeof data.value === 'object') {
+        const value = data.value as { revision?: unknown; snapshot?: MultiDeviceSnapshot }
+        const snapshot = typeof value.revision === 'number' ? data.value as unknown as MultiDeviceSnapshot : value.snapshot
+        if (snapshot !== undefined && (
+          (snapshot.hostEpoch !== undefined && this.retiredEpochs.has(snapshot.hostEpoch)) ||
+          (this.state.snapshot.hostEpoch !== undefined && snapshot.hostEpoch === undefined) ||
+          (snapshot.hostEpoch === this.state.snapshot.hostEpoch && snapshot.revision < this.state.snapshot.revision)
+        )) return stale()
+      }
+      this.responseFences.set(data, fence)
+      if (data.ok && data.value !== null && typeof data.value === 'object') {
+        this.responseFences.set(data.value, fence)
+        const snapshot = (data.value as { snapshot?: unknown }).snapshot
+        if (snapshot !== null && typeof snapshot === 'object') this.responseFences.set(snapshot, fence)
+      }
       return data
     } catch (error) {
-      return {
+      if (!this.isFenceCurrent(fence)) return stale()
+      const result: ControlPlaneResult<T> = {
         ok: false,
         error: error instanceof Error ? error.message : String(error),
       }
+      this.responseFences.set(result, fence)
+      return result
     }
   }
 
   async refreshSnapshot(): Promise<void> {
     const res = await this.callControlPlane<MultiDeviceSnapshot>({ action: 'snapshot' })
+    if (!this.isResponseCurrent(res)) return
     if (res.ok) {
       this.applyIncomingSnapshot(res.value)
-      void this.setActiveSession(this.state.activeSessionId)
+      if (this.isResponseCurrent(res)) void this.setActiveSession(this.state.activeSessionId)
     } else {
       this.setState({ loading: false, error: res.error })
     }
@@ -786,6 +925,7 @@ export class MultiDeviceClientStore {
       action: 'upsertDevice',
       payload: input as unknown as Record<string, unknown>,
     })
+    if (!this.isResponseCurrent(res)) return { ok: false, error: 'stale-response' }
     if (res.ok) {
       this.applyIncomingSnapshot(res.value.snapshot)
       return { ok: true }
@@ -811,6 +951,7 @@ export class MultiDeviceClientStore {
           : {}),
       },
     })
+    if (!this.isResponseCurrent(res)) return { ok: false, error: 'stale-response' }
     if (res.ok) {
       this.applyIncomingSnapshot(res.value.snapshot)
       return { ok: true }
@@ -826,6 +967,7 @@ export class MultiDeviceClientStore {
       action: 'removeDevice',
       payload: { deviceId },
     })
+    if (!this.isResponseCurrent(res)) return { ok: false, error: 'stale-response' }
     if (res.ok) {
       this.releaseKeepAliveDevice(deviceId)
       this.applyIncomingSnapshot(res.value.snapshot)
@@ -841,6 +983,7 @@ export class MultiDeviceClientStore {
       action: 'reconnectDevice',
       payload: { deviceId },
     })
+    if (!this.isResponseCurrent(res)) return { ok: false, error: 'stale-response' }
     if (res.ok) {
       this.applyIncomingSnapshot(res.value.snapshot)
       this.setState({ error: undefined })
@@ -876,6 +1019,7 @@ export class MultiDeviceClientStore {
       action: 'createSession',
       payload: input as unknown as Record<string, unknown>,
     })
+    if (!this.isResponseCurrent(res)) return { ok: false, error: 'stale-response' }
     if (res.ok) {
       this.applyIncomingSnapshot(res.value.snapshot)
       return { ok: true, sessionId: res.value.sessionId }
@@ -890,6 +1034,7 @@ export class MultiDeviceClientStore {
       action: 'createRemoteWorkspace',
       payload: input as unknown as Record<string, unknown>,
     })
+    if (!this.isResponseCurrent(res)) return { ok: false, error: 'stale-response' }
     if (res.ok) {
       this.applyIncomingSnapshot(res.value.snapshot)
       return { ok: true }
@@ -902,6 +1047,7 @@ export class MultiDeviceClientStore {
       action: 'updateAggregationConfig',
       payload: patch as unknown as Record<string, unknown>,
     })
+    if (!this.isResponseCurrent(res)) return { ok: false, error: 'stale-response' }
     if (res.ok) {
       this.applyIncomingSnapshot(res.value)
       this.setState({ error: undefined })
@@ -916,6 +1062,7 @@ export class MultiDeviceClientStore {
       action: 'upsertManualRule',
       payload: rule as unknown as Record<string, unknown>,
     })
+    if (!this.isResponseCurrent(res)) return
     if (res.ok) this.applyIncomingSnapshot(res.value)
   }
 
@@ -924,6 +1071,7 @@ export class MultiDeviceClientStore {
       action: 'removeManualRule',
       payload: { ruleId },
     })
+    if (!this.isResponseCurrent(res)) return
     if (res.ok) this.applyIncomingSnapshot(res.value)
   }
 
@@ -932,6 +1080,7 @@ export class MultiDeviceClientStore {
       action: 'setMemberExcluded',
       payload: { memberKey, excluded },
     })
+    if (!this.isResponseCurrent(res)) return { ok: false, error: 'stale-response' }
     if (res.ok) {
       this.applyIncomingSnapshot(res.value)
       this.setState({ error: undefined })
@@ -943,6 +1092,7 @@ export class MultiDeviceClientStore {
 
   async startGitMatch(): Promise<{ ok: boolean; error?: string }> {
     const res = await this.callControlPlane<{ snapshot: MultiDeviceSnapshot }>({ action: 'startGitMatch' })
+    if (!this.isResponseCurrent(res)) return { ok: false, error: 'stale-response' }
     if (res.ok) {
       this.applyIncomingSnapshot(res.value.snapshot)
       return { ok: true }
@@ -961,6 +1111,7 @@ export class MultiDeviceClientStore {
       action: 'setUiPreferences',
       payload: patch as Record<string, unknown>,
     })
+    if (!this.isResponseCurrent(res)) return { ok: false, error: 'stale-response' }
     if (res.ok) {
       this.applyIncomingSnapshot(res.value)
       return { ok: true }
@@ -976,6 +1127,7 @@ export class MultiDeviceClientStore {
       action: 'setPreferredDevice',
       payload: { logicalWorkspaceId, deviceId },
     })
+    if (!this.isResponseCurrent(res)) return { ok: false, error: 'stale-response' }
     if (res.ok) {
       this.applyIncomingSnapshot(res.value)
       return { ok: true }
@@ -1005,6 +1157,7 @@ export class MultiDeviceClientStore {
       action: 'startSessionOnDevice',
       payload: { logicalWorkspaceId, deviceId },
     })
+    if (!this.isResponseCurrent(res)) return { ok: false, error: 'stale-response' }
     if (!res.ok) return { ok: false, error: res.error }
     this.applyIncomingSnapshot(res.value.snapshot)
     if (res.value.mode === 'registered' && res.value.sessionId !== undefined) {
@@ -1015,6 +1168,7 @@ export class MultiDeviceClientStore {
         // the list already contains it.
       }
       try {
+        if (!this.isResponseCurrent(res)) return { ok: false, error: 'stale-response' }
         uiWorkspace?.openSession?.(res.value.sessionId)
       } catch (error) {
         return { ok: false, error: error instanceof Error ? error.message : 'openSession-failed' }

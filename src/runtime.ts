@@ -233,6 +233,8 @@ export interface MultiDeviceDiagnostics {
     readonly allRunningSessions: number
   }
   readonly devices: readonly DiagnosticsDevice[]
+  /** Session identities and categories only; no conversation content or credentials. */
+  readonly attentionByDevice?: MultiDeviceSnapshot['attentionByDevice']
   readonly client?: DiagnosticsClientReport
 }
 
@@ -343,6 +345,7 @@ export function buildDiagnostics(
       allRunningSessions: devices.reduce((total, device) => total + device.allRunningSessionCount, 0),
     },
     devices,
+    ...(snapshot.attentionByDevice !== undefined ? { attentionByDevice: snapshot.attentionByDevice } : {}),
     ...(client !== undefined ? { client } : {}),
   }
 }
@@ -401,7 +404,9 @@ export class MultiDeviceControlPlane {
           if (sessionId === '') {
             return { ok: false, error: 'sessionId is required' }
           }
-          const changed = this.registry.markSessionRead(sessionId)
+          const expectedCompletionId = typeof payload.expectedCompletionId === 'string'
+            ? payload.expectedCompletionId : undefined
+          const changed = this.registry.markSessionRead(sessionId, expectedCompletionId)
           return {
             ok: true,
             value: { changed, snapshot: this.registry.snapshot(clientId) },

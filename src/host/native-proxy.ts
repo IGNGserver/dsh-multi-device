@@ -40,6 +40,7 @@ import {
   isNativeBridgeScriptPath,
   isNativeBridgeSocketPath,
   sanitizeGroupState,
+  sanitizeReadCompletions,
 } from './native-bridge.ts'
 
 const PROXY_TOKEN_QUERY = 'md_token'
@@ -130,7 +131,7 @@ type NativeBridgeInbound =
   | { readonly type: 'failed'; readonly error?: string }
   | { readonly type: 'selection'; readonly sessionId?: string | null }
   | { readonly type: 'group-expansion'; readonly groups?: unknown }
-  | { readonly type: 'read'; readonly sessionId?: string }
+  | { readonly type: 'read'; readonly sessionId?: string; readonly completionId?: string; readonly requestId?: string }
   | { readonly type: 'title'; readonly title?: string }
   | { readonly type: 'visibility'; readonly visible?: boolean }
 
@@ -140,7 +141,15 @@ type NativeBridgeOutbound =
   | { readonly type: 'refresh' }
   | { readonly type: 'set-embedded'; readonly enabled: boolean }
   | { readonly type: 'group-expansion'; readonly groups: Record<string, boolean> }
-  | { readonly type: 'read-state'; readonly unreadSessionIds: readonly string[] }
+  | { readonly type: 'read-state'; readonly unreadSessionIds: readonly string[]; readonly readCompletions?: Readonly<Record<string, string>> }
+  | ({ readonly type: 'read-ack'; readonly sessionId: string; readonly requestId?: string; readonly completionId?: string } & NativeBridgeReadResult)
+
+/** Host acceptance only: this ACK does not promise synchronous disk persistence. */
+export interface NativeBridgeReadResult {
+  readonly accepted: boolean
+  readonly currentCompletionId?: string
+  readonly unread: boolean
+}
 
 export interface NativeProxyHooks {
   /** Report the credential state observed while proxying a device. */
@@ -170,8 +179,10 @@ export interface NativeProxyHooks {
   readonly onGroupState?: (deviceId: DeviceId, groups: Record<string, boolean>) => void
   /** Raw remote Session IDs whose completion is unread on the Host. */
   readonly getUnreadState?: (deviceId: DeviceId) => readonly string[] | undefined
-  /** The framed page opened a Session and considers its unread marker read. */
-  readonly onBridgeRead?: (deviceId: DeviceId, sessionId: string) => void
+  /** Current completion tokens, including completions already read. */
+  readonly getReadCompletions?: (deviceId: DeviceId) => Readonly<Record<string, string>> | undefined
+  /** Accept a read for precisely this completion (omitted token is legacy). */
+  readonly onBridgeRead?: (deviceId: DeviceId, sessionId: string, expectedCompletionId?: string) => void | NativeBridgeReadResult
 }
 
 /** Backwards-compatible alias for callers that only cared about auth hooks. */
@@ -221,6 +232,7 @@ export class NativeDeviceProxy {
   private groupState: Record<string, boolean> = {}
   /** Host-owned raw Session IDs whose completion is unread. */
   private unreadState: readonly string[] = []
+  private readCompletions: Readonly<Record<string, string>> | undefined
 
   constructor(
     private device: DeviceConfig,
@@ -240,6 +252,8 @@ export class NativeDeviceProxy {
   private refreshHostState(device: DeviceConfig): void {
     this.groupState = sanitizeGroupState(this.hooks.getGroupState?.(device.id))
     this.unreadState = this.hooks.getUnreadState?.(device.id) ?? []
+    const completions = this.hooks.getReadCompletions?.(device.id)
+    this.readCompletions = completions === undefined ? undefined : sanitizeReadCompletions(completions)
   }
 
   proxyUrl(): string | undefined {
@@ -487,16 +501,21 @@ export class NativeDeviceProxy {
   }
 
   /** Apply Host-owned unread state to the framed page. */
-  setUnreadState(unreadSessionIds: readonly string[]): void {
+  setUnreadState(unreadSessionIds: readonly string[], readCompletions?: Readonly<Record<string, string>>): void {
     const next = [...unreadSessionIds]
+    const tokens = readCompletions === undefined ? undefined : sanitizeReadCompletions(readCompletions)
+    const sameTokens = tokens === undefined ? this.readCompletions === undefined
+      : this.readCompletions !== undefined && Object.keys(tokens).length === Object.keys(this.readCompletions).length &&
+        Object.keys(tokens).every(id => tokens[id] === this.readCompletions?.[id])
     if (
-      next.length === this.unreadState.length &&
+      sameTokens && next.length === this.unreadState.length &&
       next.every((id, index) => id === this.unreadState[index])
     ) {
       return
     }
     this.unreadState = next
-    this.sendToBridge({ type: 'read-state', unreadSessionIds: next })
+    this.readCompletions = tokens
+    this.sendToBridge({ type: 'read-state', unreadSessionIds: next, ...(tokens !== undefined ? { readCompletions: tokens } : {}) })
   }
 
   /** Reset only this client's cached command target (device switched away). */
@@ -622,6 +641,7 @@ export class NativeDeviceProxy {
       res.end(buildNativeBridgeScript({
         groups: this.groupState,
         unread: this.unreadState,
+        readCompletions: this.readCompletions,
       }))
       return
     }
@@ -975,9 +995,11 @@ export class NativeDeviceProxy {
         // Initialization belongs to this new socket, never existing pages.
         this.sendToSocket(ws, { type: 'set-embedded', enabled: state.embedded })
         this.sendToSocket(ws, { type: 'group-expansion', groups: this.groupState })
+        const tokens = this.hooks.getReadCompletions?.(this.device.id) ?? this.readCompletions
         this.sendToSocket(ws, {
           type: 'read-state',
           unreadSessionIds: this.hooks.getUnreadState?.(this.device.id) ?? this.unreadState,
+          ...(tokens !== undefined ? { readCompletions: sanitizeReadCompletions(tokens) } : {}),
         })
         if (state.pendingOpenSession !== undefined) {
           this.sendToSocket(ws, { type: 'open-session', sessionId: state.pendingOpenSession })
@@ -1009,7 +1031,32 @@ export class NativeDeviceProxy {
       }
       if (message.type === 'read') {
         const sessionId = typeof message.sessionId === 'string' ? message.sessionId : ''
-        if (sessionId !== '') this.hooks.onBridgeRead?.(this.device.id, sessionId)
+        if (sessionId === '' || sessionId.length > 512) return
+        if (message.completionId !== undefined && (typeof message.completionId !== 'string' || message.completionId === '' || message.completionId.length > 512)) return
+        const completionId = typeof message.completionId === 'string' && message.completionId !== '' && message.completionId.length <= 512
+          ? message.completionId : undefined
+        const requestId = typeof message.requestId === 'string' && message.requestId !== '' && message.requestId.length <= 512
+          ? message.requestId : undefined
+        let result: NativeBridgeReadResult
+        try {
+          result = this.hooks.onBridgeRead?.(this.device.id, sessionId, completionId) ?? { accepted: true, unread: false }
+        } catch {
+          const tokens = this.hooks.getReadCompletions?.(this.device.id) ?? this.readCompletions
+          const currentCompletionId = tokens?.[sessionId]
+          result = {
+            accepted: false,
+            unread: (this.hooks.getUnreadState?.(this.device.id) ?? this.unreadState).includes(sessionId),
+            ...(currentCompletionId !== undefined ? { currentCompletionId } : {}),
+          }
+        }
+        // onBridgeRead may synchronously broadcast read-state before this ACK.
+        // Reply only to the originating socket, even for shared client IDs.
+        this.sendToSocket(ws, {
+          type: 'read-ack', sessionId,
+          ...(requestId !== undefined ? { requestId } : {}),
+          ...(completionId !== undefined ? { completionId } : {}),
+          ...result,
+        })
         return
       }
       if (message.type === 'title') {
@@ -1313,8 +1360,8 @@ export class NativeProxyManager {
   }
 
   /** Push Host-owned unread Session IDs to the device's framed page(s). */
-  setUnreadState(deviceId: DeviceId, unreadSessionIds: readonly string[]): void {
-    this.proxies.get(deviceId)?.setUnreadState(unreadSessionIds)
+  setUnreadState(deviceId: DeviceId, unreadSessionIds: readonly string[], readCompletions?: Readonly<Record<string, string>>): void {
+    this.proxies.get(deviceId)?.setUnreadState(unreadSessionIds, readCompletions)
   }
 
   removeProxy(deviceId: DeviceId): void {

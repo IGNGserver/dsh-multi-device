@@ -39,20 +39,21 @@ import {
   Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { LOCAL_DEVICE_ID, type DeviceId, type DeviceView } from '../contract.ts'
+import { decodeSessionId, LOCAL_DEVICE_ID, type DeviceId, type DeviceView } from '../contract.ts'
 import { AuthRequiredPanel } from './AuthPanel.tsx'
 import {
   type NativeBarMetrics,
   measureNativeBar,
   recordNativeBarMetrics,
 } from './barMetrics.ts'
-import { UnreadCountBadge } from './UnreadCountBadge.tsx'
+import { attentionUnreadIds } from '../attention.ts'
+import { AttentionDetails } from './AttentionDetails.tsx'
 import { useSessionSummary } from './clientServices.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
 import { SessionDeviceChip } from './SessionDeviceChip.tsx'
 import { nativePaneTarget, nativeProxyEmbeddingError, resolveSameSiteProxyUrl, shouldShowNativePane } from './nativePane.ts'
 import { clientStore, deviceStateToDotState, useMultiDeviceState } from './state.ts'
-import { countableUnreadIds, unreadCountForDevice } from './unreadCounts.ts'
+import { countableUnreadIds } from './unreadCounts.ts'
 
 interface DesktopBrowserBridgeLike {
   acquire(workspace: string): Promise<{ lease: string; partition: string }>
@@ -358,13 +359,13 @@ export function NativeTabBar({
   // completions and subagent children never appear in the sidebar, and a
   // remote ID that is no longer in any catalog is a deleted Session whose
   // persisted marker must not keep the badge alive.
-  const unread = countableUnreadIds(
+  const attentionByDevice = state.snapshot.attentionByDevice
+  const unread = attentionByDevice !== undefined ? attentionUnreadIds(attentionByDevice) : countableUnreadIds(
     state.snapshot.unreadSessionIds,
     state.snapshot.archivedSessionIds,
     state.snapshot.subagentSessionIds,
     sessionId => state.snapshot.sessionOrigins[sessionId] !== undefined,
   )
-  const localUnread = unreadCountForDevice(unread, LOCAL_DEVICE_ID)
 
   const activeDevice = devices.find(device => device.id === state.activeNativeDeviceId)
   const localActive = activeDevice === undefined
@@ -449,9 +450,15 @@ export function NativeTabBar({
             <span className="dsh-md-pill-inner">
               <IconGlobeOutlineRegular size={13} />
               <span>{t('nativeLocalTab')}</span>
-              <UnreadCountBadge count={localUnread} t={t} />
             </span>
           </Pill>
+          <AttentionDetails
+            view={attentionByDevice?.[LOCAL_DEVICE_ID]}
+            deviceName={t('nativeLocalTab')}
+            t={t}
+            nativeBar
+            fallback={{ unreadSessionIds: [...unread].filter(id => decodeSessionId(id).deviceId === LOCAL_DEVICE_ID), fresh: attentionByDevice === undefined }}
+          />
         </div>
 
         {devices.map((dev) => {
@@ -468,27 +475,24 @@ export function NativeTabBar({
                 <span className="dsh-md-pill-inner">
                   <StateDot state={deviceStateToDotState(dev.state)} size={8} />
                   <span>{dev.name}</span>
-                  <UnreadCountBadge count={unreadCountForDevice(unread, dev.id)} t={t} />
-                  {dev.runningSessionCount > 0 && (
-                    <span className="dsh-md-muted">
-                      {t('runningCount').replace('{count}', String(dev.runningSessionCount))}
-                    </span>
-                  )}
-                  {dev.pendingApprovalCount > 0 && (
-                    <span
-                      className="dsh-md-pending"
-                      title={t('pendingCount').replace('{count}', String(dev.pendingApprovalCount))}
-                      aria-label={t('pendingCount').replace('{count}', String(dev.pendingApprovalCount))}
-                    >
-                      <IconWarningOutlineRegular size={11} />
-                      <span>{dev.pendingApprovalCount}</span>
-                    </span>
-                  )}
+
                   {dev.latencyMs !== undefined && (
                     <span className="dsh-md-muted">{dev.latencyMs}ms</span>
                   )}
                 </span>
               </Pill>
+              <AttentionDetails
+                view={attentionByDevice?.[dev.id]}
+                deviceName={dev.name}
+                t={t}
+                nativeBar
+                fallback={{
+                  runningCount: attentionByDevice === undefined ? dev.runningSessionCount : undefined,
+                  pendingCount: attentionByDevice === undefined ? dev.pendingApprovalCount : undefined,
+                  unreadSessionIds: [...unread].filter(id => decodeSessionId(id).deviceId === dev.id),
+                  fresh: attentionByDevice === undefined && dev.state === 'connected' && dev.catalogStale !== true,
+                }}
+              />
               {isKeptAlive && (
                 <Tooltip label={t('releaseKeepAlive')} side="bottom">
                   <Button

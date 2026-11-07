@@ -49,11 +49,13 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
 
   var initialGroups = {};
   var initialUnread = [];
+  var initialReadCompletions;
   try {
     if (window.__DSH_MD_GROUPS__ && typeof window.__DSH_MD_GROUPS__ === 'object' && !Array.isArray(window.__DSH_MD_GROUPS__)) {
       initialGroups = window.__DSH_MD_GROUPS__;
     }
     if (Array.isArray(window.__DSH_MD_UNREAD__)) initialUnread = window.__DSH_MD_UNREAD__;
+    initialReadCompletions = window.__DSH_MD_READ_COMPLETIONS__;
   } catch (error) {}
 
   var socket = null;
@@ -88,10 +90,18 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
 
   // Session completion reminders are owned by the local Host too. Native and
   // aggregated surfaces both overlay this set instead of DSH's in-memory one.
-  var unread = {};
+  var unread = Object.create(null);
+  var hostUnread = Object.create(null);
+  var readCompletions = normalizeReadCompletions(initialReadCompletions);
+  var pendingReads = [];
+  var readRequestSequence = 0;
+  var readRetryTimer = null;
+  var readStateReady = false;
+  var readStateVersion = 0;
   for (var initialUnreadIndex = 0; initialUnreadIndex < initialUnread.length; initialUnreadIndex += 1) {
     if (typeof initialUnread[initialUnreadIndex] === 'string' && initialUnread[initialUnreadIndex] !== '') {
       unread[initialUnread[initialUnreadIndex]] = true;
+      hostUnread[initialUnread[initialUnreadIndex]] = true;
     }
   }
   var readOverlayInstalled = false;
@@ -118,6 +128,7 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
     send({ type: 'visibility', visible: next });
     if (next && readySent) {
       clearUnreadForSelection();
+      flushReads();
       report();
     }
   }
@@ -341,9 +352,7 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
     // must not leave a reminder behind. Clearing here also covers the Host
     // snapshot that marks the Session unread a moment before this report.
     if (sessionId && unread[sessionId] === true && isFrameVisible()) {
-      delete unread[sessionId];
-      notifyRead();
-      send({ type: 'read', sessionId: sessionId });
+      queueRead(sessionId);
     }
   }
 
@@ -591,27 +600,145 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
     } catch (error) {}
   }
 
-  function clearUnreadForSelection() {
-    if (!isFrameVisible()) return;
-    var current = lastSelection;
-    if (current === null) current = currentSelection();
-    if (current && unread[current] === true) {
-      delete unread[current];
-      notifyRead();
-      send({ type: 'read', sessionId: current });
+  function normalizeReadCompletions(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    var out = Object.create(null);
+    var keys = Object.keys(value);
+    for (var i = 0; i < keys.length && i < 2000; i += 1) {
+      var key = keys[i];
+      if (key && key.length <= 512 && typeof value[key] === 'string' && value[key] && value[key].length <= 512) out[key] = value[key];
     }
+    return out;
   }
 
-  function setUnreadState(ids) {
-    var next = {};
+  function tokenFor(sessionId) {
+    return readCompletions ? readCompletions[sessionId] : undefined;
+  }
+
+  function pendingFor(sessionId, completionId) {
+    for (var i = 0; i < pendingReads.length; i += 1) {
+      if (pendingReads[i].sessionId === sessionId && pendingReads[i].completionId === completionId) return pendingReads[i];
+    }
+    return null;
+  }
+
+  function queueRead(sessionId) {
+    var completionId = tokenFor(sessionId);
+    if (readCompletions !== null && completionId === undefined) return;
+    if (!pendingFor(sessionId, completionId)) {
+      // Never evict an unacknowledged read to make room. Leave the overlay
+      // unread instead; it can be consumed after an ACK frees capacity.
+      if (pendingReads.length >= 256) return;
+      pendingReads.push({ sessionId: sessionId, completionId: completionId,
+        requestId: 'read-' + Date.now().toString(36) + '-' + (++readRequestSequence),
+        attempts: 0, nextAt: 0, stateVersion: readStateVersion });
+    }
+    delete unread[sessionId];
+    notifyRead();
+    flushReads();
+  }
+
+  function flushReads() {
+    if (readRetryTimer !== null) { clearTimeout(readRetryTimer); readRetryTimer = null; }
+    if (!readStateReady || !socket || socket.readyState !== 1) return;
+    var now = Date.now();
+    var nextAt = Infinity;
+    var sent = 0;
+    for (var i = 0; i < pendingReads.length; i += 1) {
+      var pending = pendingReads[i];
+      // Tokenless legacy reads must not clear a completion after an upgrade.
+      // Token-bearing stale reads are safe to replay: the Host rejects them.
+      if (pending.completionId !== undefined && readCompletions === null) continue;
+      if (pending.completionId === undefined && (readCompletions !== null || !hostUnread[pending.sessionId] ||
+          !isFrameVisible() || currentSelection() !== pending.sessionId)) continue;
+      if (pending.nextAt <= now && sent < 16) {
+        var message = { type: 'read', sessionId: pending.sessionId, requestId: pending.requestId };
+        if (pending.completionId !== undefined) message.completionId = pending.completionId;
+        // send success is NOT acceptance. Keep the exact token/request until
+        // read-ack, including when read-state arrives synchronously first.
+        send(message);
+        pending.attempts += 1;
+        pending.nextAt = now + Math.min(30000, 1000 * Math.pow(2, Math.min(pending.attempts - 1, 5)));
+        sent += 1;
+      }
+      nextAt = Math.min(nextAt, pending.nextAt);
+    }
+    if (nextAt !== Infinity) readRetryTimer = setTimeout(function () {
+      readRetryTimer = null;
+      flushReads();
+    }, Math.max(100, nextAt - Date.now()));
+  }
+
+  function applyReadAck(data) {
+    if (typeof data.sessionId !== 'string' || typeof data.accepted !== 'boolean') return;
+    var index = -1;
+    for (var i = 0; i < pendingReads.length; i += 1) {
+      var candidate = pendingReads[i];
+      if (candidate.sessionId !== data.sessionId) continue;
+      if (typeof data.requestId === 'string' ? candidate.requestId !== data.requestId : candidate.completionId !== data.completionId) continue;
+      // Even a matching request ID cannot acknowledge a different token.
+      if (candidate.completionId !== data.completionId) continue;
+      index = i;
+      break;
+    }
+    if (index === -1) return; // duplicate/late ACK is idempotent
+    var pending = pendingReads[index];
+    var sameCurrent = tokenFor(pending.sessionId) === pending.completionId;
+    var ackToken = typeof data.currentCompletionId === 'string' && data.currentCompletionId ? data.currentCompletionId : undefined;
+    var stale = ackToken !== undefined && ackToken !== pending.completionId;
+    // A rejected read for a deleted/trimmed completion is terminal too: the
+    // authority has no current completion and explicitly reports no unread.
+    var obsolete = data.accepted === false && data.unread === false && ackToken === undefined;
+    if (data.accepted || stale || obsolete) pendingReads.splice(index, 1);
+    // A newer read-state wins over this ACK. In particular, a synchronous
+    // Host bump must not let the old token erase the new completion.
+    if (sameCurrent && pending.stateVersion === readStateVersion) {
+      if (stale) {
+        if (readCompletions === null) readCompletions = Object.create(null);
+        readCompletions[pending.sessionId] = ackToken;
+      }
+      hostUnread[pending.sessionId] = data.unread === true;
+      if (data.unread === true) unread[pending.sessionId] = true;
+      else delete unread[pending.sessionId];
+      notifyRead();
+    }
+    clearUnreadForSelection();
+    flushReads();
+  }
+
+  function clearUnreadForSelection() {
+    if (!isFrameVisible()) return;
+    var current = currentSelection();
+    if (current && unread[current] === true) queueRead(current);
+  }
+
+  function setUnreadState(ids, completions) {
+    var next = Object.create(null);
     if (Array.isArray(ids)) {
       for (var i = 0; i < ids.length && i < 2000; i += 1) {
-        if (typeof ids[i] === 'string' && ids[i] !== '') next[ids[i]] = true;
+        if (typeof ids[i] === 'string' && ids[i] !== '' && ids[i].length <= 512) next[ids[i]] = true;
       }
     }
-    unread = next;
+    hostUnread = next;
+    readCompletions = normalizeReadCompletions(completions);
+    if (readCompletions === null) {
+      // Old Hosts do not ACK. A fresh legacy snapshot that omits this session
+      // confirms it is no longer unread. Retire only tokenless pending reads;
+      // do not clear a later reminder or infer acceptance for token reads.
+      pendingReads = pendingReads.filter(function (pending) {
+        return pending.completionId !== undefined || next[pending.sessionId] === true;
+      });
+    }
+    readStateVersion += 1;
+    readStateReady = true;
+    unread = Object.create(null);
+    var keys = Object.keys(next);
+    for (var j = 0; j < keys.length; j += 1) {
+      if (!pendingFor(keys[j], tokenFor(keys[j])) || (tokenFor(keys[j]) === undefined && !isFrameVisible())) unread[keys[j]] = true;
+    }
     notifyRead();
     clearUnreadForSelection();
+    flushReads();
   }
 
   // Pane embedding hides the remote left sidebar. Native/full mode must get it
@@ -849,10 +976,14 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
       else if (data.type === 'refresh') refreshSessions();
       else if (data.type === 'set-embedded') setEmbedded(data.enabled === true);
       else if (data.type === 'group-expansion') applyGroupState(data.groups);
-      else if (data.type === 'read-state') setUnreadState(data.unreadSessionIds);
+      else if (data.type === 'read-state') setUnreadState(data.unreadSessionIds, data.readCompletions);
+      else if (data.type === 'read-ack') applyReadAck(data);
     });
     socket.addEventListener('close', function () {
       socket = null;
+      readStateReady = false;
+      if (readRetryTimer !== null) { clearTimeout(readRetryTimer); readRetryTimer = null; }
+      for (var i = 0; i < pendingReads.length; i += 1) pendingReads[i].nextAt = 0;
       // Force a fresh selection/title/visibility report on reconnect; the
       // previous socket may have gone away before the Host persisted them.
       lastSelection = null;
@@ -1010,6 +1141,17 @@ export function sanitizeGroupState(value: unknown): Record<string, boolean> {
   return out
 }
 
+/** Bounded raw-session completion map for the Host/page boundary. */
+export function sanitizeReadCompletions(value: unknown): Record<string, string> {
+  const out: Record<string, string> = Object.create(null)
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return out
+  for (const [key, token] of Object.entries(value).slice(0, 2_000)) {
+    if (key === '' || key.length > 512 || typeof token !== 'string' || token === '' || token.length > 512) continue
+    out[key] = token
+  }
+  return out
+}
+
 /** Serialize a value for a classic `<script>` body without closing the tag. */
 function jsonForInlineScript(value: unknown): string {
   return JSON.stringify(value)
@@ -1024,6 +1166,8 @@ export interface NativeBridgeScriptState {
   readonly groups?: Readonly<Record<string, boolean>>
   /** Raw remote Session IDs whose completion is currently unread. */
   readonly unread?: readonly string[]
+  /** All current completion tokens, including already-read completions. */
+  readonly readCompletions?: Readonly<Record<string, string>>
 }
 
 /**
@@ -1041,6 +1185,9 @@ export function buildNativeBridgeScript(state: NativeBridgeScriptState = {}): st
   return [
     `window.__DSH_MD_GROUPS__ = ${jsonForInlineScript(groups)};`,
     `window.__DSH_MD_UNREAD__ = ${jsonForInlineScript(unread)};`,
+    ...(state.readCompletions !== undefined
+      ? [`window.__DSH_MD_READ_COMPLETIONS__ = ${jsonForInlineScript(sanitizeReadCompletions(state.readCompletions))};`]
+      : []),
     NATIVE_BRIDGE_SCRIPT,
   ].join('\n')
 }

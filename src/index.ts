@@ -27,6 +27,7 @@ import {
   type WorkspaceControllerLike,
   type WorkspaceRegistryLike,
 } from './host/gateway.ts'
+import { readLocalAttentionCatalog } from './host/local-attention.ts'
 import { DeviceRegistry } from './host/registry.ts'
 import { resolvePluginStorage } from './host/storage.ts'
 import {
@@ -217,6 +218,9 @@ function applyHost(
     secretsFile,
     {
       localPort: () => webServer?.port,
+      localSessionCatalog: signal => readLocalAttentionCatalog(
+        key => (ctx as unknown as { get?: (key: string) => unknown }).get?.(key), signal,
+      ),
       localWorkspaces: () => {
         const runningIds = new Set<string>()
         try {
@@ -304,6 +308,7 @@ function applyHost(
     const dispose = on.call(ctx, 'api-session/status', (sessionId, running) => {
       if (typeof sessionId === 'string' && typeof running === 'boolean') {
         registry.observeLocalSessionStatus(sessionId, running)
+        void registry.refreshLocalCatalog()
       }
     })
     return typeof dispose === 'function' ? dispose : () => {}
@@ -323,6 +328,48 @@ function applyHost(
     })
     return typeof dispose === 'function' ? dispose : () => {}
   }, 'dsh-multi-device: local session removal')
+
+  ctx.effect(() => {
+    const on = (ctx as unknown as { on?: (event: string, listener: (...args: any[]) => void) => (() => void) | void }).on
+    if (typeof on !== 'function') return () => {}
+    const disposers = [
+      on.call(ctx, 'api-session/added', (summary: { sessionId?: string; running?: boolean; blank?: boolean; origin?: string }) => {
+        if (typeof summary?.sessionId === 'string') registry.observeLocalSessionAdded({
+          sessionId: summary.sessionId, deviceId: 'local', running: summary.running === true,
+          blank: summary.blank, origin: summary.origin,
+        })
+      }),
+      on.call(ctx, 'api-session/activity', () => { void registry.refreshLocalCatalog() }),
+      on.call(ctx, 'workspace/changed', () => { void registry.refreshLocalCatalog() }),
+    ]
+    return () => { for (const off of disposers) if (typeof off === 'function') off() }
+  }, 'dsh-multi-device: local catalog updates')
+
+  // This isolated compatibility adapter reads only correlation ids and kinds,
+  // never request bodies. If DSH changes the private map shape we publish no
+  // invented requests; remote devices use their supported $events protocol.
+  ctx.effect(() => {
+    const sample = (): void => {
+      let gateway: { pendingRemoteEvents?: unknown } | undefined
+      try { gateway = (ctx as unknown as { get?: (key: string) => unknown }).get?.('typertGateway') as typeof gateway } catch { return }
+      const pending = gateway?.pendingRemoteEvents
+      if (!(pending instanceof Map)) return
+      const requests: Array<{ eventId: string; sessionId: string; kind: 'approval' | 'question' | 'plan-review' }> = []
+      for (const [id, value] of pending) {
+        const frame = (value as { frame?: { event?: string; agentId?: string; request?: { questions?: Array<{ intent?: { kind?: string } }> } } })?.frame
+        if (typeof id !== 'string' || typeof frame?.agentId !== 'string') continue
+        const kind = frame.event === 'approval/request' ? 'approval'
+          : frame.event === 'plan-review/request' || (frame.event === 'user-questions/request' && frame.request?.questions?.length === 1 && frame.request.questions[0]?.intent?.kind === 'plan-review') ? 'plan-review'
+          : frame.event === 'user-questions/request' ? 'question' : undefined
+        if (kind !== undefined) requests.push({ eventId: id, sessionId: frame.agentId, kind })
+      }
+      registry.observeLocalPending(requests)
+    }
+    sample()
+    const timer = setInterval(sample, 1_000)
+    timer.unref?.()
+    return () => clearInterval(timer)
+  }, 'dsh-multi-device: local pending compatibility')
 
   if (features.autoGitAggregate === false) {
     registry.aggregator.setConfig({ autoGitAggregate: false })
