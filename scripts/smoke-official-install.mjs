@@ -23,6 +23,7 @@ const COMMAND_MS = 300_000
 const MAX_OUTPUT = 2 * 1024 * 1024
 const children = new Set()
 let interrupted = false
+const cancellation = new AbortController()
 function ownedSpawn(executable, args, options) {
   check(!interrupted, 'Smoke interrupted; refusing to start another child')
   const child = spawn(executable, args, options)
@@ -53,7 +54,7 @@ export function redact(text) {
 
 export function startupUrl(output) {
   // Only the child's official readiness announcement is authoritative, not arbitrary log URLs.
-  const matches = output.replace(/\u001b\[[0-9;]*m/g, '').matchAll(/^dsh web:\s+(https?:\/\/\S+)\s*$/gm)
+  const matches = output.replace(/\u001b\[[0-9;]*m/g, '').matchAll(/^dsh web:[ \t]+(https?:\/\/\S+)[ \t]*\r?\n/gm)
   for (const match of matches) {
     const url = new URL(match[1])
     check(url.protocol === 'http:' && url.hostname === '127.0.0.1' && url.port !== '' && url.port !== '3080' && url.port !== '0', 'Unsafe child startup origin')
@@ -158,35 +159,36 @@ async function stopChild(child) {
   if (child.smokeClosed) return
   if (child.smokeStopping) return child.smokeStopping
   child.smokeStopping = (async () => {
-  const closed = new Promise(resolve => child.once('close', resolve))
-  if (child.exitCode !== null || child.signalCode !== null || !child.pid) { await closed; return }
-  // Only signal the exact ChildProcess we spawned; never scan ports/process names or process groups.
-  child.kill('SIGTERM')
-  let timer
-  try {
-    await Promise.race([closed, new Promise(resolve => { timer = setTimeout(resolve, 10_000) })])
-    if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await closed }
-  } finally { clearTimeout(timer) }
+    const closed = new Promise(resolve => child.once('close', resolve))
+    if (child.exitCode !== null || child.signalCode !== null || !child.pid) { await closed; return }
+    // Only signal the exact ChildProcess we spawned; never scan ports/process names or process groups.
+    child.kill('SIGTERM')
+    let timer
+    try {
+      await Promise.race([closed, new Promise(resolve => { timer = setTimeout(resolve, 10_000) })])
+      if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await closed }
+    } finally { clearTimeout(timer) }
   })()
   return child.smokeStopping
 }
 
 async function command(executable, args, options, label) {
   const child = ownedSpawn(executable, args, { ...options, stdio: ['ignore', 'pipe', 'pipe'] })
-  let output = ''; let timedOut = false
-  const append = chunk => { output = (output + chunk.toString()).slice(-MAX_OUTPUT) }
-  child.stdout.on('data', append); child.stderr.on('data', append)
+  let stdout = ''; let stderr = ''; let timedOut = false
+  child.stdout.on('data', chunk => { stdout = (stdout + chunk.toString()).slice(-MAX_OUTPUT) })
+  child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-MAX_OUTPUT) })
   const timer = setTimeout(() => { timedOut = true; void stopChild(child) }, COMMAND_MS)
   try {
     const [code, signal] = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', (code, signal) => resolve([code, signal])) })
-    check(!timedOut && code === 0, `${label} failed (${timedOut ? 'timeout' : `exit ${code}, signal ${signal}`}):\n${redact(output)}`)
-    return output
+    check(!timedOut && code === 0, `${label} failed (${timedOut ? 'timeout' : `exit ${code}, signal ${signal}`}):\nstdout:\n${redact(stdout)}\nstderr:\n${redact(stderr)}`)
+    return stdout
   } finally { clearTimeout(timer); await stopChild(child) }
 }
 
 async function request(url, options = {}) {
   // Manual redirects prevent token/cookie forwarding and graph redirects outside our child.
-  return fetch(url, { ...options, redirect: 'manual', signal: AbortSignal.timeout(REQUEST_MS) })
+  check(!interrupted, 'Smoke interrupted')
+  return fetch(url, { ...options, redirect: 'manual', signal: AbortSignal.any([cancellation.signal, AbortSignal.timeout(REQUEST_MS)]) })
 }
 
 class Server {
@@ -283,6 +285,7 @@ class Server {
     const deadline = Date.now() + 20_000
     let last
     do {
+      check(!interrupted, 'Smoke interrupted')
       try { return await this.observe(expected) } catch (error) { last = error }
       await sleep(250)
     } while (Date.now() < deadline)
@@ -344,6 +347,7 @@ export async function main() {
   const server = new Server(cli, options)
   const onSignal = signal => {
     interrupted = true
+    cancellation.abort(new Error('Smoke interrupted'))
     process.exitCode = signal === 'SIGINT' ? 130 : 143
     void Promise.all([...children].map(stopChild))
   }
@@ -418,6 +422,7 @@ export function selfTest() {
   assert.throws(() => extractBoot(`<script>window.__DSH_BOOT__=${JSON.stringify(graph)};evil()</script>`))
   assert.throws(() => extractBoot(`<script>window.__DSH_BOOT__=${JSON.stringify({ ...graph, batches: [] })}</script>`))
   assert.equal(startupUrl('untrusted http://127.0.0.1:9999/?token=x\n'), undefined)
+  assert.equal(startupUrl('dsh web: http://127.0.0.1:12345/?token=secret'), undefined)
   assert.equal(startupUrl('dsh web: http://127.0.0.1:12345/?token=secret\n').port, '12345')
   assert.throws(() => startupUrl('dsh web: http://127.0.0.1:3080/?token=secret\n'))
   assert.throws(() => startupUrl('dsh web: http://evil.test:12345/?token=secret\n'))
