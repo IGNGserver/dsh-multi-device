@@ -190,9 +190,29 @@ export interface DeviceView {
     readonly latencyMs?: number;
     readonly connectedAt?: number;
     readonly lastError?: string;
+    /**
+     * Why this device's summaries were dropped from the merged `session.list`.
+     *
+     * The merged list is one RPC: before failure isolation, a single device that
+     * could not be projected failed the whole call, so the browser kept its old
+     * (local-only) Session store and every remote Workspace expanded empty. The
+     * offending device is reported here instead.
+     */
+    readonly sessionListError?: string;
     readonly reconnectAttempt: number;
+    /**
+     * Sessions the sidebar can actually render. Archived rows (collapsed by
+     * default) and subagent children (nested under their parent) are excluded, so
+     * the tab bar and the sidebar agree; {@link allSessionCount} keeps the raw
+     * catalog total for Diagnostics.
+     */
     readonly sessionCount: number;
+    /** Running Sessions among {@link sessionCount}; the raw total is {@link allRunningSessionCount}. */
     readonly runningSessionCount: number;
+    /** Every catalog row, including archived and subagent Sessions. */
+    readonly allSessionCount?: number;
+    /** Every running catalog row; can exceed {@link runningSessionCount} when a subagent is active. */
+    readonly allRunningSessionCount?: number;
     readonly pendingApprovalCount: number;
     readonly workspaceCount: number;
     /**
@@ -455,6 +475,15 @@ export interface MultiDeviceSnapshot {
     readonly revision: number;
     /** Stable Host identity used to detect self-loops across any hostname/IP. */
     readonly hostId?: string;
+    /**
+     * Random identity of this Host process, regenerated on every start.
+     *
+     * `revision` restarts at 1 when the Host boots, so a browser page that stayed
+     * open across a restart would otherwise drop every new snapshot as "older"
+     * and freeze all counts. A changed epoch tells the Client to accept the new
+     * sequence instead of comparing it with the previous process's numbers.
+     */
+    readonly hostEpoch?: string;
     /**
      * Host-authoritative UI mode. `aggregated` merges remote workspaces and
      * sessions into the local DSH surface; `native` keeps that surface local-only

@@ -90,6 +90,7 @@ import {
 import { nativePaneTarget, resolveSameSiteProxyUrl, shouldShowNativePane } from '../src/client/nativePane.ts'
 import { resolveWindowTitle } from '../src/client/windowTitle.ts'
 import { shouldDecorateProjectRows } from '../src/client/projectBadges.ts'
+import { shouldApplySnapshot } from '../src/client/state.ts'
 import {
   countableUnreadIds,
   unreadCountForDevice,
@@ -140,6 +141,7 @@ import {
 } from '../src/host/tunnel.ts'
 import {
   classifyRemoteProtocol,
+  countVisibleSessions,
   pendingInteractionKind,
   protocolGeneration,
   RemoteDeviceClient,
@@ -240,6 +242,71 @@ describe('0b. Host-owned read state and native page state', () => {
     restored.hydrate(tracker.entriesSnapshot())
     expect(restored.unreadIds()).toEqual(['b'])
     expect(restored.isUnread('a')).toBe(false)
+  })
+
+  it('prunes entries for Sessions that no longer exist and notifies once', () => {
+    const changes: Array<{ id: string; unreadChanged: boolean }> = []
+    const tracker = new ReadStateTracker((sessionId, _state, unreadChanged) => {
+      changes.push({ id: sessionId, unreadChanged })
+    })
+    tracker.markUnread('gone', 100)
+    tracker.markUnread('kept', 101)
+    changes.length = 0
+
+    expect(tracker.prune(sessionId => sessionId === 'kept')).toBe(1)
+    expect(tracker.unreadIds()).toEqual(['kept'])
+    expect(changes).toEqual([{ id: 'gone', unreadChanged: true }])
+
+    // A read-only entry disappears silently: no client-visible change.
+    tracker.markRead('kept', 102)
+    changes.length = 0
+    expect(tracker.prune(() => false)).toBe(0)
+    expect(changes).toEqual([])
+    expect(tracker.unreadIds()).toEqual([])
+  })
+
+  it('clears a whole device in one unread transition', () => {
+    const changes: Array<{ id: string; unreadChanged: boolean }> = []
+    const tracker = new ReadStateTracker((sessionId, _state, unreadChanged) => {
+      changes.push({ id: sessionId, unreadChanged })
+    })
+    tracker.markUnread('a', 1)
+    tracker.markUnread('b', 2)
+    tracker.markUnread('c', 3)
+    changes.length = 0
+
+    expect(tracker.markManyRead(sessionId => sessionId !== 'c')).toEqual(['a', 'b'])
+    expect(tracker.unreadIds()).toEqual(['c'])
+    expect(changes).toHaveLength(1)
+    expect(changes[0]?.unreadChanged).toBe(true)
+  })
+
+  it('counts only unread Sessions a catalog can still resolve', () => {
+    const known = encodeRemoteSessionId(DeviceId('dev-a'), 's1')
+    const gone = encodeRemoteSessionId(DeviceId('dev-a'), 's2')
+    const local = 'local-1'
+    const unread = countableUnreadIds(
+      [known, gone, local],
+      [],
+      [],
+      sessionId => sessionId === known,
+    )
+    expect([...unread]).toEqual([known, local])
+  })
+
+  it('splits visible Session counts from the raw catalog totals', () => {
+    const summaries = [
+      { sessionId: 's-main', updatedAt: 1, agentAvailable: true, running: true, blank: false },
+      { sessionId: 's-idle', updatedAt: 2, agentAvailable: true, running: false, blank: false },
+      { sessionId: 's-sub', updatedAt: 3, agentAvailable: true, running: true, blank: false, origin: 'subagent' as const },
+      { sessionId: 's-arch', updatedAt: 4, agentAvailable: true, running: true, blank: false },
+    ]
+    expect(countVisibleSessions(summaries, ['s-arch'])).toEqual({
+      sessionCount: 2,
+      runningSessionCount: 1,
+      allSessionCount: 4,
+      allRunningSessionCount: 3,
+    })
   })
 
   it('overlays every Host-owned Session ID and keeps a stable snapshot identity', () => {
@@ -359,10 +426,72 @@ describe('0b. Host-owned read state and native page state', () => {
     }
     expect(saved.readState?.entries?.[remoteId]?.unread).toBe(false)
   })
+
+  it('clears one device at a time and forgets deleted local Sessions', () => {
+    const dir = makeTempDir('dsh-md-read-device-')
+    const dataFile = join(dir, 'devices.json')
+    const secretsFile = join(dir, 'secrets.json')
+    const remoteA1 = encodeRemoteSessionId(DeviceId('dev-a'), 's1')
+    const remoteA2 = encodeRemoteSessionId(DeviceId('dev-a'), 's2')
+    const remoteB = encodeRemoteSessionId(DeviceId('dev-b'), 's3')
+    writeFileSync(dataFile, JSON.stringify({
+      version: 1,
+      devices: [
+        { id: 'dev-a', name: 'A', enabled: false, transport: { kind: 'direct', baseUrl: 'http://127.0.0.1:9' }, auth: { mode: 'none' } },
+        { id: 'dev-b', name: 'B', enabled: false, transport: { kind: 'direct', baseUrl: 'http://127.0.0.1:9' }, auth: { mode: 'none' } },
+      ],
+      aggregation: { autoGitAggregate: true },
+      readState: {
+        entries: {
+          [remoteA1]: { unread: true, at: 100 },
+          [remoteA2]: { unread: true, at: 101 },
+          [remoteB]: { unread: true, at: 102 },
+          'local-1': { unread: true, at: 103 },
+        },
+      },
+    }))
+    const registry = new DeviceRegistry(
+      dataFile,
+      secretsFile,
+      { localPort: () => 3080, localWorkspaces: () => [], localSessionUpdatedAt: () => new Map() },
+      { allowDirectTransport: true, enableNativeProxy: false },
+    )
+    try {
+      expect(typeof registry.snapshot().hostEpoch).toBe('string')
+      expect(registry.markDeviceRead(DeviceId('dev-a'))).toBe(2)
+      expect(registry.snapshot().unreadSessionIds).toEqual(['local-1', remoteB])
+      expect(registry.markDeviceRead(LOCAL_DEVICE_ID)).toBe(1)
+      expect(registry.snapshot().unreadSessionIds).toEqual([remoteB])
+
+      // Remote ids are owned by the device stream, not the local removal hook.
+      registry.forgetLocalSession(remoteB)
+      expect(registry.snapshot().unreadSessionIds).toEqual([remoteB])
+
+      registry.observeLocalSessionStatus('local-2', true)
+      registry.observeLocalSessionStatus('local-2', false)
+      expect(registry.snapshot().unreadSessionIds).toEqual(['local-2', remoteB])
+      registry.forgetLocalSession('local-2')
+      expect(registry.snapshot().unreadSessionIds).toEqual([remoteB])
+    } finally {
+      registry.dispose()
+    }
+  })
 })
 
-describe('0c. Optional cross-Host read state file', () => {
-  it('merges Host sections by newest timestamp and lets a tie read win', () => {
+describe('0f. Snapshot acceptance across Host restarts', () => {
+  it('accepts a lower revision when the Host epoch changed', () => {
+    const current = { revision: 900, hostEpoch: 'epoch-a' }
+    expect(shouldApplySnapshot(current, { revision: 901, hostEpoch: 'epoch-a' })).toBe(true)
+    expect(shouldApplySnapshot(current, { revision: 900, hostEpoch: 'epoch-a' })).toBe(false)
+    expect(shouldApplySnapshot(current, { revision: 899, hostEpoch: 'epoch-a' })).toBe(false)
+    expect(shouldApplySnapshot(current, { revision: 1, hostEpoch: 'epoch-b' })).toBe(true)
+    // Older Hosts omit the epoch: the plain revision rule still applies.
+    expect(shouldApplySnapshot(current, { revision: 899 })).toBe(false)
+    expect(shouldApplySnapshot(current, { revision: 900 }, true)).toBe(true)
+  })
+})
+
+describe('0c. Optional cross-Host read state file', () => {  it('merges Host sections by newest timestamp and lets a tie read win', () => {
     const local = {
       s1: { unread: true, at: 10 },
       s2: { unread: true, at: 20 },
@@ -4943,6 +5072,8 @@ describe('0c. Native bar geometry & diagnostics', () => {
         reconnectAttempt: 0,
         sessionCount: 148,
         runningSessionCount: 3,
+        allSessionCount: 200,
+        allRunningSessionCount: 5,
         pendingApprovalCount: 1,
         workspaceCount: 10,
       },
@@ -4959,6 +5090,8 @@ describe('0c. Native bar geometry & diagnostics', () => {
         reconnectAttempt: 2,
         sessionCount: 22,
         runningSessionCount: 0,
+        allSessionCount: 30,
+        allRunningSessionCount: 0,
         pendingApprovalCount: 0,
         workspaceCount: 2,
         catalogStale: true,
@@ -4994,7 +5127,10 @@ describe('0c. Native bar geometry & diagnostics', () => {
       logicalWorkspaces: 2,
       physicalWorkspaces: 3,
       runningSessions: 3,
+      allRunningSessions: 5,
     })
+    expect(diagnostics.devices[0]?.allSessionCount).toBe(200)
+    expect(diagnostics.devices[1]?.allRunningSessionCount).toBe(0)
     expect(diagnostics.devices[1]?.lastError).toContain('Connection refused')
     expect(diagnostics.devices[0]?.catalogStale).toBe(false)
     expect(diagnostics.client?.barClampedWidth).toBe(1240)

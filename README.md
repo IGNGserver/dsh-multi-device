@@ -28,7 +28,7 @@
   - **新建会话可选设备**：空白会话的工作区行右侧新增设备芯片，可从该仓库的成员设备中选择承接设备；选中后会把偏好落盘并在目标设备重建空白会话。多设备工作区还会提供「在其它设备新建…」，按「设备 → 已有工作区」直接创建会话；原生窗格顶部的设备芯片保留同一入口。
   - **离线可用**：每台设备上次成功同步的会话/工作区会持久化，Host 重启后离线设备仍出现在侧栏（标注上次同步时间）；打开离线会话时最多等待 60 秒自动重连，期间显示本地化横幅与「立即重连」，连接恢复后自动加载。原生窗格在离线时显示设备状态页和重连按钮；发送、审批、归档等操作在离线时快速失败并给出可操作提示，而不是原始 503。
 - **原生模式（Native Mode）与页面保活（Keep-Alive）**：
-  - 顶栏始终显示 `[本机][设备1][设备2]…` 设备选项卡，最右侧固定一个 **「聚合模式」** 按钮，一键切回聚合模式（Host 侧同步恢复远端工作区/会话合并）。每个标签在设备名后显示该设备的未读数（绿色「N 未读」）与运行中数量；**本机** 标签同样显示本地未读数。
+  - 顶栏始终显示 `[本机][设备1][设备2]…` 设备选项卡，最右侧固定一个 **「聚合模式」** 按钮，一键切回聚合模式（Host 侧同步恢复远端工作区/会话合并）。每个标签在设备名后显示该设备的未读数（绿色「N 未读」）与运行中数量；**本机** 标签同样显示本地未读数。运行中数量只统计侧栏真正能看到的会话（子代理与已归档会话不计入），Host 每 45 秒用远端 `session/list` 对账一次，漏掉的状态帧不会让数字永久卡住；设置页设备行上的「清除未读」按钮可在页面读状态无法回传时手动清空该设备的未读。
   - 最左侧 **本机** 标签显示正常的本地 DSH 页面，并且 Host 侧会按模式过滤：此标签下只显示本地工作区、会话与模型，不混入任何远端聚合数据，也不显示聚合模式的项目设备徽标。它不是 iframe，也不会丢失本地页面状态。
   - 其余设备标签在顶栏下方加载对应远端设备完整的 DSH Web 页面，保留远端自己的 DSH 版本、主题、已装插件与界面效果。
   - 每个设备拥有独立的本地环回反向代理（自动完成 `Host`/`Origin` 归一化、Cookie 注入、WebSocket `/api/remote.mux` 升级转发、一次性代理 token 与 `frame-ancestors` 本地白名单），同时适配 Electron Desktop `<webview>`（`dshDesktop.browser`）与标准 `<iframe>`。
@@ -115,7 +115,7 @@ dsh plugin --profile desktop add file:$(pwd)
 
 - `displayMode`：Host 权威的显示模式，是排查这类问题的第一现场；
 - `hostStatus`：聚合网关与原生代理是否就绪，失败时会带 `aggregatedGatewayError`；
-- 每台设备：`state`、`protocolVersion`、`remoteDshVersion`、`catalogStale`、`sessionCount`、`runningSessionCount`、`workspaceCount`、`lastError`；
+- 每台设备：`state`、`protocolVersion`、`remoteDshVersion`、`catalogStale`、`sessionCount` / `runningSessionCount`（侧栏可见会话）、`allSessionCount` / `allRunningSessionCount`（含子代理与已归档的原始目录数）、`workspaceCount`、`lastError`；
 - `client`：浏览器视口尺寸、原生标签栏的原始宽度与被裁后的宽度、是否已进入紧凑布局 —— 用来解释控件为什么被挤到屏幕外。
 
 提交问题时附上这份 JSON，就不必靠截图猜界面状态了。

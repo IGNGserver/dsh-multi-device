@@ -86,6 +86,47 @@ export interface RemoteWorkspaceItem {
   readonly updatedAt: string
 }
 
+/** Device counts split by what the sidebar can actually render. */
+export interface VisibleSessionCounts {
+  /** Sessions with a sidebar row: not archived and not a subagent child. */
+  readonly sessionCount: number
+  /** Running Sessions among {@link sessionCount}. */
+  readonly runningSessionCount: number
+  /** Every catalog row, including archived and subagent Sessions. */
+  readonly allSessionCount: number
+  /** Every running catalog row. */
+  readonly allRunningSessionCount: number
+}
+
+/**
+ * Count a device's Sessions the way the tab bar must show them.
+ *
+ * Archived rows are collapsed by default and subagent children render under
+ * their parent's catalog, so counting them would claim running work the sidebar
+ * cannot show. The raw totals stay available for Diagnostics.
+ */
+export function countVisibleSessions(
+  summaries: readonly RemoteSessionSummary[],
+  archivedSessionIds: readonly string[],
+): VisibleSessionCounts {
+  const archived = new Set(archivedSessionIds)
+  let sessionCount = 0
+  let runningSessionCount = 0
+  let allRunningSessionCount = 0
+  for (const summary of summaries) {
+    if (summary.running) allRunningSessionCount += 1
+    if (summary.origin === 'subagent' || archived.has(summary.sessionId)) continue
+    sessionCount += 1
+    if (summary.running) runningSessionCount += 1
+  }
+  return {
+    sessionCount,
+    runningSessionCount,
+    allSessionCount: summaries.length,
+    allRunningSessionCount,
+  }
+}
+
 export interface RemotePendingInteraction {
   readonly eventId: string
   readonly namespacedEventId: string
@@ -211,7 +252,11 @@ export class RemoteDeviceClient {
   toView(): DeviceView {
     // A hydrated catalog is not a live claim: never show a spinner for a
     // Session whose Host has not been reachable since this process started.
-    const runningCount = this.sessionSummaries().filter(s => s.running).length
+    const summaries = this.sessionSummaries()
+    // Count what the sidebar can actually render. Archived rows are collapsed
+    // by default and subagent children sit under their parent, so counting
+    // them would make the tab bar claim running work the user cannot see.
+    const counts = countVisibleSessions(summaries, this.archivedSessionIds)
     return {
       id: this.config.id,
       name: this.config.name,
@@ -252,8 +297,10 @@ export class RemoteDeviceClient {
       ...(this.connectedAt !== undefined ? { connectedAt: this.connectedAt } : {}),
       ...(this.lastError !== undefined ? { lastError: this.lastError } : {}),
       reconnectAttempt: this.reconnectAttempt,
-      sessionCount: this.summaries.length,
-      runningSessionCount: runningCount,
+      sessionCount: counts.sessionCount,
+      runningSessionCount: counts.runningSessionCount,
+      allSessionCount: counts.allSessionCount,
+      allRunningSessionCount: counts.allRunningSessionCount,
       pendingApprovalCount: this.catalogStale ? 0 : this.pendingInteractions.size,
       workspaceCount: this.workspaces.length,
       ...(this.lastSyncedAt !== undefined ? { lastSyncedAt: this.lastSyncedAt } : {}),

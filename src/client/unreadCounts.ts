@@ -25,18 +25,28 @@ import {
  *
  * Missing Host fields (an older Host) mean "none hidden", which keeps the
  * counters working while the plugin is upgraded on only one side.
+ *
+ * @param existsRemoteSession - optional catalog membership check for remote
+ *   IDs. A deleted Session that still sits in a persisted read set can never be
+ *   opened again, so counting it would pin the badge; local IDs are owned by
+ *   the Host's own DSH instance and are not checked here.
  */
 export function countableUnreadIds(
   unreadSessionIds: readonly string[],
   archivedSessionIds?: readonly string[],
   subagentSessionIds?: readonly string[],
+  existsRemoteSession?: (sessionId: string) => boolean,
 ): Set<string> {
   const hidden = new Set<string>()
   for (const sessionId of archivedSessionIds ?? []) hidden.add(sessionId)
   for (const sessionId of subagentSessionIds ?? []) hidden.add(sessionId)
   const unread = new Set<string>()
   for (const sessionId of unreadSessionIds) {
-    if (!hidden.has(sessionId)) unread.add(sessionId)
+    if (hidden.has(sessionId)) continue
+    if (existsRemoteSession !== undefined && decodeSessionId(sessionId).isRemote) {
+      if (!existsRemoteSession(sessionId)) continue
+    }
+    unread.add(sessionId)
   }
   return unread
 }

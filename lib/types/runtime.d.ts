@@ -56,7 +56,7 @@ export declare function connectionRequestRejection(ctx: Context, headers: Incomi
  */
 export declare function admitMultiDeviceRequest(ctx: Context, req: IncomingMessage): boolean;
 export interface ControlPlaneRequest {
-    readonly action: 'snapshot' | 'diagnostics' | 'setDisplayMode' | 'upsertDevice' | 'removeDevice' | 'reconnectDevice' | 'authenticateDevice' | 'testDevice' | 'listSshKeys' | 'startSessionOnDevice' | 'createSession' | 'createRemoteWorkspace' | 'updateAggregationConfig' | 'upsertManualRule' | 'removeManualRule' | 'setMemberExcluded' | 'setPreferredDevice' | 'setCustomTitle' | 'startGitMatch' | 'cancelGitMatch' | 'setActiveSession' | 'markSessionRead' | 'setUiPreferences';
+    readonly action: 'snapshot' | 'diagnostics' | 'setDisplayMode' | 'upsertDevice' | 'removeDevice' | 'reconnectDevice' | 'authenticateDevice' | 'testDevice' | 'listSshKeys' | 'startSessionOnDevice' | 'createSession' | 'createRemoteWorkspace' | 'updateAggregationConfig' | 'upsertManualRule' | 'removeManualRule' | 'setMemberExcluded' | 'setPreferredDevice' | 'setCustomTitle' | 'startGitMatch' | 'cancelGitMatch' | 'setActiveSession' | 'markSessionRead' | 'markDeviceRead' | 'setUiPreferences';
     readonly payload?: Record<string, unknown>;
 }
 /**
@@ -76,6 +76,25 @@ export interface DiagnosticsClientReport {
     readonly barClampedWidth?: number;
     readonly compact?: boolean;
     readonly userAgent?: string;
+    /**
+     * Whether the cached Workspace projection resolves inside the browser's
+     * Session store. `missing > 0` is the mechanical cause of a "Workspace
+     * expands but shows no conversations" report.
+     */
+    readonly sessionLink?: DiagnosticsSessionLink;
+}
+/** Session-store link evidence volunteered by the browser. */
+export interface DiagnosticsSessionLink {
+    readonly referenced: number;
+    readonly missing: number;
+    readonly byDevice: Readonly<Record<string, number>>;
+    readonly sample: readonly string[];
+    readonly connectedDevices: number;
+    readonly attempts: number;
+    readonly resolved: boolean;
+    readonly refreshedAt?: number;
+    /** Last `sessions.refresh()` failure, when the Host could not answer. */
+    readonly lastError?: string;
 }
 /** One device row of the Diagnostics report. */
 export interface DiagnosticsDevice {
@@ -90,11 +109,16 @@ export interface DiagnosticsDevice {
     readonly authState?: DeviceView['authState'];
     readonly sessionCount: number;
     readonly runningSessionCount: number;
+    /** Raw catalog totals, including archived and subagent Sessions. */
+    readonly allSessionCount: number;
+    readonly allRunningSessionCount: number;
     readonly workspaceCount: number;
     readonly pendingApprovalCount: number;
     readonly catalogStale: boolean;
     readonly lastSyncedAt?: number;
     readonly lastError?: string;
+    /** Why this device was dropped from the merged `session.list`, if it was. */
+    readonly sessionListError?: string;
 }
 /** Aggregated snapshot of everything a support report needs to explain a UI state. */
 export interface MultiDeviceDiagnostics {
@@ -110,12 +134,16 @@ export interface MultiDeviceDiagnostics {
         readonly logicalWorkspaces: number;
         readonly physicalWorkspaces: number;
         readonly runningSessions: number;
+        /** Raw catalog total, including archived and subagent Sessions. */
+        readonly allRunningSessions: number;
     };
     readonly devices: readonly DiagnosticsDevice[];
     readonly client?: DiagnosticsClientReport;
 }
 /** Parse the Client's Diagnostics payload; unknown fields are dropped. */
 export declare function readDiagnosticsClientReport(raw: unknown): DiagnosticsClientReport | undefined;
+/** Parse the browser's Session-store link evidence; unknown fields are dropped. */
+export declare function readDiagnosticsSessionLink(raw: unknown): DiagnosticsSessionLink | undefined;
 /**
  * Build the Diagnostics report from one Host snapshot.
  *

@@ -89,6 +89,30 @@ export class ReadStateTracker {
   }
 
   /**
+   * Mark every matching Session read in one transition.
+   *
+   * The explicit "clear unread" action must not emit one snapshot revision per
+   * reminder: read state is published as a set, so one unread change is enough
+   * for every client and framed page to pick up the new state.
+   *
+   * @param predicate - return true to mark the Session read.
+   * @returns the IDs whose unread marker was removed.
+   */
+  markManyRead(predicate: (sessionId: string) => boolean, now = Date.now()): string[] {
+    const changed: string[] = []
+    for (const [sessionId, state] of this.entries) {
+      if (!state.unread || !predicate(sessionId)) continue
+      this.entries.set(sessionId, { unread: false, at: now })
+      changed.push(sessionId)
+    }
+    const first = changed[0]
+    if (first !== undefined) {
+      this.onChange?.(first, { unread: false, at: now }, true)
+    }
+    return changed
+  }
+
+  /**
    * Merge one entry from another Host's shared file. The newest timestamp wins;
    * a read at the same instant wins over unread so a cleared dot cannot come
    * back merely because two Hosts replayed the same completion.
@@ -162,10 +186,40 @@ export class ReadStateTracker {
     this.trim()
   }
 
+  /** Forget one Session; a removed unread marker notifies like a read. */
   remove(sessionId: string): void {
-    const existed = this.entries.delete(sessionId)
+    if (sessionId === '') return
+    const previous = this.entries.get(sessionId)
     this.running.delete(sessionId)
-    if (existed) this.onChange?.(sessionId, { unread: false, at: Date.now() }, true)
+    if (previous === undefined) return
+    this.entries.delete(sessionId)
+    if (previous.unread) this.onChange?.(sessionId, { unread: false, at: Date.now() }, true)
+  }
+
+  /**
+   * Drop entries the caller can no longer observe.
+   *
+   * A deleted Session, a device that was removed, or a catalog that no longer
+   * lists an id must not leave a badge behind: the unread count is a projection
+   * of this set, and an orphaned entry can never be read again. Pruned unread
+   * markers notify like a read so every client and framed page stops counting
+   * them in the same revision.
+   *
+   * @param predicate - return true to keep the entry.
+   * @returns number of unread markers that were dropped.
+   */
+  prune(predicate: (sessionId: string, state: SessionReadState) => boolean): number {
+    let removedUnread = 0
+    for (const [sessionId, state] of [...this.entries]) {
+      if (predicate(sessionId, state)) continue
+      this.entries.delete(sessionId)
+      this.running.delete(sessionId)
+      if (state.unread) {
+        removedUnread += 1
+        this.onChange?.(sessionId, { unread: false, at: Date.now() }, true)
+      }
+    }
+    return removedUnread
   }
 
   /** Drop entries whose Session no longer belongs to a configured device. */

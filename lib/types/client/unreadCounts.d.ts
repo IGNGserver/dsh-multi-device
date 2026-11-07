@@ -20,8 +20,13 @@ import { type DeviceId, type LogicalWorkspaceView } from '../contract.ts';
  *
  * Missing Host fields (an older Host) mean "none hidden", which keeps the
  * counters working while the plugin is upgraded on only one side.
+ *
+ * @param existsRemoteSession - optional catalog membership check for remote
+ *   IDs. A deleted Session that still sits in a persisted read set can never be
+ *   opened again, so counting it would pin the badge; local IDs are owned by
+ *   the Host's own DSH instance and are not checked here.
  */
-export declare function countableUnreadIds(unreadSessionIds: readonly string[], archivedSessionIds?: readonly string[], subagentSessionIds?: readonly string[]): Set<string>;
+export declare function countableUnreadIds(unreadSessionIds: readonly string[], archivedSessionIds?: readonly string[], subagentSessionIds?: readonly string[], existsRemoteSession?: (sessionId: string) => boolean): Set<string>;
 /**
  * Count unread Sessions owned by one device.
  *

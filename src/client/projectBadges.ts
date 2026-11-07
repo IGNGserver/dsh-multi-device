@@ -142,11 +142,13 @@ function syncRows(t: Translate): void {
   const snapshot = state.snapshot
   const byId = new Map(snapshot.logicalWorkspaces.map(workspace => [workspace.logicalWorkspaceId, workspace]))
   // DSH renders archived rows only in the archived view and nests subagent
-  // children under their parent, so both stay out of a row's visible count.
+  // children under their parent, so both stay out of a row's visible count;
+  // a remote ID missing from every catalog is a deleted Session.
   const unread = countableUnreadIds(
     snapshot.unreadSessionIds,
     snapshot.archivedSessionIds,
     snapshot.subagentSessionIds,
+    sessionId => snapshot.sessionOrigins[sessionId] !== undefined,
   )
   const unreadByWorkspace = workspaceUnreadCounts(snapshot.logicalWorkspaces, unread)
 

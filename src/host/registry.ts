@@ -157,6 +157,16 @@ const DEFAULT_UI_PREFERENCES: MultiDeviceUiPreferences = {
   crossHostReadState: false,
 }
 
+/**
+ * How often a connected device re-reads `session/list`.
+ *
+ * `api-session/status` is a single frame: one lost across a stream gap would
+ * leave a finished Session "running" forever. The list is the authoritative
+ * repair path (`reconcileSessionSummaries` → `reconcileRunningForDevice`), so a
+ * low-frequency refresh bounds how long a stale count can survive.
+ */
+const RUNNING_RECONCILE_INTERVAL_MS = 45_000
+
 /** Structural equality for a bounded workspace fold map. */
 function sameGroupState(
   left: Readonly<Record<string, boolean>>,
@@ -279,6 +289,11 @@ export class DeviceRegistry {
   })
   /** Stable Host identity (used by the optional cross-Host state file). */
   private hostId: string = randomUUID()
+  /** Identity of this Host process; clients reset their revision when it changes. */
+  private readonly hostEpoch: string = randomUUID()
+  /** Low-frequency catalog refresh that heals lost running-status frames. */
+  private runningReconcileTimer: ReturnType<typeof setInterval> | undefined
+  private readonly catalogRefreshInFlight = new Set<DeviceId>()
   private uiPreferences: MultiDeviceUiPreferences = { ...DEFAULT_UI_PREFERENCES }
   private catalogPersistTimer: ReturnType<typeof setTimeout> | undefined
   private persistTimer: ReturnType<typeof setTimeout> | undefined
@@ -453,6 +468,23 @@ export class DeviceRegistry {
     return this.readTracker.markRead(sessionId)
   }
 
+  /**
+   * Clear every unread marker owned by one device (本机 included).
+   *
+   * A safety valve for the one read signal the Host cannot observe — a Remote
+   * page viewed outside this plugin, or a native page whose injected bridge
+   * never became ready. Without it those reminders could only be cleared by
+   * deleting the Session.
+   *
+   * @returns how many markers were actually removed.
+   */
+  markDeviceRead(deviceId: DeviceId): number {
+    const changed = this.readTracker.markManyRead(
+      sessionId => decodeSessionId(sessionId).deviceId === deviceId,
+    )
+    return changed.length
+  }
+
   /** Local DSH session status, observed through this Host's own event bus. */
   observeLocalSessionStatus(sessionId: string, running: boolean): void {
     if (typeof sessionId !== 'string' || sessionId === '') return
@@ -460,6 +492,16 @@ export class DeviceRegistry {
     if (!running && sessionId === this.activeSessionId) {
       this.readTracker.markRead(sessionId)
     }
+  }
+
+  /**
+   * Forget Host-owned read state for a local Session DSH deleted. Remote
+   * removals arrive as `api-session/removed` on the device stream.
+   */
+  forgetLocalSession(sessionId: string): void {
+    if (sessionId === '') return
+    if (decodeSessionId(sessionId).isRemote) return
+    this.readTracker.remove(sessionId)
   }
 
   /** Persisted fold state for one device; the bridge injection uses this map. */
@@ -502,10 +544,8 @@ export class DeviceRegistry {
   }
 
   /**
-   * Reconcile running flags from the authoritative list. DSH can miss a
-   * `api-session/status` frame across a stream gap; the list refresh still
-   * carries the final flag, and a live `true -> false` there is a completion
-   * for the same reason a stream event is.
+   * True when the conversation the user is actually looking at owns this
+   * Session. A completion then counts as read instead of leaving a reminder.
    */
   private isCurrentlyViewedSession(sessionId: string): boolean {
     if (sessionId === this.activeSessionId) return true
@@ -521,6 +561,12 @@ export class DeviceRegistry {
     return this.displayMode === 'aggregated' && this.paneEmbeddedDeviceId === decoded.deviceId
   }
 
+  /**
+   * Reconcile running flags from the authoritative list. DSH can miss a
+   * `api-session/status` frame across a stream gap; the list refresh still
+   * carries the final flag, and a live `true -> false` there is a completion
+   * for the same reason a stream event is.
+   */
   private reconcileRunningForDevice(deviceId: DeviceId): void {
     const client = this.clients.get(deviceId)
     if (client === undefined || !client.isConnected()) return
@@ -532,6 +578,59 @@ export class DeviceRegistry {
         this.readTracker.markRead(namespacedId)
       }
     }
+    this.pruneDeviceReadState(deviceId)
+  }
+
+  /**
+   * Drop Host-owned read state for Sessions the device's live catalog no
+   * longer lists. A deleted Session can never be read again, so keeping its
+   * unread marker would pin the tab badge forever.
+   */
+  private pruneDeviceReadState(deviceId: DeviceId): void {
+    const client = this.clients.get(deviceId)
+    if (client === undefined || !client.isConnected()) return
+    if (client.toView().catalogStale === true) return
+    const known = new Set(
+      client.sessionSummaries().map(summary => encodeRemoteSessionId(deviceId, summary.sessionId)),
+    )
+    this.readTracker.prune(sessionId => {
+      const decoded = decodeSessionId(sessionId)
+      if (!decoded.isRemote) return true
+      if (decoded.deviceId !== deviceId) return true
+      return known.has(sessionId)
+    })
+  }
+
+  /**
+   * Refresh every connected device's catalog on a slow timer.
+   *
+   * `session/list` is the authoritative repair path for a missed
+   * `api-session/status` frame: `reconcileSessionSummaries` emits the changed
+   * rows and `reconcileRunningForDevice` turns them into running transitions
+   * (and prunes read state for Sessions that disappeared).
+   */
+  private startRunningReconcile(): void {
+    if (this.runningReconcileTimer !== undefined) return
+    const timer = setInterval(() => {
+      this.refreshConnectedCatalogs()
+    }, RUNNING_RECONCILE_INTERVAL_MS)
+    timer.unref?.()
+    this.runningReconcileTimer = timer
+  }
+
+  private refreshConnectedCatalogs(): void {
+    for (const client of this.clients.values()) {
+      if (!client.isConnected()) continue
+      if (this.catalogRefreshInFlight.has(client.id)) continue
+      this.catalogRefreshInFlight.add(client.id)
+      void client.refreshSessionCatalog()
+        .catch(() => {
+          // The next tick retries; a transient Remote failure is not fatal.
+        })
+        .finally(() => {
+          this.catalogRefreshInFlight.delete(client.id)
+        })
+    }
   }
 
   /** Observe one remote event before it is forwarded to the local mirror. */
@@ -542,7 +641,15 @@ export class DeviceRegistry {
       | { type: 'waterfall'; event: string; eventId: string; agentId: string; request: Record<string, unknown> }
       | { type: 'cancel'; eventId: string },
   ): void {
-    if (frame.type !== 'emit' || frame.event !== 'api-session/status') return
+    if (frame.type !== 'emit') return
+    // A deleted Session must not keep an unread marker: nothing can ever open
+    // it again, so the badge would stay pinned until the Host restarted.
+    if (frame.event === 'api-session/removed') {
+      const [removedId] = frame.args
+      if (typeof removedId === 'string') this.readTracker.remove(removedId)
+      return
+    }
+    if (frame.event !== 'api-session/status') return
     const [sessionId, running] = frame.args
     if (typeof sessionId !== 'string' || typeof running !== 'boolean') return
     // `markDisconnected()` deliberately emits `running:false` so local
@@ -669,8 +776,17 @@ export class DeviceRegistry {
 
   private mergeSharedReadDocument(deviceId: DeviceId, doc: ReturnType<typeof parseSharedReadDocument>): void {
     if (doc === undefined) return
+    // A peer Host may still carry an entry for a Session this device deleted.
+    // Merging it would resurrect the reminder on every 30s pull (and the next
+    // push would write it back), so drop unknown ids while the live catalog is
+    // authoritative. Offline devices keep the entries until they reconnect.
+    const client = this.clients.get(deviceId)
+    const known = client !== undefined && client.isConnected() && client.toView().catalogStale !== true
+      ? new Set(client.sessionSummaries().map(summary => summary.sessionId))
+      : undefined
     for (const section of Object.values(doc.hosts)) {
       for (const [rawSessionId, entry] of Object.entries(section.sessions)) {
+        if (known !== undefined && !known.has(rawSessionId)) continue
         this.readTracker.mergeEntry(encodeRemoteSessionId(deviceId, rawSessionId), entry)
       }
     }
@@ -924,6 +1040,7 @@ export class DeviceRegistry {
     for (const config of this.configs.values()) {
       void this.mountClient(config)
     }
+    this.startRunningReconcile()
   }
 
   dispose(): void {
@@ -950,6 +1067,11 @@ export class DeviceRegistry {
       clearInterval(this.sharedReadStateTimer)
       this.sharedReadStateTimer = undefined
     }
+    if (this.runningReconcileTimer !== undefined) {
+      clearInterval(this.runningReconcileTimer)
+      this.runningReconcileTimer = undefined
+    }
+    this.catalogRefreshInFlight.clear()
     for (const timer of this.sharedReadStatePushTimers.values()) clearTimeout(timer)
     this.sharedReadStatePushTimers.clear()
     this.nativeProxyManager.dispose()
@@ -1662,6 +1784,7 @@ export class DeviceRegistry {
     return {
       revision: this.revision,
       hostId: this.hostId,
+      hostEpoch: this.hostEpoch,
       displayMode: this.displayMode,
       hostStatus: {
         aggregatedGatewayActive: this.aggregatedGatewayActive,

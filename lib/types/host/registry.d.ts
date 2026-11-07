@@ -74,6 +74,8 @@ export declare class DeviceRegistry {
     private readonly authStates;
     /** Durable mirror of each device catalog (see {@link DeviceCatalogCache}). */
     private readonly catalogs;
+    /** Why one device's summaries could not be projected into the merged `session.list`. */
+    private readonly sessionListErrors;
     /** Injected Native Pane bridge lifecycle, last page selection/title, and visibility per device. */
     private readonly nativePanes;
     /** Previous connection state per device, so workspace rows are recomputed on a real transition. */
@@ -84,6 +86,11 @@ export declare class DeviceRegistry {
     private readonly readTracker;
     /** Stable Host identity (used by the optional cross-Host state file). */
     private hostId;
+    /** Identity of this Host process; clients reset their revision when it changes. */
+    private readonly hostEpoch;
+    /** Low-frequency catalog refresh that heals lost running-status frames. */
+    private runningReconcileTimer;
+    private readonly catalogRefreshInFlight;
     private uiPreferences;
     private catalogPersistTimer;
     private persistTimer;
@@ -122,6 +129,17 @@ export declare class DeviceRegistry {
     }) => void): () => void;
     onWorkspacesChanged(listener: () => void): () => void;
     /**
+     * Record that one device's summaries could not be projected into the merged
+     * `session.list`. The rest of the list still ships, and the failing device
+     * says why in the sidebar/diagnostics instead of silently blanking every
+     * remote Workspace.
+     */
+    noteSessionListError(deviceId: DeviceId, message: string): void;
+    /** Clear the recorded projection failure after a successful merge. */
+    clearSessionListError(deviceId: DeviceId): void;
+    /** Last recorded projection failure for one device, if any. */
+    sessionListErrorFor(deviceId: DeviceId): string | undefined;
+    /**
      * Subscribe to model-catalog scope changes. The Host re-emits DSH's
      * `llm/adapters-updated` event so the browser's shared model picker drops its
      * cached catalog and asks `session/modelCatalog` again.
@@ -139,8 +157,24 @@ export declare class DeviceRegistry {
      * from a redundant read touch.
      */
     markSessionRead(sessionId: string): boolean;
+    /**
+     * Clear every unread marker owned by one device (本机 included).
+     *
+     * A safety valve for the one read signal the Host cannot observe — a Remote
+     * page viewed outside this plugin, or a native page whose injected bridge
+     * never became ready. Without it those reminders could only be cleared by
+     * deleting the Session.
+     *
+     * @returns how many markers were actually removed.
+     */
+    markDeviceRead(deviceId: DeviceId): number;
     /** Local DSH session status, observed through this Host's own event bus. */
     observeLocalSessionStatus(sessionId: string, running: boolean): void;
+    /**
+     * Forget Host-owned read state for a local Session DSH deleted. Remote
+     * removals arrive as `api-session/removed` on the device stream.
+     */
+    forgetLocalSession(sessionId: string): void;
     /** Persisted fold state for one device; the bridge injection uses this map. */
     nativeGroupState(deviceId: DeviceId): Readonly<Record<string, boolean>> | undefined;
     /**
@@ -154,13 +188,33 @@ export declare class DeviceRegistry {
     /** Push the new unread set to the owning device's framed page. */
     private publishUnreadState;
     /**
+     * True when the conversation the user is actually looking at owns this
+     * Session. A completion then counts as read instead of leaving a reminder.
+     */
+    private isCurrentlyViewedSession;
+    /**
      * Reconcile running flags from the authoritative list. DSH can miss a
      * `api-session/status` frame across a stream gap; the list refresh still
      * carries the final flag, and a live `true -> false` there is a completion
      * for the same reason a stream event is.
      */
-    private isCurrentlyViewedSession;
     private reconcileRunningForDevice;
+    /**
+     * Drop Host-owned read state for Sessions the device's live catalog no
+     * longer lists. A deleted Session can never be read again, so keeping its
+     * unread marker would pin the tab badge forever.
+     */
+    private pruneDeviceReadState;
+    /**
+     * Refresh every connected device's catalog on a slow timer.
+     *
+     * `session/list` is the authoritative repair path for a missed
+     * `api-session/status` frame: `reconcileSessionSummaries` emits the changed
+     * rows and `reconcileRunningForDevice` turns them into running transitions
+     * (and prunes read state for Sessions that disappeared).
+     */
+    private startRunningReconcile;
+    private refreshConnectedCatalogs;
     /** Observe one remote event before it is forwarded to the local mirror. */
     private observeRemoteFrame;
     /**
