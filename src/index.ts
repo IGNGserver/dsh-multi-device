@@ -15,6 +15,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import { appendFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -80,12 +81,48 @@ export const Config = z.object({
     .default({}),
 })
 
+/**
+ * Append one activation record to `$DSH_HOME/dsh-multi-device-boot.log`.
+ *
+ * DSH's desktop host reports a failed plugin entry as the bare state word
+ * (`dsh-multi-device: failed`) and drops the underlying error, which makes a
+ * boot regression impossible to diagnose from the crash log. The host owns the
+ * real exception, so it records it here before rethrowing.
+ */
+function appendBootLog(dshHome: string, line: string): void {
+  try {
+    appendFileSync(join(dshHome, 'dsh-multi-device-boot.log'), `${new Date().toISOString()} ${line}\n`)
+  } catch {
+    // Boot logging must never change the outcome of activation.
+  }
+}
+
 export function apply(ctx: Context, config?: Config): void {
   const resolved = Config(config ?? {})
   const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
   const dataFile = resolved.dataFile ?? join(dshHome, 'plugins', 'dsh-multi-device.json')
   const secretsFile = resolved.secretsFile ?? join(dshHome, 'plugins', 'dsh-multi-device-secrets.json')
 
+  appendBootLog(dshHome, 'apply:enter')
+  try {
+    applyHost(ctx, resolved, dshHome, dataFile, secretsFile)
+    appendBootLog(dshHome, 'apply:ok')
+  } catch (error) {
+    appendBootLog(
+      dshHome,
+      `apply:failed ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+    )
+    throw error
+  }
+}
+
+function applyHost(
+  ctx: Context,
+  resolved: Config,
+  dshHome: string,
+  dataFile: string,
+  secretsFile: string,
+): void {
   const features = resolved.features ?? {}
   const enableAggregated = features.aggregatedMode !== false
   const enableNative = features.nativeMode !== false
