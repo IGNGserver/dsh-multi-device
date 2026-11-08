@@ -1,13 +1,60 @@
-/** Explainable attention badges: IDs and categories only, never messages. */
+/**
+ * Attention chips for one device: a compact count per category, and the
+ * Sessions behind it in the official DSH menu.
+ *
+ * Design notes (why this is not a `<details>` any more):
+ * - The surface is the Host's own `Menu`/`MenuGroup`/`MenuItemButton` pair, so
+ *   elevation, radius, translucent material, hover row, focus ring, arrow-key
+ *   navigation and outside-pointer dismissal are the ones DSH uses everywhere
+ *   else. The hand-rolled popover it replaces painted with `var(--surface,
+ *   Canvas)` — variables DSH does not define — so it fell back to browser
+ *   default colours and read as a foreign widget.
+ * - The chip prints a number, not a sentence: `●23` instead of `23 未读`. The
+ *   category is carried by the icon, the tooltip and the group heading, which
+ *   keeps three device tabs on one row instead of pushing the trailing cluster
+ *   into the scrolled-away part of the strip.
+ * - A row names the conversation (`title`), then `workspace · device · age`.
+ *   The raw Session ID stays available as the row's tooltip and is the visible
+ *   text only when neither the Host catalog nor the live store knows a title.
+ * - Clicking a row opens that conversation through the Host
+ *   (`openCatalogSession` handles local and remote owners); in Native Mode the
+ *   owning device tab is selected first, so the frame that receives the
+ *   navigation is the one the user ends up looking at.
+ *
+ * @module dsh-multi-device/client/AttentionDetails
+ */
+import {
+  IconGlobeOutlineRegular,
+  IconWarningOutlineRegular,
+  Menu,
+  MenuGroup,
+  MenuItemButton,
+  StateDot,
+  Toast,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 import React, { useState } from 'react'
 import type { DeviceAttentionView } from '../attention.ts'
-import { copyText } from './clipboard.ts'
+import {
+  decodeSessionId,
+  LOCAL_DEVICE_ID,
+  type DeviceConnectionState,
+  type MultiDeviceSnapshot,
+} from '../contract.ts'
+import {
+  resolveAttentionSessions,
+  type AttentionSessionRow,
+} from './attentionSessions.ts'
+import { getClientServices } from './clientServices.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
+import { clientStore, deviceStateToDotState, useMultiDeviceState } from './state.ts'
+
+export type AttentionCategory = 'pending' | 'running' | 'unread'
 
 export interface AttentionDetailsProps {
   readonly view?: DeviceAttentionView
   readonly deviceName: string
   readonly t: (key: MultiDeviceLocaleKey) => string
+  /** Dense rows for the Native Mode tab bar (same surface, tighter list). */
   readonly nativeBar?: boolean
   /** Compatibility with Hosts predating the shared projection. */
   readonly fallback?: {
@@ -20,7 +67,7 @@ export interface AttentionDetailsProps {
 
 /** Exported for category/label tests without loading any native primitives. */
 export function attentionGroups(view: DeviceAttentionView): {
-  category: 'pending' | 'running' | 'unread'; ids: readonly string[]; count: number
+  category: AttentionCategory; ids: readonly string[]; count: number
 }[] {
   return [
     { category: 'pending', ids: view.pendingSessionIds, count: view.pendingSessionIds.length },
@@ -29,55 +76,190 @@ export function attentionGroups(view: DeviceAttentionView): {
   ]
 }
 
-/** Localized here because the delegated surface intentionally does not edit locale contracts. */
+/**
+ * Category words shared with the DOM-injected project badges (`projectBadges`
+ * cannot render React). Every word comes from the locale namespace, so the two
+ * surfaces cannot drift apart, and neither repeats the old hard-coded pair of
+ * dictionaries keyed off the Chinese label for This Device.
+ */
 export function attentionLabels(t: (key: MultiDeviceLocaleKey) => string) {
-  return t('nativeLocalTab') === '本机'
-    ? { pending: '需回复', running: '运行中', unread: '未读', stale: '同步中 / 数据过期', last: '上次已知', members: '会话成员', unavailable: '旧版 Host 未提供成员 ID', copy: '复制 ID', copied: '已复制', failed: '复制失败，请手动选择 ID', requests: '待处理请求' }
-    : { pending: 'needs reply', running: 'running', unread: 'unread', stale: 'Syncing / stale data', last: 'Last known', members: 'Session members', unavailable: 'Older Host did not provide member IDs', copy: 'Copy ID', copied: 'Copied', failed: 'Copy failed; select the ID manually', requests: 'pending requests' }
+  return {
+    pending: t('attentionPending'),
+    running: t('attentionRunning'),
+    unread: t('attentionUnread'),
+    stale: t('attentionStale'),
+    last: t('attentionLastKnown'),
+    members: t('attentionMembers'),
+    unavailable: t('attentionUnavailable'),
+    copy: t('attentionCopy'),
+    copied: t('attentionCopied'),
+    failed: t('attentionCopyFailed'),
+    requests: t('attentionRequests'),
+  }
 }
 
-export function AttentionDetails({ view, deviceName, t, nativeBar = false, fallback }: AttentionDetailsProps): React.ReactElement {
-  const [copyResult, setCopyResult] = useState<string | undefined>()
+const CATEGORY_COUNT_KEY: Record<AttentionCategory, MultiDeviceLocaleKey> = {
+  pending: 'pendingCount',
+  running: 'runningCount',
+  unread: 'unreadCount',
+}
+
+function deviceStateOf(snapshot: MultiDeviceSnapshot, deviceId: string): DeviceConnectionState {
+  if (deviceId === LOCAL_DEVICE_ID) return 'connected'
+  return snapshot.devices.find(device => device.id === deviceId)?.state ?? 'error'
+}
+
+function categoryIcon(category: AttentionCategory): React.ReactElement {
+  if (category === 'pending') return <IconWarningOutlineRegular size={12} />
+  return <StateDot state={category === 'running' ? 'ongoing' : 'done'} size={8} />
+}
+
+export function AttentionDetails({
+  view,
+  deviceName,
+  t,
+  nativeBar = false,
+  fallback,
+}: AttentionDetailsProps): React.ReactElement {
+  const state = useMultiDeviceState()
+  const snapshot = state.snapshot
   const words = attentionLabels(t)
+  const [openCategory, setOpenCategory] = useState<AttentionCategory | null>(null)
+  const [failure, setFailure] = useState<{ seq: number; message: string } | null>(null)
+
   const fresh = view?.fresh ?? fallback?.fresh ?? false
-  const groups = view !== undefined ? attentionGroups(view) : [
-    { category: 'pending' as const, ids: [], count: fallback?.pendingCount ?? 0 },
-    { category: 'running' as const, ids: [], count: fallback?.runningCount ?? 0 },
-    { category: 'unread' as const, ids: fallback?.unreadSessionIds ?? [], count: fallback?.unreadSessionIds.length ?? 0 },
-  ]
+  const groups = view !== undefined
+    ? attentionGroups(view)
+    : [
+        { category: 'pending' as const, ids: [] as readonly string[], count: fallback?.pendingCount ?? 0 },
+        { category: 'running' as const, ids: [] as readonly string[], count: fallback?.runningCount ?? 0 },
+        { category: 'unread' as const, ids: fallback?.unreadSessionIds ?? [], count: fallback?.unreadSessionIds.length ?? 0 },
+      ]
+  const visible = groups.filter(group => group.count > 0)
+
+  const fail = (detail: string | undefined): void => {
+    setFailure({
+      seq: Date.now(),
+      message: detail === undefined || detail === ''
+        ? t('attentionOpenFailed')
+        : `${t('attentionOpenFailed')}: ${detail}`,
+    })
+  }
+
+  /**
+   * Open one row. The owning tab has to be visible first: the Host publishes
+   * the navigation to that device's framed page, and a frame the user cannot
+   * see would swallow the result.
+   */
+  const openRow = async (row: AttentionSessionRow): Promise<void> => {
+    setOpenCategory(null)
+    const decoded = decodeSessionId(row.sessionId)
+    try {
+      if (!decoded.isRemote) {
+        clientStore.selectLocalNativeTab()
+        const workspace = getClientServices().uiWorkspace
+        if (workspace === undefined || typeof workspace.openSession !== 'function') {
+          fail(undefined)
+          return
+        }
+        workspace.openSession(row.sessionId)
+        await clientStore.setActiveSession(row.sessionId)
+        return
+      }
+      const switched = await clientStore.selectNativeDevice(decoded.deviceId)
+      if (!switched.ok) {
+        fail(switched.error)
+        return
+      }
+      // Publishing the selection is what makes the Host tell that device's
+      // framed page to open the conversation.
+      await clientStore.setActiveSession(row.sessionId)
+    } catch (error) {
+      fail(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  const renderRows = (ids: readonly string[]): React.ReactNode => {
+    if (ids.length === 0) {
+      // Legacy Host: the projection knew a count but never sent member IDs.
+      return <div className="dsh-md-attention-note">{words.unavailable}</div>
+    }
+    const rows = resolveAttentionSessions(ids, snapshot, {
+      localDeviceName: t('nativeLocalTab'),
+      owningDeviceName: deviceName,
+    })
+    return rows.map(row => {
+      const meta = [row.cwd, row.deviceName]
+        .filter((part): part is string => part !== undefined && part !== '')
+      const minimal = row.title === ''
+      return (
+        <MenuItemButton
+          key={row.sessionId}
+          icon={row.deviceId === LOCAL_DEVICE_ID
+            ? <IconGlobeOutlineRegular size={12} />
+            : <StateDot state={deviceStateToDotState(deviceStateOf(snapshot, row.deviceId))} size={8} />}
+          onSelect={() => { void openRow(row) }}
+        >
+          <span className="dsh-md-attention-row" title={`${row.sessionId}\n${t('attentionOpenHint')}`}>
+            <span className={`dsh-md-attention-row-title${minimal ? ' isId' : ''}`}>
+              {minimal ? row.rawSessionId : row.title}
+            </span>
+            {meta.length > 0 && <span className="dsh-md-attention-row-meta">{meta.join(' · ')}</span>}
+          </span>
+        </MenuItemButton>
+      )
+    })
+  }
+
   return (
-    <span className="dsh-md-attention" role="group" aria-label={`${deviceName} ${words.members}`} style={{ display: 'inline-flex', gap: 5, alignItems: 'center' }}>
-      {!fresh && <span role="status" className="dsh-md-muted" data-attention-stale="true">{words.stale}</span>}
-      {groups.filter(group => group.count > 0).map(group => {
-        const label = `${fresh ? '' : `${words.last}: `}${group.count} ${words[group.category]}`
+    <span className="dsh-md-attention" role="group" aria-label={`${deviceName} ${words.members}`}>
+      {!fresh && (
+        <span role="status" className="dsh-md-attention-stale" data-attention-stale="true">{words.stale}</span>
+      )}
+      {visible.map(group => {
+        const label = t(CATEGORY_COUNT_KEY[group.category]).replace('{count}', String(group.count))
+        const chip = (
+          <button
+            type="button"
+            className="dsh-md-attention-chip"
+            data-category={group.category}
+            data-open={openCategory === group.category ? 'true' : 'false'}
+            data-attention-category={group.category}
+            aria-haspopup="menu"
+            aria-expanded={openCategory === group.category}
+            aria-label={`${deviceName}: ${label}; ${words.members}`}
+            title={label}
+            onClick={() => {
+              if (openCategory === group.category) {
+                setOpenCategory(null)
+                return
+              }
+              setOpenCategory(group.category)
+            }}
+          >
+            {categoryIcon(group.category)}
+            <span className="dsh-md-attention-count">{group.count}</span>
+          </button>
+        )
         return (
-          <details key={group.category} data-attention-category={group.category} style={{ position: 'relative' }}>
-            <summary className={group.category === 'pending' ? 'dsh-md-pending' : 'dsh-md-session-count-badge'} aria-label={`${deviceName}: ${label}; ${words.members}`} style={{ cursor: 'pointer', whiteSpace: 'nowrap' }}>{label}</summary>
-            <div role="region" aria-label={`${deviceName}: ${words[group.category]} ${words.members}`} style={{
-              position: nativeBar ? 'fixed' : 'absolute', zIndex: 1000,
-              top: nativeBar ? 'calc(var(--dsh-md-native-bar-top, 0px) + var(--dsh-md-native-bar-height, 42px))' : '100%',
-              left: nativeBar ? 8 : 0, minWidth: 240, maxWidth: 'min(520px, calc(100vw - 24px))',
-              maxHeight: 'min(420px, 60vh)', overflow: 'auto', padding: 12,
-              background: 'var(--surface, Canvas)', color: 'var(--text-primary, CanvasText)',
-              border: '1px solid var(--border, GrayText)', borderRadius: 8, boxShadow: '0 4px 18px #0003',
-            }}>
-              <strong>{deviceName}: {label}</strong>
-              {group.category === 'pending' && view !== undefined && <div>{fresh ? '' : `${words.last}: `}{view.pendingRequestCount} {words.requests}</div>}
-              {group.ids.length === 0 ? <p>{words.unavailable}</p> : (
-                <ul style={{ margin: '8px 0', paddingLeft: 18 }}>
-                  {group.ids.map(id => <li key={id} data-attention-member={id} style={{ marginBottom: 6 }}>
-                    <span>{words[group.category]}: </span><code style={{ overflowWrap: 'anywhere', userSelect: 'text' }}>{id}</code>{' '}
-                    <button type="button" aria-label={`${words.copy}: ${id}`} onClick={() => {
-                      void copyText(id).then(ok => setCopyResult(ok ? words.copied : words.failed))
-                    }}>{words.copy}</button>
-                  </li>)}
-                </ul>
-              )}
-              {copyResult !== undefined && <span role="status">{copyResult}</span>}
-            </div>
-          </details>
+          <Menu
+            key={group.category}
+            open={openCategory === group.category}
+            anchor={chip}
+            onClose={() => setOpenCategory(current => (current === group.category ? null : current))}
+            portal
+            side="bottom"
+            align="start"
+            dense={nativeBar}
+            listClassName="dsh-md-attention-menu"
+          >
+            <MenuGroup label={label}>{renderRows(group.ids)}</MenuGroup>
+          </Menu>
         )
       })}
+      {failure !== null && (
+        <Toast key={failure.seq} text={failure.message} tone="error" onDone={() => setFailure(null)} />
+      )}
     </span>
   )
 }

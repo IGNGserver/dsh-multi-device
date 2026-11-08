@@ -157,6 +157,8 @@ export declare class NativeProxyManager {
     proxyUrl(deviceId: DeviceId): string | undefined;
     /** Current injected-bridge lifecycle for one device. */
     bridgeSnapshot(deviceId: DeviceId, clientId?: string): NativeBridgeSnapshot;
+    /** Navigate the framed page to one raw remote Session (queued until ready). */
+    openSession(deviceId: DeviceId, sessionId: string, clientId?: string, requestSeq?: number): boolean;
     /** Ask the framed page to refresh its own Session catalog. */
     requestRefresh(deviceId: DeviceId): boolean;
     /** Push Host-owned fold state to the device's framed page(s). */

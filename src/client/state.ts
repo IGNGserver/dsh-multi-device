@@ -21,7 +21,7 @@ import {
   type UpsertDeviceInput,
 } from '../contract.ts'
 import type { ControlPlaneRequest, DiagnosticsClientReport, MultiDeviceDiagnostics } from '../runtime.ts'
-import { readNativeBarMetrics } from './barMetrics.ts'
+import { readNativeBarMetrics, readNativeBarObstruction } from './barMetrics.ts'
 
 /** Per-browser memory of the device tab. */
 const ACTIVE_NATIVE_DEVICE_KEY = 'dsh-multi-device.active-native-device'
@@ -868,6 +868,7 @@ export class MultiDeviceClientStore {
 export function collectClientDiagnosticsReport(): DiagnosticsClientReport | undefined {
   if (typeof window === 'undefined') return undefined
   const bar = readNativeBarMetrics()
+  const obstruction = readNativeBarObstruction()
   return {
     innerWidth: window.innerWidth,
     innerHeight: window.innerHeight,
@@ -880,6 +881,7 @@ export function collectClientDiagnosticsReport(): DiagnosticsClientReport | unde
           compact: bar.compact,
         }
       : {}),
+    ...(obstruction !== undefined ? { barObstruction: obstruction.detail } : {}),
     ...(typeof navigator !== 'undefined' && typeof navigator.userAgent === 'string'
       ? { userAgent: navigator.userAgent }
       : {}),

@@ -256,6 +256,15 @@ export declare class DeviceRegistry {
     /** Start/stop the 30s remote scan when the preference changes. */
     private syncSharedReadStateTimer;
     private schedulePersist;
+    /**
+     * Push the Client's selected remote Session into that device's framed page.
+     *
+     * Opening a Session from an attention menu switches to the device tab and
+     * must also take the framed page to that conversation; `NativeDeviceProxy`
+     * remembers the command and replays it when the frame's bridge connects, so
+     * publishing before the tab is mounted is safe.
+     */
+    private publishNativePaneSession;
     private paneKey;
     private setNativePaneState;
     private setNativePaneSelection;

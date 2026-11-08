@@ -1412,6 +1412,14 @@ export class NativeProxyManager {
     return this.proxies.get(deviceId)?.bridgeSnapshot(clientId) ?? { state: 'idle' }
   }
 
+  /** Navigate the framed page to one raw remote Session (queued until ready). */
+  openSession(deviceId: DeviceId, sessionId: string, clientId = LEGACY_CLIENT_ID, requestSeq?: number): boolean {
+    const proxy = this.proxies.get(deviceId)
+    if (proxy === undefined) return false
+    proxy.openSession(sessionId, clientId, requestSeq)
+    return true
+  }
+
   /** Ask the framed page to refresh its own Session catalog. */
   requestRefresh(deviceId: DeviceId): boolean {
     const proxy = this.proxies.get(deviceId)

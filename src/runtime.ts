@@ -247,11 +247,16 @@ export interface DiagnosticsClientReport {
   readonly devicePixelRatio?: number
   /** Frame-relative left edge of the Native Mode tab bar. */
   readonly barLeft?: number
-  /** Frame-relative width before clamping. */
+  /** Width the Host frame gives the bar — the width the bar must take. */
   readonly barWidth?: number
   /** Width the bar actually occupies inside the viewport. */
   readonly barClampedWidth?: number
   readonly compact?: boolean
+  /**
+   * What the bar's occlusion probe found on top of the trailing controls, if
+   * anything: `tag#id.class z=N`. Absent while the switch is clickable.
+   */
+  readonly barObstruction?: string
   readonly userAgent?: string
 }
 
@@ -323,6 +328,9 @@ export function readDiagnosticsClientReport(raw: unknown): DiagnosticsClientRepo
       ? { barClampedWidth: optionalNumber(record.barClampedWidth) }
       : {}),
     ...(typeof record.compact === 'boolean' ? { compact: record.compact } : {}),
+    ...(optionalString(record.barObstruction) !== undefined
+      ? { barObstruction: optionalString(record.barObstruction) }
+      : {}),
     ...(optionalString(record.userAgent) !== undefined ? { userAgent: optionalString(record.userAgent) } : {}),
   }
   return Object.keys(report).length === 0 ? undefined : report

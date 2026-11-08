@@ -7,16 +7,30 @@ import {
   type DeviceAttentionView, type SessionAttentionFact,
 } from '../src/attention.ts'
 import { AttentionDetails, attentionGroups } from '../src/client/AttentionDetails.tsx'
+import { resolveAttentionSessions } from '../src/client/attentionSessions.ts'
+import { en, zh, type MultiDeviceLocaleKey } from '../src/client/locales.ts'
+import type { MultiDeviceSnapshot } from '../src/contract.ts'
+
+const dict = (table: Record<string, string>) =>
+  (key: MultiDeviceLocaleKey): string => table[key] ?? key
+const tZh = dict(zh as unknown as Record<string, string>)
+const tEn = dict(en as unknown as Record<string, string>)
+
+/** Snapshot with nothing in it: the joins degrade to IDs and counts. */
+const emptySnapshot = {
+  logicalWorkspaces: [], sessionOrigins: {}, devices: [],
+} as unknown as MultiDeviceSnapshot
 
 const fact = (sessionId: string, extra: Partial<SessionAttentionFact> = {}): SessionAttentionFact => ({
   sessionId, deviceId: 'local', running: false, ...extra,
 })
 const project = (facts: SessionAttentionFact[], unread: string[] = [], currentSessionId?: string) =>
   selectDeviceAttention(facts, new Set(unread), { currentSessionId }).local
-const t = (key: string): string => key === 'nativeLocalTab' ? '本机' : key
 
 function markup(view: DeviceAttentionView): string {
-  return renderToStaticMarkup(React.createElement(AttentionDetails, { view, deviceName: '本机', t }))
+  return renderToStaticMarkup(React.createElement(AttentionDetails, {
+    view, deviceName: '本机', t: tZh, fallback: undefined,
+  }))
 }
 
 describe('pure attention projection', () => {
@@ -120,54 +134,61 @@ describe('pure attention projection', () => {
   })
 })
 
-describe('explainable attention UI', () => {
-  it('labels every category, lists member IDs and exposes ID copy, not message contents', () => {
+describe('native attention chips', () => {
+  it('renders one compact chip per non-empty category and keeps the wording out of the layout', () => {
     const view = project([
       fact('request-id', { pendingInteractionKind: 'question', pendingRequestCount: 3 }),
       fact('running-id', { running: true }), fact('unread-id'),
     ], ['unread-id'])
     const html = markup(view)
     expect(attentionGroups(view).map(g => [g.category, g.count])).toEqual([['pending', 1], ['running', 1], ['unread', 1]])
-    for (const label of ['1 需回复', '1 运行中', '1 未读', '3', '待处理请求']) expect(html).toContain(label)
-    for (const id of ['request-id', 'running-id', 'unread-id']) {
-      expect(html).toContain(`data-attention-member="${id}"`)
-      expect(html).toContain(`复制 ID: ${id}`)
+    for (const category of ['pending', 'running', 'unread']) {
+      expect(html).toContain(`data-attention-category="${category}"`)
     }
-    expect(html.match(/<summary/g)).toHaveLength(3)
-    expect(html).not.toContain('message')
+    // The chip is a number; the sentence lives in the accessible name only.
+    expect(html).toContain('aria-label="本机: 1 待确认; 会话成员"')
+    expect(html).toContain('aria-label="本机: 1 运行中; 会话成员"')
+    expect(html).toContain('aria-label="本机: 1 未读; 会话成员"')
+    expect(html).not.toContain('>1 未读<')
+    expect(html).not.toContain('>1 运行中<')
+    // No browser-default popover markup survives.
+    expect(html).not.toContain('<summary')
+    expect(html).not.toContain('<details')
+    expect(html).not.toContain('Canvas')
   })
 
-  it('marks stale empty data explicitly instead of displaying authoritative zero', () => {
+  it('marks stale empty data explicitly instead of displaying an authoritative zero', () => {
     const html = markup(emptyDeviceAttention(false))
     expect(html).toContain('同步中 / 数据过期')
-    expect(html).not.toContain('0 未读')
-    expect(html).not.toContain('0 运行中')
+    expect(html).not.toContain('data-attention-category')
   })
 
-  it('marks retained nonzero data as last known and never truncates expanded members', () => {
-    const view = selectDeviceAttention(Array.from({ length: 73 }, (_, i) => fact(`session-${i}`)), new Set(Array.from({ length: 73 }, (_, i) => `session-${i}`)), { fresh: false }).local
-    const html = markup(view)
-    expect(html).toContain('上次已知: 73 未读')
-    expect(html.match(/data-attention-member=/g)).toHaveLength(73)
+  it('keeps every member of a large category in the joined rows', () => {
+    const ids = Array.from({ length: 73 }, (_, index) => `session-${index}`)
+    const view = selectDeviceAttention(ids.map(id => fact(id)), new Set(ids), { fresh: false }).local
+    const rows = resolveAttentionSessions(view.unreadSessionIds, emptySnapshot, { localDeviceName: '本机', now: 0 })
+    expect(rows).toHaveLength(73)
+    // The projection orders IDs lexicographically; nothing may be dropped.
+    expect(new Set(rows.map(row => row.sessionId))).toEqual(new Set(ids))
   })
 
-  it('supports older Host counts but explicitly explains absent membership', () => {
+  it('supports older Host counts but explains the absent membership', () => {
     const html = renderToStaticMarkup(React.createElement(AttentionDetails, {
-      deviceName: 'Remote', t,
+      deviceName: 'Remote',
+      t: tZh,
       fallback: { runningCount: 2, pendingCount: 1, unreadSessionIds: ['legacy-unread'], fresh: false },
     }))
-    expect(html).toContain('旧版 Host 未提供成员 ID')
-    expect(html).toContain('legacy-unread')
+    // Counts still render as chips; the missing member IDs are explained in the menu.
+    expect(html).toContain('data-attention-category="pending"')
+    expect(html).toContain('data-attention-category="running"')
     expect(html).toContain('同步中 / 数据过期')
   })
 
-  it('localizes English labels and qualifies retained request totals', () => {
+  it('localizes English labels instead of branching on the Chinese tab name', () => {
     const view = selectDeviceAttention([fact('request', { pendingRequestCount: 2 })], new Set(), { fresh: false }).local
-    const html = renderToStaticMarkup(React.createElement(AttentionDetails, { view, deviceName: 'Local', t: key => key === 'nativeLocalTab' ? 'This Device' : key }))
+    const html = renderToStaticMarkup(React.createElement(AttentionDetails, { view, deviceName: 'Local', t: tEn }))
     expect(html).toContain('Syncing / stale data')
-    expect(html).toContain('Last known: 1 needs reply')
-    expect(html).toContain('Last known: 2 pending requests')
-    expect(html).toContain('Copy ID: request')
+    expect(html).toContain('aria-label="Local: 1 needs reply; Session members"')
     expect(html).not.toContain('需回复')
   })
 

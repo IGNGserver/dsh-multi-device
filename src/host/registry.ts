@@ -950,6 +950,19 @@ export class DeviceRegistry {
     this.persistTimer = timer
   }
 
+  /**
+   * Push the Client's selected remote Session into that device's framed page.
+   *
+   * Opening a Session from an attention menu switches to the device tab and
+   * must also take the framed page to that conversation; `NativeDeviceProxy`
+   * remembers the command and replays it when the frame's bridge connects, so
+   * publishing before the tab is mounted is safe.
+   */
+  private publishNativePaneSession(deviceId: DeviceId, clientId = 'legacy'): void {
+    const decoded = decodeSessionId(this.activeSessions.get(clientId)?.sessionId ?? '')
+    if (!decoded.isRemote || decoded.deviceId !== deviceId) return
+    this.nativeProxyManager.openSession(deviceId, decoded.rawSessionId, clientId, this.activeSessions.get(clientId)?.seq)
+  }
   private paneKey(deviceId: DeviceId, clientId = 'legacy'): string {
     return `${clientId}\0${deviceId}`
   }

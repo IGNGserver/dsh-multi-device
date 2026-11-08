@@ -561,18 +561,23 @@ html[data-platform='darwin'] .dsh-md-frame-native.dsh-md-frame-desktop {
 }
 
 .dsh-md-native-bar {
-  position: absolute;
+  /* Portalled onto <body>: the Host's shell overlay is a stacking context
+   * (z-index 20) sitting under its own in-frame chrome (leading seat 25,
+   * sidebar toggle 30), and the frame clips overflow. Fixed positioning plus
+   * this z-index keeps the Settings entry above every in-frame seat while
+   * staying below Tooltip/HoverCard (100), Modal (1000) and Menu (1100).
+   * left/top/width are written inline from the measured Host frame; the
+   * values here are only the pre-measurement fallback. */
+  position: fixed;
   top: var(--dsh-md-native-bar-top);
   left: 0;
-  right: 0;
-  /* A Host frame wider than the viewport (embedded remote page) must never
-   * push the right-aligned mode switch off-screen: clamp to the viewport and
-   * let the component measure the exact remainder. */
-  width: min(100%, 100vw);
+  right: auto;
+  bottom: auto;
+  width: 100vw;
   max-width: 100vw;
   height: var(--dsh-md-native-bar-height);
   box-sizing: border-box;
-  z-index: 2;
+  z-index: 60;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -600,6 +605,25 @@ html[data-platform='darwin'] .dsh-md-frame-native.dsh-md-frame-desktop {
 
 .dsh-md-native-bar[data-compact='true'] .dsh-md-native-tabs {
   gap: 4px;
+}
+
+/*
+ * Everything right of the tab strip. flex:none + margin-inline-start:auto
+ * keeps the Settings entry out of the strip's scroll area: the tabs shrink
+ * and scroll, this cluster never does.
+ */
+.dsh-md-native-bar-trailing {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  margin-inline-start: auto;
+}
+
+.dsh-md-native-mode-switch-wrap {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
 }
 
 /* Diagnostics card in Settings → Multi-Device */
@@ -641,12 +665,20 @@ html[data-platform='darwin'] .dsh-md-frame-native.dsh-md-frame-desktop {
   word-break: break-word;
 }
 
+/*
+ * The bar is portalled onto <body>, where the Host forces
+ * body > :not(#root) { -webkit-app-region: no-drag }. !important restores the
+ * drag affordance this strip provides in place of the macOS title bar; the
+ * buttons inside opt back out below.
+ */
+html[data-platform='darwin'] body > .dsh-md-native-bar,
 html[data-platform='darwin'] .dsh-md-native-bar {
-  -webkit-app-region: drag;
+  -webkit-app-region: drag !important;
 }
 
 .dsh-md-native-bar button,
-.dsh-md-native-bar [role='button'] {
+.dsh-md-native-bar [role='button'],
+.dsh-md-native-bar [role='tab'] {
   -webkit-app-region: no-drag;
 }
 
@@ -654,9 +686,11 @@ html[data-platform='darwin'] .dsh-md-native-bar {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex: 1;
+  /* Shrinks and scrolls; the trailing cluster beside it never does. */
+  flex: 1 1 auto;
   min-width: 0;
   overflow-x: auto;
+  overscroll-behavior-x: contain;
   scrollbar-width: none;
 }
 
@@ -690,6 +724,133 @@ html[data-platform='darwin'] .dsh-md-native-bar {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+}
+
+/* Long device names must not push the trailing cluster off the bar. */
+.dsh-md-pill-name {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Latency is a diagnostic, not a label: keep it out of the resting layout and
+ * reveal it when the pointer or keyboard focus is on that tab. */
+.dsh-md-pill-latency {
+  display: none;
+}
+
+.dsh-md-native-tab-item:hover .dsh-md-pill-latency,
+.dsh-md-native-tab-item:focus-within .dsh-md-pill-latency {
+  display: inline;
+}
+
+/*
+ * Attention chips: a number with a category icon, never a sentence. Three
+ * device tabs (name + 3 counts each) have to fit beside the trailing cluster,
+ * and a "23 未读" chip per category did not.
+ */
+.dsh-md-attention {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Menu wraps its anchor in a span; keep the chip inline with the pill. */
+.dsh-md-attention > span {
+  display: inline-flex;
+  align-items: center;
+}
+
+.dsh-md-attention-stale {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.dsh-md-attention-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  box-sizing: border-box;
+  height: 20px;
+  padding: 0 6px;
+  border: 0.5px solid transparent;
+  border-radius: 999px;
+  background: var(--dsw-alias-interactive-bg-selected, rgba(103, 158, 254, 0.12));
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 11px;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  transition: border-color 0.12s ease, background-color 0.12s ease;
+}
+
+.dsh-md-attention-chip:hover {
+  border-color: var(--dsw-alias-border-l2);
+}
+
+.dsh-md-attention-chip[data-open='true'] {
+  border-color: var(--dsw-alias-border-l1);
+}
+
+.dsh-md-attention-chip:focus-visible {
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 1px;
+}
+
+.dsh-md-attention-chip[data-category='pending'] {
+  color: var(--dsw-alias-state-warn-primary);
+  background: transparent;
+}
+
+.dsh-md-attention-count {
+  font-weight: 500;
+}
+
+/* The menu surface and rows are rendered by the Host's Menu; only the two
+ * text lines inside a row are ours. */
+.dsh-md-attention-menu {
+  min-width: 260px;
+  max-width: min(420px, calc(100vw - 24px));
+}
+
+.dsh-md-attention-row {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.dsh-md-attention-row-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsh-md-attention-row-title.isId {
+  color: var(--dsw-alias-label-tertiary);
+  font-family: var(--dsw-font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+}
+
+.dsh-md-attention-row-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.dsh-md-attention-note {
+  padding: 6px 8px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .dsh-md-muted {
