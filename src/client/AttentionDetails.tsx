@@ -1,6 +1,6 @@
 /**
- * Attention chips for one device: a compact count per category, and the
- * Sessions behind it in the official DSH menu.
+ * Attention status for one device: one capsule of colour-coded counts, and the
+ * Sessions behind each count in the official DSH menu.
  *
  * Design notes (why this is not a `<details>` any more):
  * - The surface is the Host's own `Menu`/`MenuGroup`/`MenuItemButton` pair, so
@@ -9,20 +9,25 @@
  *   else. The hand-rolled popover it replaces painted with `var(--surface,
  *   Canvas)` — variables DSH does not define — so it fell back to browser
  *   default colours and read as a foreign widget.
- * - The chip prints a number, not a sentence: `●23` instead of `23 未读`. The
- *   category is carried by the icon, the tooltip and the group heading, which
- *   keeps three device tabs on one row instead of pushing the trailing cluster
- *   into the scrolled-away part of the strip.
+ * - One capsule per device, numbers only: the colour is the category (amber
+ *   needs-reply, blue running, green finished-unread) and the words live in
+ *   `title`, `aria-label` and the menu heading. A category with no members
+ *   renders no segment at all, so a quiet device carries no reservation — the
+ *   three fixed 30px slots plus a separate freshness marker this replaces are
+ *   what made the strip read as a row of scattered dots.
  * - A row names the conversation (`title`), then `workspace · device · age`.
  *   Titles come from the browser's own Session store for local sessions and
  *   from the Host's `sessionTitles` projection for remote ones; the raw Session
  *   ID stays available as the row's tooltip and is the visible text only when
  *   neither source knows a title.
- * - Every category owns a fixed-width slot, and the freshness marker is a fixed
- *   dot rather than a text chip. The strip is a shared row of device tabs, so a
- *   chip that appeared whenever a Session started used to shift every tab to its
- *   right; the reserved slots make the strip's geometry independent of attention
- *   state.
+ * - Every count keeps its urgency position (needs-reply → running →
+ *   finished-unread) and a two-digit cell, so colour is never the only channel
+ *   and a count going 9 → 10 cannot nudge the tab beside it. Only a category
+ *   appearing or disappearing moves anything, which is a real change.
+ * - Cached or partial data is stated by the capsule itself: it dims and turns
+ *   dashed, and with nothing to count it collapses to an empty dashed ring. The
+ *   amber dot this replaces used the very same colour as "needs reply", so a
+ *   stale device read as a second pending reminder.
  * - Clicking a row opens that conversation: a local Session through DSH's own
  *   `uiWorkspace.openSession`, a remote one by selecting its device tab and
  *   publishing the selection so the Host tells that framed page to open it.
@@ -31,7 +36,6 @@
  */
 import {
   IconGlobeOutlineRegular,
-  IconWarningOutlineRegular,
   Menu,
   MenuGroup,
   MenuItemButton,
@@ -116,9 +120,45 @@ function deviceStateOf(snapshot: MultiDeviceSnapshot, deviceId: string): DeviceC
   return snapshot.devices.find(device => device.id === deviceId)?.state ?? 'error'
 }
 
-function categoryIcon(category: AttentionCategory): React.ReactElement {
-  if (category === 'pending') return <IconWarningOutlineRegular size={12} />
-  return <StateDot state={category === 'running' ? 'ongoing' : 'done'} size={8} />
+/** Colour alone carries the category, so the tone name is the styling hook. */
+export type AttentionTone = 'pending' | 'running' | 'done'
+
+const CATEGORY_TONE: Record<AttentionCategory, AttentionTone> = {
+  pending: 'pending',
+  running: 'running',
+  unread: 'done',
+}
+
+export interface AttentionSegment {
+  readonly category: AttentionCategory
+  readonly tone: AttentionTone
+  readonly ids: readonly string[]
+  readonly count: number
+}
+
+/**
+ * The capsule's segments, most urgent first, with empty categories dropped.
+ *
+ * Dropping empties is deliberate: the strip then shows only counts that exist,
+ * so a device with nothing to report occupies no space at all. The order is the
+ * one {@link attentionGroups} and the Host projection already use
+ * (needs-reply → running → finished-unread), which is what keeps a colour-only
+ * capsule readable for someone who cannot tell amber from green.
+ */
+export function attentionSegments(
+  view: DeviceAttentionView | undefined,
+  fallback?: AttentionDetailsProps['fallback'],
+): AttentionSegment[] {
+  const groups = view !== undefined
+    ? attentionGroups(view)
+    : [
+        { category: 'pending' as const, ids: [] as readonly string[], count: fallback?.pendingCount ?? 0 },
+        { category: 'running' as const, ids: [] as readonly string[], count: fallback?.runningCount ?? 0 },
+        { category: 'unread' as const, ids: fallback?.unreadSessionIds ?? [], count: fallback?.unreadSessionIds.length ?? 0 },
+      ]
+  return groups.flatMap(group => (
+    group.count > 0 ? [{ ...group, tone: CATEGORY_TONE[group.category] }] : []
+  ))
 }
 
 export function AttentionDetails({
@@ -138,19 +178,14 @@ export function AttentionDetails({
   const [failure, setFailure] = useState<{ seq: number; message: string } | null>(null)
 
   const fresh = view?.fresh ?? fallback?.fresh ?? false
-  const groups = view !== undefined
-    ? attentionGroups(view)
-    : [
-        { category: 'pending' as const, ids: [] as readonly string[], count: fallback?.pendingCount ?? 0 },
-        { category: 'running' as const, ids: [] as readonly string[], count: fallback?.runningCount ?? 0 },
-        { category: 'unread' as const, ids: fallback?.unreadSessionIds ?? [], count: fallback?.unreadSessionIds.length ?? 0 },
-      ]
+  const segments = attentionSegments(view, fallback)
+  const stale = !fresh
 
   /** Local store first, then the Host's projection for remote conversations. */
   const titleFor = (sessionId: string): string | undefined =>
     resolveAttentionTitle(sessionId, sessionList?.byId[sessionId], snapshot.sessionTitles)
 
-  /** Keep a 1–2 digit chip inside its fixed slot; never wrap the strip. */
+  /** Never wrap the strip: past two digits the count collapses to `99+`. */
   const chipCount = (count: number): string => (count > 99 ? '99+' : String(count))
 
   const fail = (detail: string | undefined): void => {
@@ -228,80 +263,70 @@ export function AttentionDetails({
     })
   }
 
+  const capsuleLabel = stale
+    ? `${deviceName} ${t('attentionStatus')} · ${words.stale}`
+    : `${deviceName} ${t('attentionStatus')}`
+
   return (
-    <span className="dsh-md-attention" role="group" aria-label={`${deviceName} ${words.members}`}>
-      {/* Fixed-width freshness marker: the text form changed the tab width every
-          time a snapshot flipped between cached and live, so the word moves into
-          the marker's accessible name and tooltip. An empty slot keeps the
-          cluster from breathing. */}
-      {fresh ? (
-        <span className="dsh-md-attention-stale-slot" aria-hidden="true" />
-      ) : (
+    <span className="dsh-md-attention">
+      {/* One capsule per device, numbers only. A device with nothing to report
+          and live data renders no capsule at all; a device with cached data and
+          nothing to count collapses to an empty dashed ring, so "no members"
+          never reads as an authoritative zero. Either way the three 30px
+          placeholder slots this replaces are gone from the strip. */}
+      {(segments.length > 0 || stale) && (
         <span
-          role="status"
-          className="dsh-md-attention-stale"
-          data-attention-stale="true"
-          aria-label={words.stale}
-          title={words.stale}
+          className="dsh-md-tab-status"
+          role={segments.length > 0 ? 'group' : 'status'}
+          aria-label={capsuleLabel}
+          title={stale ? words.stale : undefined}
+          data-stale={stale ? 'true' : undefined}
+          data-empty={segments.length === 0 ? 'true' : undefined}
         >
-          <span className="dsh-md-attention-stale-dot" aria-hidden="true" />
+          {segments.map(segment => {
+            const label = t(CATEGORY_COUNT_KEY[segment.category])
+              .replace('{count}', String(segment.count))
+            const open = openCategory === segment.category
+            const chip = (
+              <button
+                type="button"
+                className="dsh-md-tab-status-seg"
+                data-tone={segment.tone}
+                data-attention-category={segment.category}
+                data-open={open ? 'true' : 'false'}
+                aria-haspopup="menu"
+                aria-expanded={open}
+                aria-label={`${deviceName}: ${label}; ${words.members}`}
+                title={label}
+                onClick={() => {
+                  if (open) {
+                    setOpenCategory(null)
+                    return
+                  }
+                  setOpenCategory(segment.category)
+                }}
+              >
+                {chipCount(segment.count)}
+              </button>
+            )
+            return (
+              <Menu
+                key={segment.category}
+                open={open}
+                anchor={chip}
+                onClose={() => setOpenCategory(current => (current === segment.category ? null : current))}
+                portal
+                side="bottom"
+                align="start"
+                dense={nativeBar}
+                listClassName="dsh-md-attention-menu"
+              >
+                <MenuGroup label={label}>{renderRows(segment.ids)}</MenuGroup>
+              </Menu>
+            )
+          })}
         </span>
       )}
-      {/* Every category keeps its slot whether or not it has members, so a
-          Session starting or finishing never moves the neighbouring tabs. An
-          empty slot carries no category attribute: "no members" must never read
-          as an authoritative zero. */}
-      {groups.map(group => {
-        const label = t(CATEGORY_COUNT_KEY[group.category]).replace('{count}', String(group.count))
-        if (group.count === 0) {
-          return (
-            <span
-              key={group.category}
-              className="dsh-md-attention-slot"
-              data-attention-slot={group.category}
-              aria-hidden="true"
-            />
-          )
-        }
-        const chip = (
-          <button
-            type="button"
-            className="dsh-md-attention-chip"
-            data-category={group.category}
-            data-open={openCategory === group.category ? 'true' : 'false'}
-            data-attention-category={group.category}
-            aria-haspopup="menu"
-            aria-expanded={openCategory === group.category}
-            aria-label={`${deviceName}: ${label}; ${words.members}`}
-            title={label}
-            onClick={() => {
-              if (openCategory === group.category) {
-                setOpenCategory(null)
-                return
-              }
-              setOpenCategory(group.category)
-            }}
-          >
-            {categoryIcon(group.category)}
-            <span className="dsh-md-attention-count">{chipCount(group.count)}</span>
-          </button>
-        )
-        return (
-          <Menu
-            key={group.category}
-            open={openCategory === group.category}
-            anchor={chip}
-            onClose={() => setOpenCategory(current => (current === group.category ? null : current))}
-            portal
-            side="bottom"
-            align="start"
-            dense={nativeBar}
-            listClassName="dsh-md-attention-menu"
-          >
-            <MenuGroup label={label}>{renderRows(group.ids)}</MenuGroup>
-          </Menu>
-        )
-      })}
       {failure !== null && (
         <Toast key={failure.seq} text={failure.message} tone="error" onDone={() => setFailure(null)} />
       )}

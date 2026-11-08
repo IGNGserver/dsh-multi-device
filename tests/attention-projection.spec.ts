@@ -134,23 +134,28 @@ describe('pure attention projection', () => {
   })
 })
 
-describe('native attention chips', () => {
-  it('renders one compact chip per non-empty category and keeps the wording out of the layout', () => {
+describe('native attention capsule', () => {
+  it('renders one segment per non-empty category and keeps the wording out of the layout', () => {
     const view = project([
       fact('request-id', { pendingInteractionKind: 'question', pendingRequestCount: 3 }),
       fact('running-id', { running: true }), fact('unread-id'),
     ], ['unread-id'])
     const html = markup(view)
     expect(attentionGroups(view).map(g => [g.category, g.count])).toEqual([['pending', 1], ['running', 1], ['unread', 1]])
-    for (const category of ['pending', 'running', 'unread']) {
+    for (const [category, tone] of [['pending', 'pending'], ['running', 'running'], ['unread', 'done']]) {
       expect(html).toContain(`data-attention-category="${category}"`)
+      // Colour alone carries the category; the tone is the styling hook.
+      expect(html).toContain(`data-tone="${tone}"`)
     }
-    // The chip is a number; the sentence lives in the accessible name only.
-    expect(html).toContain('aria-label="本机: 1 待确认; 会话成员"')
+    // The segment prints a number; the sentence lives in the accessible name.
+    expect(html).toContain('aria-label="本机: 1 待回复; 会话成员"')
     expect(html).toContain('aria-label="本机: 1 运行中; 会话成员"')
-    expect(html).toContain('aria-label="本机: 1 未读; 会话成员"')
-    expect(html).not.toContain('>1 未读<')
+    expect(html).toContain('aria-label="本机: 1 完成未读; 会话成员"')
+    expect(html).not.toContain('>1 完成未读<')
     expect(html).not.toContain('>1 运行中<')
+    // No reserved placeholder survives: the capsule holds numbers only.
+    expect(html).not.toContain('data-attention-slot')
+    expect(html).not.toContain('dsh-md-attention-slot')
     // No browser-default popover markup survives.
     expect(html).not.toContain('<summary')
     expect(html).not.toContain('<details')
@@ -160,7 +165,17 @@ describe('native attention chips', () => {
   it('marks stale empty data explicitly instead of displaying an authoritative zero', () => {
     const html = markup(emptyDeviceAttention(false))
     expect(html).toContain('同步中 / 数据过期')
+    // No number is claimed, so no segment exists; the capsule collapses to an
+    // empty dashed ring that states the absence of fresh data.
+    expect(html).toContain('data-empty="true"')
+    expect(html).toContain('data-stale="true"')
     expect(html).not.toContain('data-attention-category')
+  })
+
+  it('renders no capsule for a device with fresh data and nothing to report', () => {
+    const html = markup(emptyDeviceAttention(true))
+    expect(html).not.toContain('dsh-md-tab-status')
+    expect(html).not.toContain('同步中 / 数据过期')
   })
 
   it('keeps every member of a large category in the joined rows', () => {

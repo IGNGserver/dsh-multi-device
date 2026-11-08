@@ -537,24 +537,22 @@ export function NativeTabBar({
                   fresh: attentionByDevice === undefined && dev.state === 'connected' && dev.catalogStale !== true,
                 }}
               />
-              {/* Fixed slot: the keep-alive release button only exists for
-                  mounted pages, and adding it on the first click used to widen
-                  the tab and shift every tab beside it. The slot follows the
-                  device's keep-alive setting, which is config, not live state. */}
-              {dev.keepNativeAlive !== false && (
-                <span className="dsh-md-tab-action-slot">
-                  {isKeptAlive && (
-                    <Tooltip label={t('releaseKeepAlive')} side="bottom">
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        aria-label={t('releaseKeepAlive')}
-                        onClick={() => clientStore.releaseKeepAliveDevice(dev.id)}
-                      >
-                        <IconCloseOutlineRegular size={12} />
-                      </Button>
-                    </Tooltip>
-                  )}
+              {/* Only a mounted page has something to release, so the control
+                  exists only for that device; it stays faded out until this tab
+                  is hovered or focused. The always-reserved slot it replaces
+                  cost 26px of permanent empty space on every keep-alive tab. */}
+              {dev.keepNativeAlive !== false && isKeptAlive && (
+                <span className="dsh-md-tab-release">
+                  <Tooltip label={t('releaseKeepAlive')} side="bottom">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      aria-label={t('releaseKeepAlive')}
+                      onClick={() => clientStore.releaseKeepAliveDevice(dev.id)}
+                    >
+                      <IconCloseOutlineRegular size={12} />
+                    </Button>
+                  </Tooltip>
                 </span>
               )}
             </div>

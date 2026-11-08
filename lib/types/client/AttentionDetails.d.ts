@@ -41,4 +41,22 @@ export declare function attentionLabels(t: (key: MultiDeviceLocaleKey) => string
     failed: string;
     requests: string;
 };
+/** Colour alone carries the category, so the tone name is the styling hook. */
+export type AttentionTone = 'pending' | 'running' | 'done';
+export interface AttentionSegment {
+    readonly category: AttentionCategory;
+    readonly tone: AttentionTone;
+    readonly ids: readonly string[];
+    readonly count: number;
+}
+/**
+ * The capsule's segments, most urgent first, with empty categories dropped.
+ *
+ * Dropping empties is deliberate: the strip then shows only counts that exist,
+ * so a device with nothing to report occupies no space at all. The order is the
+ * one {@link attentionGroups} and the Host projection already use
+ * (needs-reply → running → finished-unread), which is what keeps a colour-only
+ * capsule readable for someone who cannot tell amber from green.
+ */
+export declare function attentionSegments(view: DeviceAttentionView | undefined, fallback?: AttentionDetailsProps['fallback']): AttentionSegment[];
 export declare function AttentionDetails({ view, deviceName, t, nativeBar, fallback, }: AttentionDetailsProps): React.ReactElement;
