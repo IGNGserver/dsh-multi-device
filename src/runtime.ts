@@ -1,11 +1,10 @@
 /**
  * Host Control-Plane HTTP & RPC Endpoints (`MultiDeviceControlPlane`).
  *
- * Exposes all device management, SSH config discovery, connection testing,
- * and Git workspace aggregation operations over:
+ * Exposes device management, SSH config discovery, connection testing and the
+ * device-tab attention state over:
  * 1. Direct authenticated HTTP JSON route `/multi-device/api` (plus SSE `/multi-device/events`),
- *    which has zero dependency on Typert reflection or Aggregated Gateway state — ensuring
- *    that Native Mode and Device Management ALWAYS work even if Aggregated Mode fails!
+ *    with zero dependency on Typert reflection.
  * 2. Optional Typert Remote registration (`multiDevice/*`) when `ctx.typert` is present.
  *
  * @module dsh-multi-device/runtime
@@ -15,12 +14,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {
   DeviceId,
   DeviceView,
-  ManualWorkspaceRule,
   MultiDeviceSnapshot,
-  RemoteSessionCreateInput,
-  RemoteWorkspaceCreateInput,
   UpsertDeviceInput,
-  WorkspaceAggregationConfig,
 } from './contract.ts'
 import type { DeviceRegistry } from './host/registry.ts'
 
@@ -127,28 +122,13 @@ export function admitMultiDeviceRequest(ctx: Context, req: IncomingMessage): boo
 export interface ControlPlaneRequest {
   readonly action:
     | 'snapshot'
-    | 'catalogSessionAction'
-    | 'searchCatalogSessions'
-    | 'modelCatalog'
     | 'diagnostics'
-    | 'setDisplayMode'
     | 'upsertDevice'
     | 'removeDevice'
     | 'reconnectDevice'
     | 'authenticateDevice'
     | 'testDevice'
     | 'listSshKeys'
-    | 'startSessionOnDevice'
-    | 'createSession'
-    | 'createRemoteWorkspace'
-    | 'updateAggregationConfig'
-    | 'upsertManualRule'
-    | 'removeManualRule'
-    | 'setMemberExcluded'
-    | 'setPreferredDevice'
-    | 'setCustomTitle'
-    | 'startGitMatch'
-    | 'cancelGitMatch'
     | 'setActiveSession'
     | 'markSessionRead'
     | 'markDeviceRead'
@@ -157,11 +137,8 @@ export interface ControlPlaneRequest {
 }
 
 const CONTROL_ACTIONS: ReadonlySet<string> = new Set<ControlPlaneRequest['action']>([
-  'snapshot', 'catalogSessionAction', 'searchCatalogSessions', 'modelCatalog', 'diagnostics',
-  'setDisplayMode', 'upsertDevice', 'removeDevice', 'reconnectDevice', 'authenticateDevice',
-  'testDevice', 'listSshKeys', 'startSessionOnDevice', 'createSession', 'createRemoteWorkspace',
-  'updateAggregationConfig', 'upsertManualRule', 'removeManualRule', 'setMemberExcluded',
-  'setPreferredDevice', 'setCustomTitle', 'startGitMatch', 'cancelGitMatch', 'setActiveSession',
+  'snapshot', 'diagnostics', 'upsertDevice', 'removeDevice', 'reconnectDevice',
+  'authenticateDevice', 'testDevice', 'listSshKeys', 'setActiveSession',
   'markSessionRead', 'markDeviceRead', 'setUiPreferences',
 ])
 
@@ -240,27 +217,11 @@ function validateDeviceInput(payload: Payload): void {
     payloadString(auth, 'credential', false, 1024 * 1024, true)
   }
 }
-function validateManualRule(value: unknown, key = 'rule'): void {
-  const rule = payloadObject(value, key)
-  payloadString(rule, 'id', true, 4096)
-  payloadString(rule, 'title', true, 4096, true)
-  payloadStringArray(rule, 'memberKeys')
-  if (!Array.isArray(rule.memberKeys)) throw new Error(`${key}.memberKeys is required`)
-  payloadString(rule, 'gitRemote', false, 16_384)
-  payloadString(rule, 'preferredDeviceId', false, 512)
-}
 /** Field-level runtime schemas shared by HTTP parsing and direct dispatch. */
 export function validateControlPlanePayload(request: ControlPlaneRequest): void {
   const payload = request.payload ?? {}
   payloadString(payload, 'clientId', false, 128)
   switch (request.action) {
-    case 'catalogSessionAction':
-      payloadString(payload, 'sessionId', true, 4096)
-      if (!['rename', 'archive', 'unarchive', 'pin', 'unpin', 'fork'].includes(String(payload.operation))) throw new Error('Invalid session operation')
-      payloadString(payload, 'title', false, 4096, true); payloadBoolean(payload, 'stopActivity')
-      break
-    case 'searchCatalogSessions': payloadString(payload, 'query', true, 1000); break
-    case 'modelCatalog': payloadString(payload, 'sessionId', false, 4096); break
     case 'diagnostics': if (payload.client !== undefined) payloadObject(payload.client, 'client'); break
     case 'setActiveSession':
       payloadString(payload, 'sessionId', false, 4096, true)
@@ -269,27 +230,8 @@ export function validateControlPlanePayload(request: ControlPlaneRequest): void 
     case 'markSessionRead': payloadString(payload, 'sessionId'); payloadString(payload, 'expectedCompletionId', false, 1024); break
     case 'markDeviceRead': case 'removeDevice': case 'reconnectDevice': payloadString(payload, 'deviceId', true, 512); break
     case 'authenticateDevice': payloadString(payload, 'deviceId', true, 512); payloadString(payload, 'credential', false, 1024 * 1024, true); break
-    case 'setDisplayMode': if (payload.displayMode !== 'aggregated' && payload.displayMode !== 'native') throw new Error('Invalid displayMode'); break
     case 'upsertDevice': case 'testDevice': validateDeviceInput(payload); break
-    case 'startSessionOnDevice': payloadString(payload, 'logicalWorkspaceId'); payloadString(payload, 'deviceId', true, 512); break
-    case 'createSession':
-      payloadString(payload, 'deviceId', true, 512); payloadString(payload, 'workspaceId', false); payloadString(payload, 'cwd', false, 16_384); payloadString(payload, 'agentPreset', false, 1024)
-      break
-    case 'createRemoteWorkspace': payloadString(payload, 'deviceId', true, 512); payloadString(payload, 'path', true, 16_384); break
-    case 'updateAggregationConfig':
-      payloadBoolean(payload, 'autoGitAggregate'); payloadBoolean(payload, 'prefixUnmatchedWithDevice')
-      payloadStringArray(payload, 'excludedMemberKeys'); payloadStringMap(payload, 'preferredDeviceByLogicalId'); payloadStringMap(payload, 'customTitleByLogicalId'); payloadStringArray(payload, 'workspaceOrder')
-      if (payload.manualRules !== undefined) {
-        if (!Array.isArray(payload.manualRules) || payload.manualRules.length > 512) throw new Error('manualRules must be a bounded array')
-        payload.manualRules.forEach(rule => validateManualRule(rule, 'manualRules[]'))
-      }
-      break
-    case 'upsertManualRule': validateManualRule(payload); break
-    case 'removeManualRule': payloadString(payload, 'ruleId'); break
-    case 'setMemberExcluded': payloadString(payload, 'memberKey', true, 16_384); payloadBoolean(payload, 'excluded', true); break
-    case 'setPreferredDevice': payloadString(payload, 'logicalWorkspaceId'); payloadString(payload, 'deviceId', true, 512); break
-    case 'setCustomTitle': payloadString(payload, 'logicalWorkspaceId'); payloadString(payload, 'title', true, 4096, true); break
-    case 'setUiPreferences': payloadBoolean(payload, 'sessionRowDeviceDot'); payloadBoolean(payload, 'nativePane'); payloadBoolean(payload, 'crossHostReadState'); break
+    case 'setUiPreferences': payloadBoolean(payload, 'crossHostReadState'); break
     default: break
   }
 }
@@ -311,26 +253,6 @@ export interface DiagnosticsClientReport {
   readonly barClampedWidth?: number
   readonly compact?: boolean
   readonly userAgent?: string
-  /**
-   * Whether the cached Workspace projection resolves inside the browser's
-   * Session store. `missing > 0` is the mechanical cause of a "Workspace
-   * expands but shows no conversations" report.
-   */
-  readonly sessionLink?: DiagnosticsSessionLink
-}
-
-/** Session-store link evidence volunteered by the browser. */
-export interface DiagnosticsSessionLink {
-  readonly referenced: number
-  readonly missing: number
-  readonly byDevice: Readonly<Record<string, number>>
-  readonly sample: readonly string[]
-  readonly connectedDevices: number
-  readonly attempts: number
-  readonly resolved: boolean
-  readonly refreshedAt?: number
-  /** Last `sessions.refresh()` failure, when the Host could not answer. */
-  readonly lastError?: string
 }
 
 /** One device row of the Diagnostics report. */
@@ -358,19 +280,15 @@ export interface DiagnosticsDevice {
   readonly sessionListError?: string
 }
 
-/** Aggregated snapshot of everything a support report needs to explain a UI state. */
+/** Snapshot of everything a support report needs to explain the device UI state. */
 export interface MultiDeviceDiagnostics {
   readonly kind: 'dsh-multi-device/diagnostics'
   readonly generatedAt: number
   readonly hostId: string
-  readonly displayMode: MultiDeviceSnapshot['displayMode']
-  readonly hostStatus: MultiDeviceSnapshot['hostStatus']
   readonly counts: {
     readonly devices: number
     readonly connectedDevices: number
     readonly staleDevices: number
-    readonly logicalWorkspaces: number
-    readonly physicalWorkspaces: number
     readonly runningSessions: number
     /** Raw catalog total, including archived and subagent Sessions. */
     readonly allRunningSessions: number
@@ -406,45 +324,15 @@ export function readDiagnosticsClientReport(raw: unknown): DiagnosticsClientRepo
       : {}),
     ...(typeof record.compact === 'boolean' ? { compact: record.compact } : {}),
     ...(optionalString(record.userAgent) !== undefined ? { userAgent: optionalString(record.userAgent) } : {}),
-    ...(readDiagnosticsSessionLink(record.sessionLink) !== undefined
-      ? { sessionLink: readDiagnosticsSessionLink(record.sessionLink) }
-      : {}),
   }
   return Object.keys(report).length === 0 ? undefined : report
-}
-
-/** Parse the browser's Session-store link evidence; unknown fields are dropped. */
-export function readDiagnosticsSessionLink(raw: unknown): DiagnosticsSessionLink | undefined {
-  if (typeof raw !== 'object' || raw === null) return undefined
-  const record = raw as Record<string, unknown>
-  const byDevice: Record<string, number> = {}
-  if (typeof record.byDevice === 'object' && record.byDevice !== null) {
-    for (const [deviceId, count] of Object.entries(record.byDevice as Record<string, unknown>)) {
-      if (typeof count === 'number' && Number.isFinite(count)) byDevice[deviceId] = count
-    }
-  }
-  const sample = Array.isArray(record.sample)
-    ? record.sample.filter((id): id is string => typeof id === 'string').slice(0, 16)
-    : []
-  return {
-    referenced: optionalNumber(record.referenced) ?? 0,
-    missing: optionalNumber(record.missing) ?? 0,
-    byDevice,
-    sample,
-    connectedDevices: optionalNumber(record.connectedDevices) ?? 0,
-    attempts: optionalNumber(record.attempts) ?? 0,
-    resolved: record.resolved === true,
-    ...(optionalNumber(record.refreshedAt) !== undefined ? { refreshedAt: optionalNumber(record.refreshedAt) } : {}),
-    ...(optionalString(record.lastError) !== undefined ? { lastError: optionalString(record.lastError) } : {}),
-  }
 }
 
 /**
  * Build the Diagnostics report from one Host snapshot.
  *
- * The mode is the first field on purpose: a "missing conversations" report is
- * almost always the Native/Aggregated distinction, and the per-device staging
- * (`state`, `catalogStale`, counts) explains the rest.
+ * Per-device staging (`state`, `catalogStale`, counts, last error) is what
+ * explains a "device tab shows nothing" report.
  */
 export function buildDiagnostics(
   snapshot: MultiDeviceSnapshot,
@@ -476,14 +364,10 @@ export function buildDiagnostics(
     kind: 'dsh-multi-device/diagnostics',
     generatedAt: now,
     hostId: snapshot.hostId ?? 'unknown',
-    displayMode: snapshot.displayMode,
-    hostStatus: snapshot.hostStatus,
     counts: {
       devices: devices.length,
       connectedDevices: devices.filter(device => device.state === 'connected').length,
       staleDevices: devices.filter(device => device.catalogStale).length,
-      logicalWorkspaces: snapshot.logicalWorkspaces.length,
-      physicalWorkspaces: snapshot.allPhysicalWorkspaces.length,
       runningSessions: devices.reduce((total, device) => total + device.runningSessionCount, 0),
       allRunningSessions: devices.reduce((total, device) => total + device.allRunningSessionCount, 0),
     },
@@ -513,32 +397,6 @@ export class MultiDeviceControlPlane {
       switch (request.action) {
         case 'snapshot':
           return { ok: true, value: this.registry.snapshot(clientId) }
-
-        case 'catalogSessionAction': {
-          const operations = ['rename', 'archive', 'unarchive', 'pin', 'unpin', 'fork'] as const
-          const operation = payload.operation as typeof operations[number]
-          if (!operations.includes(operation) || typeof payload.sessionId !== 'string' || !payload.sessionId) return { ok: false, error: 'Invalid session operation' }
-          const result = await this.registry.catalogSessionAction(payload.sessionId, operation, typeof payload.title === 'string' ? payload.title : undefined, payload.stopActivity === true)
-          return { ok: true, value: { ...result, snapshot: this.registry.snapshot(clientId) } }
-        }
-
-        case 'searchCatalogSessions': {
-          if (typeof payload.query !== 'string' || !payload.query.trim() || payload.query.length > 1000) return { ok: false, error: 'A search query of 1–1000 characters is required' }
-          return { ok: true, value: await this.registry.searchCatalogSessions(payload.query.trim(), signal) }
-        }
-
-        case 'modelCatalog': {
-          const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId : undefined
-          const scope = this.registry.sessionScope(sessionId)
-          if (!this.registry.isAggregatedMode() || scope.kind !== 'remote') {
-            return { ok: false, error: 'A remote Session is required for this catalog' }
-          }
-          if (scope.client === undefined || !scope.client.isConnected()) {
-            return { ok: false, error: `Device ${scope.deviceName} is not connected` }
-          }
-          const catalog = await scope.client.invokeUnary('session', 'modelCatalog', {}, signal)
-          return { ok: true, value: catalog }
-        }
 
         case 'diagnostics':
           return {
@@ -585,24 +443,6 @@ export class MultiDeviceControlPlane {
           }
         }
 
-        case 'setDisplayMode': {
-          const mode = payload.displayMode
-          if (mode !== 'aggregated' && mode !== 'native') {
-            return { ok: false, error: 'displayMode must be "aggregated" or "native"' }
-          }
-          if (mode === 'aggregated') {
-            const health = this.registry.aggregatedGatewayHealth()
-            if (!health.ok) {
-              return {
-                ok: false,
-                error: `Aggregated Mode is unavailable: ${health.error ?? 'the aggregated gateway is not active'}`,
-              }
-            }
-          }
-          this.registry.setDisplayMode(mode)
-          return { ok: true, value: { snapshot: this.registry.snapshot(clientId) } }
-        }
-
         case 'upsertDevice': {
           const input = payload as unknown as UpsertDeviceInput
           const res = await this.registry.upsertDevice(input)
@@ -645,102 +485,12 @@ export class MultiDeviceControlPlane {
         case 'listSshKeys':
           return { ok: true, value: { keys: this.registry.listSshKeys() } }
 
-        case 'startSessionOnDevice': {
-          const logicalWorkspaceId = String(payload.logicalWorkspaceId ?? '')
-          const deviceId = String(payload.deviceId ?? '') as DeviceId
-          if (logicalWorkspaceId === '' || deviceId === '') {
-            return { ok: false, error: 'Workspace and device are required' }
-          }
-          const res = await this.registry.startSessionOnDevice(logicalWorkspaceId, deviceId)
-          if (!res.ok) return res
-          return { ok: true, value: { ...res, snapshot: this.registry.snapshot(clientId) } }
-        }
-
-        case 'createSession': {
-          const input = payload as unknown as RemoteSessionCreateInput
-          const res = await this.registry.createRemoteSession(input)
-          if (!res.ok) return res
-          return { ok: true, value: { ...res, snapshot: this.registry.snapshot(clientId) } }
-        }
-
-        case 'createRemoteWorkspace': {
-          const input = payload as unknown as RemoteWorkspaceCreateInput
-          const res = await this.registry.createRemoteWorkspace(input)
-          if (!res.ok) return res
-          return { ok: true, value: { ...res, snapshot: this.registry.snapshot(clientId) } }
-        }
-
-        case 'updateAggregationConfig': {
-          const patch = payload as Partial<WorkspaceAggregationConfig>
-          try {
-            this.registry.updateAggregationConfig(patch)
-          } catch (error) {
-            return { ok: false, error: error instanceof Error ? error.message : String(error) }
-          }
-          return { ok: true, value: this.registry.snapshot(clientId) }
-        }
-
-        case 'upsertManualRule': {
-          const rule = payload as unknown as ManualWorkspaceRule
-          this.registry.mutateAggregation(() => this.registry.aggregator.upsertManualRule(rule))
-          return { ok: true, value: this.registry.snapshot(clientId) }
-        }
-
-        case 'removeManualRule': {
-          const ruleId = String(payload.ruleId ?? '')
-          this.registry.mutateAggregation(() => this.registry.aggregator.removeManualRule(ruleId))
-          return { ok: true, value: this.registry.snapshot(clientId) }
-        }
-
-        case 'setMemberExcluded': {
-          const memberKey = String(payload.memberKey ?? '')
-          if (memberKey === '') return { ok: false, error: 'Member key is required' }
-          const excluded = Boolean(payload.excluded)
-          try {
-            this.registry.mutateAggregation(() => this.registry.aggregator.setMemberExcluded(memberKey, excluded))
-          } catch (error) {
-            return { ok: false, error: error instanceof Error ? error.message : String(error) }
-          }
-          return { ok: true, value: this.registry.snapshot(clientId) }
-        }
-
         case 'setUiPreferences': {
           this.registry.updateUiPreferences({
-            ...(typeof payload.sessionRowDeviceDot === 'boolean'
-              ? { sessionRowDeviceDot: payload.sessionRowDeviceDot }
-              : {}),
-            ...(typeof payload.nativePane === 'boolean'
-              ? { nativePane: payload.nativePane }
-              : {}),
             ...(typeof payload.crossHostReadState === 'boolean'
               ? { crossHostReadState: payload.crossHostReadState }
               : {}),
           })
-          return { ok: true, value: this.registry.snapshot(clientId) }
-        }
-
-        case 'setPreferredDevice': {
-          const logicalWorkspaceId = String(payload.logicalWorkspaceId ?? '')
-          const deviceId = String(payload.deviceId ?? '') as DeviceId
-          this.registry.mutateAggregation(() => this.registry.aggregator.setPreferredDevice(logicalWorkspaceId, deviceId))
-          return { ok: true, value: this.registry.snapshot(clientId) }
-        }
-
-        case 'startGitMatch': {
-          const res = this.registry.startGitMatch()
-          if (!res.ok) return res
-          return { ok: true, value: { gitMatch: this.registry.gitMatch(), snapshot: this.registry.snapshot(clientId) } }
-        }
-
-        case 'cancelGitMatch': {
-          const cancelled = this.registry.cancelGitMatch()
-          return { ok: true, value: { cancelled, gitMatch: this.registry.gitMatch() } }
-        }
-
-        case 'setCustomTitle': {
-          const logicalWorkspaceId = String(payload.logicalWorkspaceId ?? '')
-          const title = String(payload.title ?? '')
-          this.registry.mutateAggregation(() => this.registry.aggregator.setCustomTitle(logicalWorkspaceId, title))
           return { ok: true, value: this.registry.snapshot(clientId) }
         }
 

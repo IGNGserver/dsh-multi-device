@@ -30,17 +30,15 @@ const input = { id: ID, name: 'Original', enabled: false,
   auth: { mode: 'none' as const } }
 
 describe('refused writes preserve live transaction state', () => {
-  it('rejects stale mode/UI/upsert/remove before mutating a second registry', async () => {
+  it('rejects stale UI/upsert/remove before mutating a second registry', async () => {
     const path = paths()
     const a = registry(path)
     await a.upsertDevice(input)
     const b = registry(path)
-    a.updateUiPreferences({ sessionRowDeviceDot: true })
+    a.updateUiPreferences({ crossHostReadState: true })
     const original = b.deviceConfig(ID)
     const ui = b.ui()
-    expect(() => b.setDisplayMode('native')).toThrow('reload before saving')
-    expect(b.getDisplayMode()).toBe('aggregated')
-    expect(() => b.updateUiPreferences({ nativePane: false })).toThrow('reload before saving')
+    expect(() => b.updateUiPreferences({ crossHostReadState: false })).toThrow('reload before saving')
     expect(b.ui()).toBe(ui)
     await expect(b.upsertDevice({ ...input, name: 'Rejected' })).rejects.toThrow('reload before saving')
     expect(b.deviceConfig(ID)).toBe(original)
@@ -57,31 +55,14 @@ describe('refused writes preserve live transaction state', () => {
     expect(() => value.removeDevice(ID)).toThrow('Storage is busy')
     expect(stop).not.toHaveBeenCalled()
     expect(value.deviceConfig(ID)?.name).toBe('Original')
-    expect(() => value.setDisplayMode('native')).toThrow('Storage is busy')
-    expect(value.getDisplayMode()).toBe('aggregated')
   })
 
-  it('rolls back mode/UI changes on an IO failure after preflight', () => {
+  it('rolls back UI preference changes on an IO failure after preflight', () => {
     const path = paths(), value = registry(path)
     const ui = value.ui()
     vi.spyOn(value, 'saveToDisk').mockImplementation(() => { throw new Error('synthetic IO failure') })
-    expect(() => value.setDisplayMode('native')).toThrow('synthetic IO failure')
-    expect(value.getDisplayMode()).toBe('aggregated')
-    expect(() => value.updateUiPreferences({ nativePane: false })).toThrow('synthetic IO failure')
+    expect(() => value.updateUiPreferences({ crossHostReadState: true })).toThrow('synthetic IO failure')
     expect(value.ui()).toBe(ui)
-  })
-
-  it('restores aggregation config after an IO failure and rejects stale config before mutation', async () => {
-    const path = paths(), value = registry(path)
-    await value.upsertDevice(input)
-    const other = registry(path)
-    value.updateAggregationConfig({ autoGitAggregate: false })
-    expect(() => other.updateAggregationConfig({ prefixUnmatchedWithDevice: true })).toThrow('reload before saving')
-    expect(other.aggregator.getConfig().prefixUnmatchedWithDevice).toBe(false)
-    const before = value.aggregator.getConfig()
-    vi.spyOn(value, 'saveToDisk').mockImplementation(() => { throw new Error('synthetic IO failure') })
-    expect(() => value.mutateAggregation(() => value.aggregator.setCustomTitle('example', 'Rejected'))).toThrow('synthetic IO failure')
-    expect(value.aggregator.getConfig()).toEqual(before)
   })
 
   it('keeps device configuration and live clients when the config save fails after preflight', async () => {
@@ -173,7 +154,7 @@ describe('refused writes preserve live transaction state', () => {
       writeFileSync(path.secrets, text)
       const value = registry(path)
       const auth = new DeviceAuthManager(path.secrets)
-      expect(() => value.setDisplayMode('native')).toThrow('Cannot overwrite')
+      expect(() => value.updateUiPreferences({ crossHostReadState: true })).toThrow('Cannot overwrite')
       expect(() => auth.setAuthCredential(ID, 'synthetic')).toThrow('Cannot overwrite')
       expect(auth.storedSecret(ID)).toBeUndefined()
       expect(readFileSync(path.data, 'utf8')).toBe(text)

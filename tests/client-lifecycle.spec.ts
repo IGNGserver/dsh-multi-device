@@ -3,7 +3,6 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DeviceId, encodeRemoteSessionId, type DeviceView } from '../src/contract.ts'
 import { existingSessionStatusNotifier, installReadStateOverlay } from '../src/client/readState.ts'
-import { nativeProxyEmbeddingError, resolveSameSiteProxyUrl } from '../src/client/nativePane.ts'
 import { clientStore, MultiDeviceClientStore } from '../src/client/state.ts'
 
 vi.mock('@deepseek-ai/dsh-client-ui-primitives', async () => {
@@ -138,27 +137,6 @@ describe('mounted Electron frame lifecycle (real React effects)', () => {
   })
 })
 
-describe('IPv4-only proxy policy', () => {
-  it.each(['127.0.0.1', 'localhost'])('matches supported parent %s', hostname => {
-    vi.stubGlobal('window', { location: { hostname } })
-    expect(new URL(resolveSameSiteProxyUrl(device.nativeProxyUrl)!).hostname).toBe(hostname)
-    expect(nativeProxyEmbeddingError(device.nativeProxyUrl)).toBeUndefined()
-  })
-  it('explains remote browsers and HTTPS mixed content but permits Desktop app protocol', () => {
-    vi.stubGlobal('window', { location: { hostname: 'remote.example', protocol: 'https:' } })
-    expect(nativeProxyEmbeddingError(device.nativeProxyUrl)).toContain('Host loopback')
-    vi.stubGlobal('window', { location: { hostname: 'localhost', protocol: 'https:' } })
-    expect(nativeProxyEmbeddingError(device.nativeProxyUrl)).toContain('mixed content')
-    vi.stubGlobal('window', { location: { hostname: 'app', protocol: 'dsh-app:' } })
-    expect(nativeProxyEmbeddingError(device.nativeProxyUrl)).toBeUndefined()
-  })
-  it('never rewrites a proxy to unbound IPv6 and explicitly degrades embedding', () => {
-    vi.stubGlobal('window', { location: { hostname: '[::1]' } })
-    expect(resolveSameSiteProxyUrl(device.nativeProxyUrl)).toBe(device.nativeProxyUrl)
-    expect(nativeProxyEmbeddingError(device.nativeProxyUrl)).toContain('IPv4-only')
-  })
-})
-
 describe('pre-HMR Session status subscribers', () => {
   it('notifies real existing and new subscribers once for Host-only changes and restores base', () => {
     // Separate sets are essential: a shared fake notifier would hide the bug.
@@ -197,59 +175,6 @@ describe('pre-HMR Session status subscribers', () => {
     expect(existingSessionStatusNotifier({ statusListeners: new Set([123]) })).toBeUndefined()
     expect(warn).toHaveBeenCalledTimes(2)
     expect(warn.mock.calls[0][0]).toContain('reload')
-  })
-})
-
-function setClientMode(mode: 'native' | 'aggregated', patch = {}) {
-  // Drive the real store subscription; only transport ingestion is bypassed.
-  ;(clientStore as any).setState({ displayMode: mode, ...patch })
-}
-async function modeHarness(refresh: () => Promise<void>) {
-  const { installModeSideEffects } = await import('../src/client/index.tsx')
-  const remote = encodeRemoteSessionId(DeviceId('dev-a'), 'r')
-  const openSession = vi.fn()
-  const openWorkspace = vi.fn(async () => {})
-  vi.spyOn(clientStore, 'setActiveSession').mockResolvedValue()
-  const dispose = installModeSideEffects({ sessions: { list: { getSnapshot: () => ({ ids: [remote, 'local'], byId: { [remote]: { retainedBy: { mainView: 1 } }, local: {} } }) }, refresh }, uiWorkspace: { openSession, openWorkspace } } as any)
-  cleanups.push(dispose)
-  return { openSession, dispose }
-}
-
-describe('asynchronous mode reconciliation cancellation', () => {
-  it('ignores refresh resolved after disposal', async () => {
-    setClientMode('native')
-    const pending = deferred<void>()
-    const h = await modeHarness(() => pending.promise)
-    h.dispose()
-    pending.resolve()
-    await flush()
-    expect(h.openSession).not.toHaveBeenCalled()
-  })
-  it('does not let old native reconciliation navigate after a newer aggregated transition', async () => {
-    setClientMode('native')
-    const pending = deferred<void>()
-    const refresh = vi.fn().mockReturnValueOnce(pending.promise).mockResolvedValue(undefined)
-    const h = await modeHarness(refresh)
-    setClientMode('aggregated')
-    await flush()
-    pending.resolve()
-    await flush()
-    expect(h.openSession).not.toHaveBeenCalled()
-    expect(refresh).toHaveBeenCalledTimes(2)
-  })
-  it('cancels aggregated retry timers on dispose', async () => {
-    vi.useFakeTimers()
-    setClientMode('native')
-    const h = await modeHarness(async () => {})
-    await flush()
-    h.openSession.mockClear()
-    setClientMode('aggregated', { pendingAggregatedSessionId: 'missing-remote' })
-    await flush()
-    expect(vi.getTimerCount()).toBe(1)
-    h.dispose()
-    await vi.runAllTimersAsync()
-    expect(h.openSession).not.toHaveBeenCalled()
-    expect(vi.getTimerCount()).toBe(0)
   })
 })
 

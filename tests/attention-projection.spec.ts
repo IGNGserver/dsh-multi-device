@@ -171,8 +171,8 @@ describe('explainable attention UI', () => {
     expect(html).not.toContain('需回复')
   })
 
-  it('uses the same selector-backed members in native, workspace and Hub surfaces', () => {
-    for (const file of ['NativeViewport.tsx', 'projectBadges.ts', 'MultiDeviceHubPanel.tsx']) {
+  it('uses the same selector-backed members in every rendered surface', () => {
+    for (const file of ['NativeViewport.tsx', 'MultiDeviceHubPanel.tsx']) {
       const source = readFileSync(new URL(`../src/client/${file}`, import.meta.url), 'utf8')
       expect(source).toContain('attentionByDevice')
       expect(source).toContain('attentionUnreadIds')

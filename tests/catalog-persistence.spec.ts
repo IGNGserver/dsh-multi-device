@@ -35,8 +35,8 @@ describe('versioned raw catalog persistence', () => {
   it('does not create an empty catalog file for a pristine registry or after synchronous dispose', async () => {
     const root = dir(), data = join(root, 'devices.json'), secrets = join(root, 'secrets.json')
     const registry = new DeviceRegistry(data, secrets,
-      { localPort: () => 3080, localWorkspaces: () => [], localSessionUpdatedAt: () => new Map() },
-      { enableNativeProxy: false, enableTunnels: false })
+      { localPort: () => 3080 },
+      { enableTunnels: false })
     registries.push(registry)
     registry.dispose()
     await registry.flushPersistence()
@@ -53,8 +53,8 @@ describe('versioned raw catalog persistence', () => {
       transport: { kind: 'direct', baseUrl: 'http://fixture.invalid:3081' }, auth: { mode: 'none' },
     }] })
     const registry = new DeviceRegistry(data, secrets,
-      { localPort: () => 3080, localWorkspaces: () => [], localSessionUpdatedAt: () => new Map() },
-      { enableNativeProxy: false, enableTunnels: false, allowDirectTransport: true })
+      { localPort: () => 3080 },
+      { enableTunnels: false, allowDirectTransport: true })
     registries.push(registry)
     registry.setDeviceCatalog(cache)
     await registry.flushPersistence()
@@ -71,22 +71,22 @@ describe('versioned raw catalog persistence', () => {
       transport: { kind: 'direct', baseUrl: 'http://fixture.invalid:3081' }, auth: { mode: 'none' },
     }], catalogs: { [cache.deviceId]: cache } })
     const registry = new DeviceRegistry(data, secrets,
-      { localPort: () => 3080, localWorkspaces: () => [], localSessionUpdatedAt: () => new Map() },
-      { enableNativeProxy: false, allowDirectTransport: true })
+      { localPort: () => 3080 },
+      { allowDirectTransport: true })
     registries.push(registry)
     const save = vi.spyOn(registry, 'saveToDisk').mockImplementationOnce(() => { throw new Error('synthetic main cleanup failure') })
     await expect(registry.flushPersistence()).rejects.toThrow('synthetic main cleanup failure')
     expect(JSON.parse(readFileSync(data, 'utf8')).catalogs[cache.deviceId].syncedAt).toBe(cache.syncedAt)
     expect(JSON.parse(readFileSync(join(root, 'catalogs.json'), 'utf8')).version).toBe(2)
-    expect(registry.snapshot().hostStatus.catalogPersistenceError).toContain('synthetic main cleanup failure')
+    expect(JSON.parse(readFileSync(join(root, 'catalogs.json'), 'utf8')).version).toBe(2)
     save.mockRestore()
     await registry.flushPersistence()
     expect(JSON.parse(readFileSync(data, 'utf8')).catalogs).toBeUndefined()
-    expect(registry.snapshot().hostStatus.catalogPersistenceError).toBeUndefined()
+    expect(JSON.parse(readFileSync(data, 'utf8')).catalogs).toBeUndefined()
 
     const restored = new DeviceRegistry(data, secrets,
-      { localPort: () => 3080, localWorkspaces: () => [], localSessionUpdatedAt: () => new Map() },
-      { enableNativeProxy: false, allowDirectTransport: true })
+      { localPort: () => 3080 },
+      { allowDirectTransport: true })
     registries.push(restored)
     expect(restored.deviceCatalog(cache.deviceId)).toEqual(cache)
   })

@@ -1,20 +1,16 @@
 /**
  * Client-side reactive store, SSE live synchronization, and control-plane RPC client.
  *
- * The Host owns the aggregated/native mode (it must, because it decides whether
- * remote workspaces and sessions are merged into the local DSH surface). This
- * store mirrors the host snapshot and maintains the LRU Keep-Alive set of
- * Native Mode device pages. `activeNativeDeviceId === undefined` means the
- * leftmost Native tab, 本机, which is the unmodified local DSH page.
+ * The Host owns the device list and read state; this store mirrors the Host
+ * snapshot and maintains the LRU Keep-Alive set of device pages.
+ * `activeNativeDeviceId === undefined` means the leftmost tab, 本机, which is
+ * the unmodified local DSH page.
  *
  * @module dsh-multi-device/client/state
  */
 import type { StateDotState } from '@deepseek-ai/dsh-client-ui-primitives';
-import { type DeviceConnectionState, DeviceId, type DisplayMode, type ManualWorkspaceRule, type MultiDeviceSnapshot, type MultiDeviceUiPreferences, type RemoteSessionCreateInput, type RemoteWorkspaceCreateInput, type SshKeyEntry, type UpsertDeviceInput, type WorkspaceAggregationConfig } from '../contract.ts';
+import { type DeviceConnectionState, DeviceId, type MultiDeviceSnapshot, type MultiDeviceUiPreferences, type SshKeyEntry, type UpsertDeviceInput } from '../contract.ts';
 import type { ControlPlaneRequest, DiagnosticsClientReport, MultiDeviceDiagnostics } from '../runtime.ts';
-export type HubTabId = 'native' | 'devices' | 'git';
-/** Decode the owning device of a remote Session, or undefined for local/empty. */
-export declare function remoteDeviceForSession(sessionId: string | undefined): DeviceId | undefined;
 /**
  * Decide whether an incoming Host snapshot may replace the current one.
  *
@@ -46,48 +42,20 @@ export interface MultiDeviceClientState {
     readonly snapshot: MultiDeviceSnapshot;
     readonly loading: boolean;
     readonly error?: string;
-    /** Host-authoritative mode: `'aggregated'` (merged sidebar) or `'native'` (local page + device tabs). */
-    readonly displayMode: DisplayMode;
-    /** Selected remote device tab in Native Mode; `undefined` is the 本机 tab. */
+    /** Selected device tab; `undefined` is the 本机 tab. */
     readonly activeNativeDeviceId?: DeviceId;
     /**
-     * The Session currently shown in the conversation pane. The Host uses this to
-     * scope the model catalog: a remote Session must expose exactly the owning
-     * device's models, never a local/remote mix.
+     * The local Session currently shown in the conversation pane. The Host uses
+     * it to decide whether a completion lands on a conversation the user is
+     * actually looking at.
      */
     readonly activeSessionId?: string;
     /** Devices whose Native Mode `<webview>` / `<iframe>` instances are kept alive in the DOM. */
     readonly keepAliveDeviceIds: readonly DeviceId[];
     /** Reload counter per deviceId for triggering iframe/webview reload without losing other devices. */
     readonly reloadCounters: Readonly<Record<string, number>>;
-    /** Active tab inside the Multi-Device Hub panel (retained for API compatibility). */
-    readonly activeHubTab: HubTabId;
     /** Fallback settings modal open state when the host shell does not expose `sidebar.settings`. */
     readonly settingsModalOpen: boolean;
-    /**
-     * A remote Session to reopen after the next Aggregated Mode snapshot is
-     * applied. Set when leaving a Native device tab so the mode switch returns to
-     * the conversation the user was actually looking at.
-     */
-    readonly pendingAggregatedSessionId?: string;
-    /**
-     * Distilled Session-link repair status. `missing > 0` means at least one
-     * aggregated Workspace references Sessions the browser store has no summary
-     * for — the "expanded but empty" symptom. Surfaced as a banner so a stuck
-     * repair is never silent.
-     */
-    readonly sessionLinkStatus?: SessionLinkStatus;
-}
-/** Reactive distillation of {@link SessionLinkReport} for banner rendering. */
-export interface SessionLinkStatus {
-    /** Referenced ids with no summary in the Session store. */
-    readonly missing: number;
-    /** The initial fast-retry budget is spent; retries continue at a slow pace. */
-    readonly exhausted: boolean;
-    /** Owning device id → missing count. */
-    readonly byDevice: Readonly<Record<string, number>>;
-    /** Last `sessions.refresh()` failure, when any. */
-    readonly lastError?: string;
 }
 type ControlPlaneResult<T> = ({
     ok: true;
@@ -139,11 +107,6 @@ export declare class MultiDeviceClientStore {
     getSnapshot: () => MultiDeviceClientState;
     subscribe: (listener: () => void) => (() => void);
     private setState;
-    /**
-     * Publish the Session-link repair status. Diffs against the previous value
-     * so the per-change `check()` does not churn React renders.
-     */
-    updateSessionLinkStatus(status: SessionLinkStatus | undefined): void;
     private resetActiveSessionReport;
     private isFenceCurrent;
     private isResponseCurrent;
@@ -168,43 +131,23 @@ export declare class MultiDeviceClientStore {
     private clearUnreadForActiveSession;
     private activateNativeDevice;
     /**
-     * Mount (and keep alive) one device frame for the aggregated Native Pane
-     * without entering Native Mode. Idempotent; unknown/disabled devices are
-     * ignored so a cached Session row cannot create a frame for a removed device.
+     * Mount (and keep alive) one device frame without selecting its tab.
+     * Idempotent; unknown/disabled devices are ignored.
      */
     ensureKeepAliveDevice(deviceId: DeviceId): void;
-    /**
-     * Switch modes through the Host. The Host persists the mode and immediately
-     * stops/starts merging remote rows into the local surface; the resulting
-     * snapshot is applied here. `targetDeviceId` selects a remote tab; omitting
-     * it lands on 本机.
-     */
-    setDisplayMode(mode: DisplayMode, targetDeviceId?: DeviceId): Promise<{
-        ok: boolean;
-        error?: string;
-    }>;
-    /** Consume the remote Session captured when leaving Native Mode. */
-    takePendingAggregatedSession(): string | undefined;
-    /** Switch to a remote device tab, entering Native Mode if necessary. */
+    /** Switch to a remote device tab. */
     selectNativeDevice(deviceId: DeviceId): Promise<{
         ok: boolean;
         error?: string;
     }>;
-    /** Return to the 本机 tab while staying in Native Mode. */
+    /** Return to the 本机 tab. */
     selectLocalNativeTab(): void;
-    /** Clear the remote scope before restoring a real local Session, even when none exists. */
+    /** Restore the local Session scope for the 本机 tab, even when none exists. */
     private enterLocalScope;
     releaseKeepAliveDevice(deviceId: DeviceId): void;
     reloadNativeDevice(deviceId: DeviceId): void;
-    setActiveHubTab(tab: HubTabId): void;
     setSettingsModalOpen(open: boolean): void;
-    /**
-     * Track the Session currently rendered in the conversation pane and report it
-     * to the Host. The Host answers `session/modelCatalog` with exactly that
-     * Session owner's catalog, so a remote conversation never mixes in local
-     * models (and vice versa).
-     */
-    /** The local mirror remains mounted behind native tabs/global panels. */
+    /** The local mirror is mounted behind device tabs and global panels. */
     effectiveSessionId(): string | undefined;
     setMainViewVisible(visible: boolean): void;
     setActiveSession(sessionId: string | undefined): Promise<void>;
@@ -223,27 +166,6 @@ export declare class MultiDeviceClientStore {
     markDeviceRead(deviceId: DeviceId): Promise<{
         ok: boolean;
         changed: number;
-        error?: string;
-    }>;
-    retryCatalogNavigation(): Promise<void>;
-    /** Open navigation metadata without retaining a foreign Session in the local Controller. */
-    openCatalogSession(sessionId: string): Promise<{
-        ok: boolean;
-        error?: string;
-    }>;
-    catalogSessionAction(sessionId: string, action: import('../contract.ts').CatalogSessionAction, title?: string, stopActivity?: boolean): Promise<{
-        ok: boolean;
-        error?: string;
-        sessionId?: string;
-    }>;
-    searchCatalogSessions(query: string): Promise<{
-        ok: boolean;
-        error?: string;
-        sessionIds?: readonly string[];
-        errors?: Readonly<Record<string, string>>;
-    }>;
-    startSessionOnDevice(logicalWorkspaceId: string, deviceId: DeviceId): Promise<{
-        ok: boolean;
         error?: string;
     }>;
     callControlPlane<T = unknown>(request: ControlPlaneRequest): Promise<ControlPlaneResult<T>>;
@@ -291,52 +213,7 @@ export declare class MultiDeviceClientStore {
         error: string;
     }>;
     listSshKeys(): Promise<SshKeyEntry[]>;
-    createRemoteSession(input: RemoteSessionCreateInput): Promise<{
-        ok: boolean;
-        sessionId?: string;
-        error?: string;
-    }>;
-    createRemoteWorkspace(input: RemoteWorkspaceCreateInput): Promise<{
-        ok: boolean;
-        error?: string;
-    }>;
-    updateAggregationConfig(patch: Partial<WorkspaceAggregationConfig>): Promise<{
-        ok: boolean;
-        error?: string;
-    }>;
-    upsertManualRule(rule: ManualWorkspaceRule): Promise<void>;
-    removeManualRule(ruleId: string): Promise<void>;
-    setMemberExcluded(memberKey: string, excluded: boolean): Promise<{
-        ok: boolean;
-        error?: string;
-    }>;
-    startGitMatch(): Promise<{
-        ok: boolean;
-        error?: string;
-    }>;
-    cancelGitMatch(): Promise<boolean>;
-    /** Persist a display preference; the Host echoes the full snapshot back. */
     setUiPreferences(patch: Partial<MultiDeviceUiPreferences>): Promise<{
-        ok: boolean;
-        error?: string;
-    }>;
-    setPreferredDevice(logicalWorkspaceId: string, deviceId: DeviceId): Promise<{
-        ok: boolean;
-        error?: string;
-    }>;
-    /**
-     * Point a logical workspace at another device and open the New Session there.
-     *
-     * The Host registers the workspace path on a device that does not own it yet
-     * (nothing is copied) and creates that Session itself. A device that already
-     * owns the workspace only stores the preference; DSH's `startSession` then
-     * creates through the aggregated gateway. The previous device keeps its blank
-     * session, so an unsent draft is never copied or destroyed here.
-     */
-    switchNewSessionDevice(uiWorkspace: {
-        startSession?: (workspaceId?: string) => void;
-        openSession?: (sessionId: string) => void;
-    } | undefined, logicalWorkspaceId: string, deviceId: DeviceId): Promise<{
         ok: boolean;
         error?: string;
     }>;

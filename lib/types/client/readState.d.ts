@@ -1,5 +1,5 @@
 /**
- * Aggregated-mode unread overlay.
+ * Host-owned unread overlay for the local DSH shell.
  *
  * DSH's `uiSession.sessionStatus` is the single hook the workspace browser,
  * search results and hover cards read. The overlay wraps that source in place

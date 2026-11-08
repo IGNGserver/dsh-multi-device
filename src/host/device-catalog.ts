@@ -1,4 +1,4 @@
-import { isNamespacedSessionId, isNamespacedWorkspaceId, type DeviceCatalogCache } from '../contract.ts'
+import { isNamespacedSessionId, type DeviceCatalogCache } from '../contract.ts'
 import type { RemoteSessionSummary, RemoteWorkspaceItem } from './remote-client.ts'
 
 export function isCatalogRecord(value: unknown): value is Record<string, unknown> {
@@ -7,7 +7,7 @@ export function isCatalogRecord(value: unknown): value is Record<string, unknown
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value)
 const sequence = (value: unknown): value is number => finite(value) && Number.isSafeInteger(value) && value >= -1
 const sessionId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && !isNamespacedSessionId(value)
-const workspaceId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && !isNamespacedWorkspaceId(value)
+const workspaceId = (value: unknown): value is string => typeof value === 'string' && value.length > 0
 export function catalogSessionIds(value: unknown): string[] {
   return Array.isArray(value) ? [...new Set(value.filter(sessionId))] : []
 }
@@ -116,9 +116,9 @@ export class DeviceCatalog {
   }
   hydrate(cache: DeviceCatalogCache): boolean {
     if (this.rows.length || this.workspaceRows.length || this.readyParts.size) return false
-    this.rows = cache.sessions.map(row => parseSessionSummary({ ...row,
-      ...(typeof row.title === 'string' ? { projections: { kind: 'cached', asOfSeq: 0, values: { title: row.title } } } : {}),
-    })).filter((row): row is RemoteSessionSummary => row !== undefined)
+    this.rows = cache.sessions
+      .map(row => parseSessionSummary(row))
+      .filter((row): row is RemoteSessionSummary => row !== undefined)
     this.workspaceRows = cache.workspaces.map(row => parseWorkspace(row)).filter((row): row is RemoteWorkspaceItem => row !== undefined)
     this.setArchivedIds(cache.archivedSessionIds)
     this.setPinnedIds(cache.pinnedSessionIds)

@@ -197,8 +197,6 @@ describe('native proxy browser isolation', () => {
     const origin = new URL(url).origin
     const bootstrap = await fetch(url, { redirect: 'manual' })
     const cookie = bootstrap.headers.get('set-cookie')!.split(';')[0]!
-    manager.openSession(id, 'manager-a', 'a')
-    manager.setEmbedded(id, true, 'a')
     const a = await bridge(origin, cookie, 'a')
     await a.ready()
     a.send({ type: 'title', title: 'manager title' })
@@ -210,8 +208,6 @@ describe('native proxy browser isolation', () => {
     expect(manager.bridgeSnapshot(id, 'b').state).toBe('failed')
     expect(manager.bridgeSnapshot(id, 'a')).toEqual({ state: 'ready', title: 'manager title' })
     expect(manager.bridgeSnapshot(id)).toEqual({ state: 'idle' })
-    expect(a.commands).toContainEqual({ type: 'open-session', sessionId: 'manager-a' })
-    expect(a.commands).toContainEqual({ type: 'set-embedded', enabled: true })
   })
 
   it.each(['browser-a', 'browser &+?b', ''])('gets socket ownership from the frame URL, not the script URL: %s', clientId => {

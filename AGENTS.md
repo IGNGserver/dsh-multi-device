@@ -12,7 +12,7 @@ Worktree: `~/项目/.wt/DSH多设备插件/<slug>`
 
 ## 这是什么
 
-DeepSeek Harness（DSH）多设备管理插件：以 SSH 隧道连接远端 DSH（HTTP(S) direct 仅保留为默认关闭的高级兼容开关），复用系统 `~/.ssh/config` 与本机私钥，支持 Git Remote 自动工作区聚合，以及聚合模式与原生模式（Keep-Alive 保活）双模式切换。`main` 是开发线，不代表稳定版。
+DeepSeek Harness（DSH）多设备管理插件：以 SSH 隧道连接远端 DSH（HTTP(S) direct 仅保留为默认关闭的高级兼容开关），复用系统 `~/.ssh/config` 与本机私钥，以顶部常驻设备标签页运行每台远端的完整 DSH 界面（Keep-Alive 保活），本机标签页保持原生本地 DSH。`main` 是开发线，不代表稳定版。
 
 ## 开工与工作区纪律（主目录无代码 + 从远端 `origin/main` 拉取）
 

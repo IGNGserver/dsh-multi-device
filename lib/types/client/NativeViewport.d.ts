@@ -21,14 +21,9 @@ export declare function NativeTabBar({ t, onOpenSettings, }: {
     onOpenSettings: () => void;
 }): React.ReactElement | null;
 /**
- * Remote viewports for both modes:
- * - Native Mode: full frame below the tab bar.
- * - Aggregated Mode: a pane covering only the local conversation column while
- *   a remote Session is selected; the aggregated sidebar stays interactive.
- *
- * The pane is visible only after the injected bridge reports the selected raw
- * Session (see `shouldShowNativePane`). Until then the local mirror remains
- * visible, so a slow bridge or a version mismatch never shows a blank pane.
+ * Remote device viewports: one full frame per mounted device, directly below
+ * the tab strip. Inactive devices stay mounted but hidden so Keep-Alive keeps
+ * their live WebSocket state, conversations and drafts.
  */
 export declare function NativeViewport({ t, onOpenSettings, }: {
     t: (key: MultiDeviceLocaleKey) => string;

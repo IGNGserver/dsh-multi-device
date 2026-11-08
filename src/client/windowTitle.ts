@@ -1,16 +1,15 @@
 /**
- * Window/taskbar title for the aggregated and native surfaces.
+ * Window/taskbar title while a remote device tab is active.
  *
  * DSH's layout owns `document.title` and derives it from the *local* Session
- * list. A remote page lives in a cross-origin iframe, so its title never reaches
+ * list. A remote page lives in a cross-origin frame, so its title never reaches
  * the parent document. The bridge reports that title through the Host snapshot;
- * this module applies it while a remote device is the visible conversation and
- * restores DSH's own title when the 本机 surface is active again.
+ * this module applies it while a remote device tab is visible and restores
+ * DSH's own title when the 本机 tab is active again.
  *
  * @module dsh-multi-device/client/windowTitle
  */
-import type { DeviceId, DeviceView, DisplayMode } from '../contract.ts'
-import { nativePaneTarget } from './nativePane.ts'
+import type { DeviceId, DeviceView } from '../contract.ts'
 import { clientStore, type MultiDeviceClientState } from './state.ts'
 
 /** Shortest useful title; longer values are bounded to keep taskbars sane. */
@@ -28,38 +27,21 @@ function cleanTitle(value: string | undefined): string | undefined {
 
 /** Inputs the title depends on; kept as a narrow shape so it is easy to test. */
 export interface WindowTitleInput {
-  readonly displayMode: DisplayMode
   readonly activeNativeDeviceId?: DeviceId
-  readonly activeSessionId?: string
   readonly devices: readonly DeviceView[]
-  readonly nativePaneEnabled: boolean
 }
 
 /**
  * Pick the title the local window should show, or `undefined` to leave DSH in
- * charge. In Native Mode a missing bridge title falls back to the device name;
- * in the aggregated pane a missing title is left to the local aggregated
- * Session row so no stale remote title can appear.
+ * charge. A missing bridge title falls back to the device name so the window
+ * never shows the local conversation's title while a remote tab is active.
  */
 export function resolveWindowTitle(input: WindowTitleInput): string | undefined {
-  if (input.displayMode === 'native') {
-    if (input.activeNativeDeviceId === undefined) return undefined
-    const device = input.devices.find(candidate => candidate.id === input.activeNativeDeviceId)
-    if (device === undefined) return undefined
-    const remoteTitle = device.state === 'connected'
-      ? cleanTitle(device.nativePaneTitle)
-      : undefined
-    return remoteTitle ?? cleanTitle(device.name)
-  }
-
-  if (!input.nativePaneEnabled) return undefined
-  const target = nativePaneTarget('aggregated', input.activeSessionId)
-  if (target === undefined) return undefined
-  const device = input.devices.find(candidate => candidate.id === target.deviceId)
-  if (device === undefined || device.state !== 'connected') return undefined
-  if (device.nativePaneState !== 'ready') return undefined
-  if (device.nativePaneSessionId !== target.rawSessionId) return undefined
-  return cleanTitle(device.nativePaneTitle)
+  if (input.activeNativeDeviceId === undefined) return undefined
+  const device = input.devices.find(candidate => candidate.id === input.activeNativeDeviceId)
+  if (device === undefined) return undefined
+  const remoteTitle = device.state === 'connected' ? cleanTitle(device.nativePaneTitle) : undefined
+  return remoteTitle ?? cleanTitle(device.name)
 }
 
 /**
@@ -171,16 +153,10 @@ export function installWindowTitle(): () => void {
     const state: MultiDeviceClientState = clientStore.getSnapshot()
     try {
       controller.apply(resolveWindowTitle({
-        displayMode: state.displayMode,
         ...(state.activeNativeDeviceId !== undefined
           ? { activeNativeDeviceId: state.activeNativeDeviceId }
           : {}),
-        ...(state.activeSessionId !== undefined
-          ? { activeSessionId: state.activeSessionId }
-          : {}),
         devices: state.snapshot.devices,
-        nativePaneEnabled: state.snapshot.ui?.nativePane !== false &&
-          state.snapshot.hostStatus.nativeProxyActive,
       }))
     } catch {
       // A title must never break the rest of the plugin.

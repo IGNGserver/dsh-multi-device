@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Multi-device workspace",
-    "description": "Connect DSH development machines over system SSH, aggregate registered Git workspaces and sessions, or use each device’s native interface. No project-file synchronization."
+    "description": "Connect DSH development machines over system SSH and switch between This Device and each machine’s own DSH UI in a persistent tab strip. No project-file synchronization."
   }
 }

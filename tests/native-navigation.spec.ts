@@ -246,14 +246,4 @@ describe('native proxy navigation ownership', () => {
     } finally { proxy.stop() }
   })
 
-  it('passes optional request sequence through the manager API without changing existing call order', () => {
-    const manager = new NativeProxyManager(new DeviceAuthManager())
-    const proxy = { openSession: vi.fn(), stop: vi.fn() }
-    ;(manager as any).proxies.set(device.id, proxy)
-    expect(manager.openSession(device.id, 'target', 'browser', 19)).toBe(true)
-    expect(proxy.openSession).toHaveBeenCalledWith('target', 'browser', 19)
-    expect(manager.openSession(device.id, 'legacy')).toBe(true)
-    expect(proxy.openSession).toHaveBeenLastCalledWith('legacy', 'legacy', undefined)
-    manager.dispose()
-  })
 })

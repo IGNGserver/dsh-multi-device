@@ -1,9 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DeviceId, type MultiDeviceSnapshot } from '../src/contract.ts'
 import { MultiDeviceClientStore } from '../src/client/state.ts'
-import { getClientServices } from '../src/client/clientServices.ts'
 
-vi.mock('../src/client/clientServices.ts', () => ({ getClientServices: vi.fn(() => ({})) }))
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -247,33 +245,6 @@ describe('snapshot generation fences', () => {
     await Promise.all([a, b])
     expect(value.getSnapshot()).toBe(before)
     expect(value.getSnapshot().keepAliveDeviceIds).toEqual(['dev'])
-  })
-
-  it('rejects older mode response even with a forced active-tab override', async () => {
-    const value = store()
-    const late = deferred<unknown>()
-    let modeRequests = 0
-    transport(() => ++modeRequests === 1 ? late.promise : response({ snapshot: snapshot(value, 2, undefined, { displayMode: 'aggregated' }) }))
-    const a = value.setDisplayMode('native', DeviceId('a'))
-    await value.setDisplayMode('aggregated')
-    late.resolve(response({ snapshot: snapshot(value, 900, 'stale-host', { displayMode: 'native', devices: [{ id: 'a' }] }) }))
-    expect(await a).toMatchObject({ ok: false })
-    expect(value.getSnapshot().displayMode).toBe('aggregated')
-  })
-
-  it('cancels post-refresh navigation after dispose', async () => {
-    const value = store()
-    const refresh = deferred<void>()
-    vi.mocked(getClientServices).mockReturnValue({ sessions: { refresh: () => refresh.promise } } as any)
-    transport(() => response({ mode: 'registered', sessionId: 'created', snapshot: snapshot(value, 1) }))
-    const openSession = vi.fn()
-    const pending = value.switchNewSessionDevice({ openSession }, 'workspace', DeviceId('dev'))
-    await flush()
-    value.dispose()
-    refresh.resolve()
-    expect(await pending).toMatchObject({ ok: false })
-    expect(openSession).not.toHaveBeenCalled()
-    vi.mocked(getClientServices).mockReturnValue({} as any)
   })
 
   it('does not accept a legacy snapshot downgrade once an epoch has been established', async () => {

@@ -1,7 +1,7 @@
 {
   "name": "dsh-multi-device",
-  "description": "Multi-device management plugin for DeepSeek Harness (DSH) Desktop & Web: SSH tunnel connections, system SSH config and key reuse, Git remote workspace auto-aggregation, and independent Aggregated + Native dual-mode UI with keep-alive.",
-  "version": "0.2.21",
+  "description": "Multi-device management plugin for DeepSeek Harness (DSH) Desktop & Web: SSH tunnel connections, system SSH config and key reuse, and a persistent keep-alive device tab strip that runs each remote machine\u2019s own DSH UI.",
+  "version": "0.3.0",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
@@ -72,7 +72,7 @@
     "verify:package": "node scripts/verify-package.mjs",
     "verify:artifacts": "node scripts/verify-artifacts.mjs",
     "test:install": "node scripts/smoke-official-install.mjs",
-    "test:aggregated-browser": "node scripts/smoke-aggregated-browser.mjs"
+    "test:device-browser": "node scripts/smoke-device-browser.mjs"
   },
   "engines": {
     "node": "^22.19 || >=24"

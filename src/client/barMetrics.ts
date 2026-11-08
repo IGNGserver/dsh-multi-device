@@ -5,9 +5,9 @@
  * normally the browser viewport, but an embedded remote page (Electron
  * `<webview>` or a wide iframe) can widen the layout, so `left: 0; right: 0`
  * resolves to a box wider than what the user can see. Right-aligned controls
- * (the Settings gear and the rightmost "Aggregated Mode" switch) then render
+ * (the Settings gear) then render
  * off-screen — the exact failure a Windows Desktop user reported: device tabs
- * visible, mode switch missing, no way back to Aggregated Mode.
+ * visible, Settings missing, no way to open device settings.
  *
  * This module keeps the measurement pure and testable: {@link measureNativeBar}
  * decides the clamped width and the compact layout, while the live bar records
