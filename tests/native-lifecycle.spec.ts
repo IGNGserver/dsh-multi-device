@@ -281,6 +281,19 @@ describe('native proxy lifecycle', () => {
     await vi.waitFor(() => expect(pendingCount(proxy)).toBe(0))
   })
 
+  it.each(['corrupt', 'oversized'])('returns 502 for %s compressed HTML instead of a raw 200 response', async mode => {
+    const upstream = await remote((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html', 'content-encoding': 'gzip' })
+      res.end(mode === 'corrupt' ? Buffer.from('not a gzip stream') : gzipSync(Buffer.alloc(20 * 1024 * 1024 + 1, 65)))
+    })
+    const { proxy, origin, cookie } = await target(upstream.base)
+    const response = await client(origin, cookie, '/', { html: true }).response
+    expect(response.statusCode).toBe(502)
+    expect(await body(response)).toContain('could not be decoded safely')
+    expect(proxy.bridgeSnapshot().state).toBe('failed')
+    await vi.waitFor(() => expect(pendingCount(proxy)).toBe(0))
+  })
+
   it('consumes async authentication failure and closes rejected response bodies', async () => {
     const auth = new DeviceAuthManager()
     vi.spyOn(auth, 'ensureAuthenticated').mockResolvedValueOnce({ ok: true }).mockRejectedValue(new Error('auth failed'))

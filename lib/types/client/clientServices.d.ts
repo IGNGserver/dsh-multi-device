@@ -23,6 +23,7 @@ export interface UiWorkspaceServiceLike {
 export interface BoundClientServices {
     readonly sessions?: SessionsServiceLike;
     readonly uiWorkspace?: UiWorkspaceServiceLike;
+    readonly revealMain?: () => void;
 }
 /** Publish the injected services; returns a disposer that clears them. */
 export declare function bindClientServices(next: BoundClientServices): () => void;

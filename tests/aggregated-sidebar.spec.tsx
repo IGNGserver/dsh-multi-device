@@ -5,6 +5,7 @@ import { DeviceId, encodeRemoteSessionId, type AggregatedSessionRow, type Logica
 import { buildAggregatedSidebarModel, sidebarDeviceChoices, sidebarFocusKey } from '../src/client/aggregatedSidebarModel.ts'
 import { bindClientServices } from '../src/client/clientServices.ts'
 import { AggregatedSidebar } from '../src/client/AggregatedSidebar.tsx'
+import { virtualWindow } from '../src/client/virtualRows.ts'
 
 const mock = vi.hoisted(() => ({
   state: {} as any,
@@ -137,6 +138,21 @@ describe('independent aggregated sidebar directory model', () => {
     expect(result.groups[0]?.sessions.map(node => node.row.id)).toEqual([r, missing])
     expect(result.groups[1]?.sessions).toHaveLength(0)
   })
+  it('bounds virtual rows with mixed heights, overscan, and clamped edges', () => {
+    const heights = [34, 32, 32, 28, 34, 32, 32, 32]
+    const initial = virtualWindow(heights, 0, 64, 1)
+    expect(initial).toMatchObject({ start: 0, top: 0 })
+    expect(initial.end).toBeLessThan(heights.length)
+    const middle = virtualWindow(heights, 100, 64, 1)
+    expect(middle.start).toBeGreaterThan(0)
+    expect(middle.end).toBeGreaterThan(middle.start)
+    expect(middle.top).toBeGreaterThan(0)
+    expect(middle.bottom).toBeGreaterThanOrEqual(0)
+    const tail = virtualWindow(heights, 10_000, 64, 1)
+    expect(tail.end).toBe(heights.length)
+    expect(tail.bottom).toBe(0)
+    expect(virtualWindow([], 0, 400)).toMatchObject({ start: 0, end: 0, total: 0 })
+  })
   it('has deterministic nonwrapping keyboard navigation and disabled offline choices', () => {
     expect(sidebarFocusKey(['a', 'b'], 'a', 'ArrowDown')).toBe('b')
     expect(sidebarFocusKey(['a', 'b'], 'b', 'ArrowDown')).toBe('b')
@@ -171,6 +187,14 @@ describe('mounted aggregated sidebar interactions', () => {
     expect(h.byId(`catalog-open-session:${r}`)).toBeDefined()
     h.search('another query')
     expect(h.byId(`catalog-open-session:${r}`)).toBeUndefined()
+  })
+  it('shows successful content matches together with partial-source failures', async () => {
+    mock.search.mockResolvedValue({ ok: true, sessionIds: [r], errors: { dev: 'offline search' } })
+    const h = harness()
+    h.search('needle')
+    await h.click('catalog-search-content')
+    expect(h.byId(`catalog-open-session:${r}`)).toBeDefined()
+    expect(h.byId('catalog-search-partial').children.join('')).toContain('offline search')
   })
   it('ignores an in-flight content result after query changes', async () => {
     let resolve!: (value: unknown) => void
@@ -284,6 +308,22 @@ describe('mounted aggregated sidebar interactions', () => {
     await h.click('catalog-search-content')
     expect(h.byId('catalog-error').children.join('')).toContain('remote search unsupported')
   })
+  it('mounts only a window of a long tree and scrolls End navigation to its focus target', () => {
+    const ids = Array.from({ length: 100 }, (_, index) => `s-${index}`)
+    const base = snapshot()
+    mock.state.snapshot = { ...base,
+      catalog: { ...base.catalog!, sessions: Object.fromEntries(ids.map(id => [id, row(id)])), pinnedSessionIds: [], issues: {} },
+      logicalWorkspaces: [workspace(ids)], archivedSessionIds: [], unreadSessionIds: [],
+    }
+    const h = harness()
+    expect(h.renderer.root.findAll(node => node.props.role === 'treeitem').length).toBeLessThan(25)
+    const event = { key: 'End', target: { dataset: { treeKey: 'workspace:project' } }, preventDefault: vi.fn() }
+    act(() => h.byId('catalog-tree').props.onKeyDown(event))
+    expect(event.preventDefault).toHaveBeenCalled()
+    expect(h.byId('catalog-open-session:s-99')).toBeDefined()
+    expect(h.nodes.get('session:s-99')?.focus).toHaveBeenCalled()
+    expect(h.renderer.root.findAll(node => node.props.role === 'treeitem').length).toBeLessThan(25)
+  })
   it('keeps a collapsed rail compact and requests parent expansion', () => {
     const expand = vi.fn()
     let renderer!: ReactTestRenderer
@@ -305,10 +345,13 @@ describe('mounted aggregated sidebar interactions', () => {
     expect(focusRemote).toHaveBeenCalled()
     mock.state.loading = true
     mock.state.snapshot.catalog.issues = { 'dev-a': 'offline cache' }
-    mock.state.snapshot.logicalWorkspaces[0].sessionIds.push('missing')
+    mock.state.snapshot = { ...mock.state.snapshot,
+      logicalWorkspaces: [{ ...mock.state.snapshot.logicalWorkspaces[0]!, sessionIds: [...mock.state.snapshot.logicalWorkspaces[0]!.sessionIds, 'missing'] }],
+    }
     h.update()
     expect(h.byId('catalog-loading')).toBeDefined()
     expect(h.byId('catalog-issue-dev-a').children.join('')).toContain('offline cache')
+    act(() => h.byId('catalog-tree').props.onKeyDown(treeEvent('End', `session:${r}`)))
     expect(h.byId('catalog-open-session:missing')).toBeDefined()
     mock.state.displayMode = 'native'; h.update()
     expect(h.renderer.toJSON()).toBeNull()

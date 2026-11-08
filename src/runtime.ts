@@ -28,6 +28,9 @@ export const MULTI_DEVICE_API_PATH = '/multi-device/api'
 export const MULTI_DEVICE_EVENTS_PATH = '/multi-device/events'
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024
+const MAX_ACTIVE_CONTROL_REQUESTS = 64
+const CONTROL_REQUEST_DEADLINE_MS = 60_000
+const BODY_READ_DEADLINE_MS = 15_000
 const LOOPBACK_NAMES = new Set(['127.0.0.1', 'localhost', '[::1]'])
 
 /** True when the Host header is this machine's loopback, including `[::1]`. */
@@ -151,6 +154,144 @@ export interface ControlPlaneRequest {
     | 'markDeviceRead'
     | 'setUiPreferences'
   readonly payload?: Record<string, unknown>
+}
+
+const CONTROL_ACTIONS: ReadonlySet<string> = new Set<ControlPlaneRequest['action']>([
+  'snapshot', 'catalogSessionAction', 'searchCatalogSessions', 'modelCatalog', 'diagnostics',
+  'setDisplayMode', 'upsertDevice', 'removeDevice', 'reconnectDevice', 'authenticateDevice',
+  'testDevice', 'listSshKeys', 'startSessionOnDevice', 'createSession', 'createRemoteWorkspace',
+  'updateAggregationConfig', 'upsertManualRule', 'removeManualRule', 'setMemberExcluded',
+  'setPreferredDevice', 'setCustomTitle', 'startGitMatch', 'cancelGitMatch', 'setActiveSession',
+  'markSessionRead', 'markDeviceRead', 'setUiPreferences',
+])
+
+/** Validate the transport envelope before TypeScript erases its runtime types. */
+export function parseControlPlaneRequest(value: unknown): ControlPlaneRequest {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('Expected a request object')
+  const candidate = value as { action?: unknown; payload?: unknown }
+  if (typeof candidate.action !== 'string' || !CONTROL_ACTIONS.has(candidate.action)) throw new Error('Unknown action')
+  if (candidate.payload !== undefined && (candidate.payload === null || typeof candidate.payload !== 'object' || Array.isArray(candidate.payload))) {
+    throw new Error('Payload must be an object')
+  }
+  const request = candidate as ControlPlaneRequest
+  validateControlPlanePayload(request)
+  return request
+}
+
+type Payload = Record<string, unknown>
+function payloadString(payload: Payload, key: string, required = true, max = 4096, allowEmpty = false): void {
+  const value = payload[key]
+  if (value === undefined && !required) return
+  if (typeof value !== 'string' || value.length > max || (!allowEmpty && value.trim() === '')) {
+    throw new Error(`${key} must be ${required ? 'a' : 'an optional'} ${allowEmpty ? '' : 'non-empty '}string of at most ${max} characters`)
+  }
+}
+function payloadBoolean(payload: Payload, key: string, required = false): void {
+  const value = payload[key]
+  if (value === undefined && !required) return
+  if (typeof value !== 'boolean') throw new Error(`${key} must be ${required ? 'a' : 'an optional'} boolean`)
+}
+function payloadPort(payload: Payload, key: string): void {
+  const value = payload[key]
+  if (value === undefined) return
+  if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > 65_535) throw new Error(`${key} must be an integer from 1 to 65535`)
+}
+function payloadObject(value: unknown, key: string): Payload {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${key} must be an object`)
+  return value as Payload
+}
+function payloadStringArray(payload: Payload, key: string, maxItems = 512): void {
+  const value = payload[key]
+  if (value === undefined) return
+  if (!Array.isArray(value) || value.length > maxItems || value.some(item => typeof item !== 'string' || item.length > 16_384)) {
+    throw new Error(`${key} must be an array of at most ${maxItems} bounded strings`)
+  }
+}
+function payloadStringMap(payload: Payload, key: string): void {
+  const value = payload[key]
+  if (value === undefined) return
+  const record = payloadObject(value, key)
+  const entries = Object.entries(record)
+  if (entries.length > 512 || entries.some(([id, item]) => id.length > 4096 || typeof item !== 'string' || item.length > 4096)) {
+    throw new Error(`${key} must be a bounded string map`)
+  }
+}
+function validateDeviceInput(payload: Payload): void {
+  payloadString(payload, 'id', false, 512)
+  payloadString(payload, 'name', true, 256)
+  payloadString(payload, 'label', false, 256, true)
+  payloadBoolean(payload, 'enabled')
+  payloadBoolean(payload, 'keepNativeAlive')
+  const transport = payloadObject(payload.transport, 'transport')
+  if (transport.kind === 'ssh') {
+    payloadString(transport, 'host')
+    for (const key of ['username', 'privateKeyPath', 'proxyJump', 'remoteBindHost', 'remoteDshHome']) payloadString(transport, key, false, 16_384)
+    payloadString(transport, 'passphrase', false, 1024 * 1024, true)
+    payloadPort(transport, 'port'); payloadPort(transport, 'remotePort')
+    payloadBoolean(transport, 'bootstrapFromRemoteCredentials')
+    if (transport.engine !== undefined && !['auto', 'system-ssh', 'ssh2'].includes(String(transport.engine))) throw new Error('Invalid SSH engine')
+  } else if (transport.kind === 'direct') {
+    payloadString(transport, 'baseUrl', true, 16_384)
+    payloadBoolean(transport, 'rejectUnauthorized')
+  } else throw new Error('transport.kind must be "ssh" or "direct"')
+  if (payload.auth !== undefined) {
+    const auth = payloadObject(payload.auth, 'auth')
+    if (!['auto', 'token', 'cookie', 'bearer', 'none'].includes(String(auth.mode))) throw new Error('Invalid auth mode')
+    payloadString(auth, 'credential', false, 1024 * 1024, true)
+  }
+}
+function validateManualRule(value: unknown, key = 'rule'): void {
+  const rule = payloadObject(value, key)
+  payloadString(rule, 'id', true, 4096)
+  payloadString(rule, 'title', true, 4096, true)
+  payloadStringArray(rule, 'memberKeys')
+  if (!Array.isArray(rule.memberKeys)) throw new Error(`${key}.memberKeys is required`)
+  payloadString(rule, 'gitRemote', false, 16_384)
+  payloadString(rule, 'preferredDeviceId', false, 512)
+}
+/** Field-level runtime schemas shared by HTTP parsing and direct dispatch. */
+export function validateControlPlanePayload(request: ControlPlaneRequest): void {
+  const payload = request.payload ?? {}
+  payloadString(payload, 'clientId', false, 128)
+  switch (request.action) {
+    case 'catalogSessionAction':
+      payloadString(payload, 'sessionId', true, 4096)
+      if (!['rename', 'archive', 'unarchive', 'pin', 'unpin', 'fork'].includes(String(payload.operation))) throw new Error('Invalid session operation')
+      payloadString(payload, 'title', false, 4096, true); payloadBoolean(payload, 'stopActivity')
+      break
+    case 'searchCatalogSessions': payloadString(payload, 'query', true, 1000); break
+    case 'modelCatalog': payloadString(payload, 'sessionId', false, 4096); break
+    case 'diagnostics': if (payload.client !== undefined) payloadObject(payload.client, 'client'); break
+    case 'setActiveSession':
+      payloadString(payload, 'sessionId', false, 4096, true)
+      if (payload.requestSeq !== undefined && (!Number.isSafeInteger(payload.requestSeq) || (payload.requestSeq as number) < 0)) throw new Error('requestSeq must be a non-negative safe integer')
+      break
+    case 'markSessionRead': payloadString(payload, 'sessionId'); payloadString(payload, 'expectedCompletionId', false, 1024); break
+    case 'markDeviceRead': case 'removeDevice': case 'reconnectDevice': payloadString(payload, 'deviceId', true, 512); break
+    case 'authenticateDevice': payloadString(payload, 'deviceId', true, 512); payloadString(payload, 'credential', false, 1024 * 1024, true); break
+    case 'setDisplayMode': if (payload.displayMode !== 'aggregated' && payload.displayMode !== 'native') throw new Error('Invalid displayMode'); break
+    case 'upsertDevice': case 'testDevice': validateDeviceInput(payload); break
+    case 'startSessionOnDevice': payloadString(payload, 'logicalWorkspaceId'); payloadString(payload, 'deviceId', true, 512); break
+    case 'createSession':
+      payloadString(payload, 'deviceId', true, 512); payloadString(payload, 'workspaceId', false); payloadString(payload, 'cwd', false, 16_384); payloadString(payload, 'agentPreset', false, 1024)
+      break
+    case 'createRemoteWorkspace': payloadString(payload, 'deviceId', true, 512); payloadString(payload, 'path', true, 16_384); break
+    case 'updateAggregationConfig':
+      payloadBoolean(payload, 'autoGitAggregate'); payloadBoolean(payload, 'prefixUnmatchedWithDevice')
+      payloadStringArray(payload, 'excludedMemberKeys'); payloadStringMap(payload, 'preferredDeviceByLogicalId'); payloadStringMap(payload, 'customTitleByLogicalId'); payloadStringArray(payload, 'workspaceOrder')
+      if (payload.manualRules !== undefined) {
+        if (!Array.isArray(payload.manualRules) || payload.manualRules.length > 512) throw new Error('manualRules must be a bounded array')
+        payload.manualRules.forEach(rule => validateManualRule(rule, 'manualRules[]'))
+      }
+      break
+    case 'upsertManualRule': validateManualRule(payload); break
+    case 'removeManualRule': payloadString(payload, 'ruleId'); break
+    case 'setMemberExcluded': payloadString(payload, 'memberKey', true, 16_384); payloadBoolean(payload, 'excluded', true); break
+    case 'setPreferredDevice': payloadString(payload, 'logicalWorkspaceId'); payloadString(payload, 'deviceId', true, 512); break
+    case 'setCustomTitle': payloadString(payload, 'logicalWorkspaceId'); payloadString(payload, 'title', true, 4096, true); break
+    case 'setUiPreferences': payloadBoolean(payload, 'sessionRowDeviceDot'); payloadBoolean(payload, 'nativePane'); payloadBoolean(payload, 'crossHostReadState'); break
+    default: break
+  }
 }
 
 /**
@@ -353,6 +494,8 @@ export function buildDiagnostics(
 }
 
 export class MultiDeviceControlPlane {
+  private activeControlRequests = 0
+
   constructor(
     private readonly registry: DeviceRegistry,
     private readonly admitRequest?: (req: IncomingMessage) => boolean,
@@ -361,10 +504,12 @@ export class MultiDeviceControlPlane {
   /** Execute one control-plane action and return a JSON-serializable result envelope. */
   async dispatch(
     request: ControlPlaneRequest,
+    signal?: AbortSignal,
   ): Promise<{ ok: true; value: unknown } | { ok: false; error: string }> {
     const payload = request.payload ?? {}
     const clientId = typeof payload.clientId === 'string' ? payload.clientId.slice(0, 128) : 'legacy'
     try {
+      validateControlPlanePayload(request)
       switch (request.action) {
         case 'snapshot':
           return { ok: true, value: this.registry.snapshot(clientId) }
@@ -379,7 +524,7 @@ export class MultiDeviceControlPlane {
 
         case 'searchCatalogSessions': {
           if (typeof payload.query !== 'string' || !payload.query.trim() || payload.query.length > 1000) return { ok: false, error: 'A search query of 1–1000 characters is required' }
-          return { ok: true, value: { sessionIds: await this.registry.searchCatalogSessions(payload.query.trim()) } }
+          return { ok: true, value: await this.registry.searchCatalogSessions(payload.query.trim(), signal) }
         }
 
         case 'modelCatalog': {
@@ -391,7 +536,7 @@ export class MultiDeviceControlPlane {
           if (scope.client === undefined || !scope.client.isConnected()) {
             return { ok: false, error: `Device ${scope.deviceName} is not connected` }
           }
-          const catalog = await scope.client.invokeUnary('session', 'modelCatalog', {})
+          const catalog = await scope.client.invokeUnary('session', 'modelCatalog', {}, signal)
           return { ok: true, value: catalog }
         }
 
@@ -634,32 +779,70 @@ export class MultiDeviceControlPlane {
       res.end(JSON.stringify({ ok: false, error: 'Method Not Allowed' }))
       return
     }
-
-    const bodyBuf = await readBody(req)
-    if (bodyBuf === null) {
-      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
-      res.end(JSON.stringify({ ok: false, error: 'Invalid request body' }))
+    if (this.activeControlRequests >= MAX_ACTIVE_CONTROL_REQUESTS) {
+      res.writeHead(429, { 'content-type': 'application/json; charset=utf-8', 'retry-after': '1' })
+      res.end(JSON.stringify({ ok: false, error: 'Control plane is busy; retry after the current operations finish' }))
       return
     }
 
-    let parsed: ControlPlaneRequest
+    this.activeControlRequests += 1
+    let dispatchStarted = false
     try {
-      parsed = JSON.parse(bodyBuf.toString('utf8')) as ControlPlaneRequest
-      if (!parsed || typeof parsed.action !== 'string') {
-        throw new Error('Missing action')
+      const bodyBuf = await readBody(req)
+      if (bodyBuf === null) {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ ok: false, error: 'Invalid request body' }))
+        return
       }
-    } catch {
-      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
-      res.end(JSON.stringify({ ok: false, error: 'Malformed JSON body' }))
-      return
-    }
 
-    const outcome = await this.dispatch(parsed)
-    res.writeHead(200, {
-      'content-type': 'application/json; charset=utf-8',
-      'cache-control': 'no-store',
-    })
-    res.end(JSON.stringify(outcome))
+      let parsed: ControlPlaneRequest
+      try {
+        parsed = parseControlPlaneRequest(JSON.parse(bodyBuf.toString('utf8')))
+      } catch {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ ok: false, error: 'Malformed control-plane request' }))
+        return
+      }
+
+      const operationAbort = new AbortController()
+      const abortOperation = (): void => { operationAbort.abort() }
+      req.once('aborted', abortOperation)
+      res.once('close', abortOperation)
+      const work = this.dispatch(parsed, operationAbort.signal)
+      dispatchStarted = true
+      // The admission slot follows the real operation even after its HTTP
+      // deadline. A caller cannot create unbounded background work by timing
+      // out and retrying a non-idempotent action.
+      const release = (): void => {
+        this.activeControlRequests = Math.max(0, this.activeControlRequests - 1)
+        req.off('aborted', abortOperation)
+        res.off('close', abortOperation)
+      }
+      void work.then(release, release)
+      const deadlineMarker = Symbol('control-plane-deadline')
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const deadline = new Promise<typeof deadlineMarker>(resolve => {
+        timer = setTimeout(() => resolve(deadlineMarker), CONTROL_REQUEST_DEADLINE_MS)
+        timer.unref?.()
+      })
+      const outcome = await Promise.race([work, deadline])
+      if (timer !== undefined) clearTimeout(timer)
+      if (outcome === deadlineMarker) {
+        if (!res.destroyed) {
+          res.writeHead(504, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+          res.end(JSON.stringify({ ok: false, error: 'Operation deadline exceeded; its result is unknown and non-idempotent retries may be unsafe' }))
+        }
+        return
+      }
+      if (res.destroyed) return
+      res.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store',
+      })
+      res.end(JSON.stringify(outcome))
+    } finally {
+      if (!dispatchStarted) this.activeControlRequests = Math.max(0, this.activeControlRequests - 1)
+    }
   }
 
   /** SSE route handler for `GET /multi-device/events` (real-time snapshot push to Client UI). */
@@ -677,27 +860,62 @@ export class MultiDeviceControlPlane {
     })
 
     const clientId = readClientId(req)
-    const sendSnapshot = (): void => {
+    let closed = false
+    let queued = false
+    let flushing = false
+    let heartbeat: ReturnType<typeof setInterval> | undefined
+    let unsubscribe: (() => void) | undefined
+    const cleanup = (): void => {
+      if (closed) return
+      closed = true
+      queued = false
+      if (heartbeat !== undefined) clearInterval(heartbeat)
+      unsubscribe?.()
+    }
+    const waitForDrain = (): Promise<void> => new Promise(resolve => {
+      const done = (): void => {
+        res.off('drain', done)
+        res.off('close', done)
+        res.off('error', done)
+        resolve()
+      }
+      res.once('drain', done)
+      res.once('close', done)
+      res.once('error', done)
+    })
+    const flush = async (): Promise<void> => {
+      if (flushing || closed) return
+      flushing = true
       try {
-        const snap = this.registry.snapshot(clientId)
-        res.write(`event: snapshot\ndata: ${JSON.stringify(snap)}\n\n`)
+        while (queued && !closed) {
+          queued = false
+          const snap = this.registry.snapshot(clientId)
+          if (!res.write(`event: snapshot\ndata: ${JSON.stringify(snap)}\n\n`) && !closed) {
+            await waitForDrain()
+          }
+        }
       } catch {
-        // Ignore serialization failure
+        if (!closed) res.destroy()
+      } finally {
+        flushing = false
+        if (queued && !closed) void flush()
       }
     }
+    const sendSnapshot = (): void => {
+      // One pending snapshot per socket: a slow consumer cannot build an
+      // unbounded event queue, and changes during a blocked write coalesce.
+      queued = true
+      void flush()
+    }
 
+    req.once('close', cleanup)
+    res.once('close', cleanup)
+    res.on('error', cleanup)
+    unsubscribe = this.registry.onSnapshotChanged(sendSnapshot)
     sendSnapshot()
-    const unsubscribe = this.registry.onSnapshotChanged(() => {
-      sendSnapshot()
-    })
-    const heartbeat = setInterval(() => {
-      res.write(': ping\n\n')
+    heartbeat = setInterval(() => {
+      if (!closed && !res.writableNeedDrain) res.write(': ping\n\n')
     }, 15_000)
-
-    req.on('close', () => {
-      clearInterval(heartbeat)
-      unsubscribe()
-    })
   }
 
   private isAuthorized(req: IncomingMessage): boolean {
@@ -712,17 +930,31 @@ function readBody(req: IncomingMessage): Promise<Buffer | null> {
   return new Promise((resolve) => {
     const chunks: Buffer[] = []
     let size = 0
+    let settled = false
+    const finish = (value: Buffer | null): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(value)
+    }
+    const timer = setTimeout(() => {
+      finish(null)
+      req.destroy()
+    }, BODY_READ_DEADLINE_MS)
+    timer.unref?.()
     req.on('data', (chunk: Buffer) => {
+      if (settled) return
       size += chunk.byteLength
       if (size > MAX_BODY_BYTES) {
-        resolve(null)
+        finish(null)
         req.destroy()
         return
       }
       chunks.push(chunk)
     })
-    req.on('end', () => resolve(Buffer.concat(chunks)))
-    req.on('error', () => resolve(null))
+    req.on('end', () => finish(Buffer.concat(chunks)))
+    req.on('aborted', () => finish(null))
+    req.on('error', () => finish(null))
   })
 }
 

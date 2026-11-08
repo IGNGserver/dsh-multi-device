@@ -10,6 +10,10 @@ export interface StoredDeviceSecret {
     readonly bearerToken?: string;
     /** Launch URL/token or explicit cookie/bearer credential entered by the user. */
     readonly authCredential?: string;
+    /** Monotonic version of the user-supplied credential; absent in legacy records. */
+    readonly credentialVersion?: number;
+    /** SHA-256 binding of transport target, auth policy and credential version/value. */
+    readonly cacheBinding?: string;
     /** Passphrase for an encrypted local SSH private key. */
     readonly sshPassphrase?: string;
     readonly updatedAt: number;
@@ -81,15 +85,24 @@ export declare function readRemoteCredentials(transport: SshTransportConfig, dsh
 export declare class DeviceAuthManager {
     private readonly secretsFilePath?;
     private readonly secrets;
+    private readonly storage;
     constructor(secretsFilePath?: string | undefined);
     load(): void;
     private save;
+    /** Preflight for multi-file registry mutations; write still performs locked CAS. */
+    assertWritable(): void;
+    /** A failed save must not leave credentials active only in this Host's memory. */
+    private persistEntry;
     removeDevice(deviceId: DeviceId): void;
     /**
      * Drop cached cookies/bearer tokens after the remote rejected them, while
      * keeping the user-supplied credential and SSH passphrase for re-authentication.
      */
     invalidate(deviceId: DeviceId): void;
+    /** Internal Host transaction snapshot; never serialize this record to Clients. */
+    snapshotDevice(deviceId: DeviceId): StoredDeviceSecret | undefined;
+    /** Best-effort durable rollback. A rejected setter that already rolled back needs no write. */
+    restoreDevice(deviceId: DeviceId, snapshot: StoredDeviceSecret | undefined): void;
     /** Read the persisted secret record for a device (never exposed to the Client). */
     storedSecret(deviceId: DeviceId): StoredDeviceSecret | undefined;
     /** Persist or clear the explicit auth credential entered in the device form. */
@@ -118,7 +131,7 @@ export declare class DeviceAuthManager {
     /**
      * Exchange a DSH launch token (`/?token=<launchToken>`) for a persistent `dsh-auth-*` cookie.
      */
-    exchangeLaunchToken(deviceId: DeviceId, effectiveBaseUrl: string, authority: string, cookieAuthority: string, launchToken: string): Promise<{
+    exchangeLaunchToken(deviceId: DeviceId, effectiveBaseUrl: string, authority: string, cookieAuthority: string, launchToken: string, cacheBinding?: string, rejectUnauthorized?: boolean): Promise<{
         ok: true;
     } | {
         ok: false;

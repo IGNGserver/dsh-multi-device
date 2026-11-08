@@ -93,6 +93,7 @@ import { shouldDecorateProjectRows } from '../src/client/projectBadges.ts'
 import { shouldApplySnapshot } from '../src/client/state.ts'
 import {
   countableUnreadIds,
+  groupUnreadSessionIds,
   unreadCountForDevice,
   unreadCountInSessions,
   workspaceUnreadCounts,
@@ -1412,11 +1413,18 @@ describe('4d. Offline catalog cache & reconnect waiting', () => {
     first.setDeviceCatalog(cachedCatalog)
     first.saveToDisk()
     first.dispose()
+    await first.flushPersistence()
 
     const persisted = JSON.parse(readFileSync(dataFile, 'utf8')) as {
       catalogs?: Record<string, { syncedAt: number }>
     }
-    expect(persisted.catalogs?.['dev-cache']?.syncedAt).toBe(cachedCatalog.syncedAt)
+    const persistedCatalogs = JSON.parse(readFileSync(join(dir, 'catalogs.json'), 'utf8')) as {
+      version: number
+      catalogs: Record<string, { syncedAt: number }>
+    }
+    expect(persisted.catalogs).toBeUndefined()
+    expect(persistedCatalogs.version).toBe(2)
+    expect(persistedCatalogs.catalogs['dev-cache']?.syncedAt).toBe(cachedCatalog.syncedAt)
 
     const second = new DeviceRegistry(dataFile, secretsFile, localHost, options)
     expect(second.deviceCatalog(DeviceId('dev-cache'))?.sessions).toHaveLength(2)
@@ -1432,6 +1440,7 @@ describe('4d. Offline catalog cache & reconnect waiting', () => {
     expect(snapshot.sessionOrigins[encodeRemoteSessionId(DeviceId('dev-cache'), 's-1')]?.deviceState)
       .not.toBe('connected')
     second.dispose()
+    await second.flushPersistence()
   })
 
   it('stops stale spinners when a running device goes offline', () => {
@@ -3545,6 +3554,49 @@ describe('9. Manual Git match: scan, register, and never run on its own', () => 
     expect(progress.length).toBeGreaterThan(0)
   })
 
+  it('does not classify unmatched seeds as missing after a truncated scan', async () => {
+    const runner = new GitMatchRunner({
+      devices: () => [
+        { deviceId: DeviceId('dev-a'), deviceName: 'A', state: 'connected', local: false, workspacePaths: ['/home/a/repo'] },
+        { deviceId: DeviceId('dev-b'), deviceName: 'B', state: 'connected', local: false, workspacePaths: [] },
+      ],
+      discoverRemoteOrigins: async deviceId => new Map(deviceId === 'dev-a' ? [['/home/a/repo', 'https://example.com/org/repo.git']] : []),
+      scanRemoteRepos: async deviceId => deviceId === 'dev-b'
+        ? { ok: true, repos: [], truncated: true }
+        : { ok: true, repos: [] },
+      scanLocalRepos: () => [],
+      createLocalWorkspace: async () => ({ ok: true }),
+      createRemoteWorkspace: async () => ({ ok: true }),
+      noteOrigin: () => {}, localHome: () => '/home/u', onProgress: () => {},
+    })
+    const final = await runner.execute()
+    expect(final.notFoundCount).toBe(0)
+    expect(final.reports.find(report => report.deviceId === 'dev-b')?.error).toContain('repository limit')
+  })
+
+  it('aborts an in-flight remote scan when cancelled', async () => {
+    let runner: GitMatchRunner
+    let cancelReturned = false
+    let signalAborted = false
+    runner = new GitMatchRunner({
+      devices: () => [{ deviceId: DeviceId('dev-a'), deviceName: 'A', state: 'connected', local: false, workspacePaths: [] }],
+      discoverRemoteOrigins: async () => new Map(),
+      scanRemoteRepos: async (_deviceId, _roots, signal) => new Promise(resolve => {
+        const finish = () => { signalAborted = signal?.aborted === true; resolve({ ok: false, error: 'cancelled', repos: [] }) }
+        if (signal?.aborted === true) finish()
+        else signal?.addEventListener('abort', finish, { once: true })
+        queueMicrotask(() => { cancelReturned = runner.cancel() })
+      }),
+      scanLocalRepos: () => [],
+      createLocalWorkspace: async () => ({ ok: true }), createRemoteWorkspace: async () => ({ ok: true }),
+      noteOrigin: () => {}, localHome: () => '/home/u', onProgress: () => {},
+    })
+    const final = await runner.execute()
+    expect(cancelReturned).toBe(true)
+    expect(signalAborted).toBe(true)
+    expect(final.status).toBe('cancelled')
+  })
+
   it('stops between steps when cancelled', async () => {
     let runner: GitMatchRunner
     const progress: GitMatchRun[] = []
@@ -4992,7 +5044,11 @@ describe('0d. Unread counters for Native tabs and Aggregated rows', () => {
     expect(unreadCountForDevice(unread, DeviceId('dev-a'))).toBe(1)
     expect(unreadCountForDevice(unread, DeviceId('dev a~b'))).toBe(1)
     expect(unreadCountForDevice(unread, DeviceId('dev-b'))).toBe(0)
-    expect(unreadCountForDevice(new Set(), LOCAL_DEVICE_ID)).toBe(0)
+    const grouped = groupUnreadSessionIds(unread)
+    expect(grouped.get(LOCAL_DEVICE_ID)).toEqual(['local-1', 'local-2'])
+    expect(grouped.get(DeviceId('dev-a'))).toHaveLength(1)
+    expect(grouped.get(DeviceId('dev a~b'))).toEqual([spacedDevice])
+    expect(grouped.has(DeviceId('dev-b'))).toBe(false)
   })
 
   it('counts only Session IDs that belong to a workspace', () => {

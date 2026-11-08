@@ -295,10 +295,7 @@ export function installModeSideEffects(source: ClientContextLike): () => void {
     const list = ctx.sessions?.list.getSnapshot()
     const current = list === undefined ? undefined : currentMainSessionId(list)
     clientStore.setMainViewVisible(!isGlobalPanelActive())
-    if (isGlobalPanelActive()) {
-      void clientStore.setActiveSession(undefined)
-      return current
-    }
+    if (isGlobalPanelActive()) return current
     if (current !== undefined) {
       void clientStore.reportLocalMainSession(current)
     }

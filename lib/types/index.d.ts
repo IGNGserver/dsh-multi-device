@@ -22,9 +22,9 @@ export declare const name = "dsh-multi-device";
  */
 export declare const inject: string[];
 export interface Config {
-    /** Custom path to persist device & aggregation config; defaults to `$DSH_HOME/plugins/dsh-multi-device.json`. */
+    /** Custom path to persist device & aggregation config; defaults to the current Profile plugin storage. */
     readonly dataFile?: string;
-    /** Custom path to persist device auth secrets; defaults to `$DSH_HOME/plugins/dsh-multi-device-secrets.json`. */
+    /** Custom path to persist device auth secrets; defaults to the current Profile plugin storage. */
     readonly secretsFile?: string;
     readonly features?: {
         /** Enable Aggregated Mode (unified sidebar workspaces & sessions). Default: true. */

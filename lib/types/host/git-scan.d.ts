@@ -1,6 +1,7 @@
 import { type SshTransportConfig } from '../contract.ts';
 /** Default repository depth below a scan root (repo dir at depth <= maxDepth). */
 export declare const DEFAULT_SCAN_DEPTH = 4;
+export declare const DEFAULT_SCAN_REPOSITORY_LIMIT = 5000;
 /** A repository found on disk. */
 export interface ScannedRepository {
     readonly path: string;
@@ -12,6 +13,10 @@ export interface ScanOptions {
     readonly maxDepth?: number;
     /** Extra roots appended after the derived ones. */
     readonly extraRoots?: readonly string[];
+    /** Hard per-shard candidate cap; excess roots are reported as truncated. */
+    readonly maxRepositories?: number;
+    readonly signal?: AbortSignal;
+    readonly onRepository?: (repository: ScannedRepository) => void;
 }
 /**
  * Derive scan roots from a home directory and the workspace paths registered on
@@ -19,34 +24,44 @@ export interface ScanOptions {
  * output is deterministic so a rerun scans the same set.
  */
 export declare function deriveScanRoots(home: string | undefined, workspacePaths: readonly string[], extraRoots?: readonly string[]): string[];
-/**
- * Build the POSIX shell snippet that lists every `.git` directory below the
- * roots with its `origin` URL. Directories with a `.git` *file* are worktrees
- * and are intentionally skipped: a worktree is a member of its main project,
- * not a project of its own.
- */
-export declare function buildGitScanScript(roots: readonly string[], maxDepth?: number): string;
-/** Parse `marker<TAB>path<TAB>origin` lines into repositories. */
+/** Scan only explicit roots; .wt is the sole hidden container traversed. */
+export declare function buildGitScanScript(roots: readonly string[], maxDepth?: number, maxRepositories?: number): string;
+export declare function buildPowerShellGitScanScript(roots: readonly string[], maxDepth?: number, maxRepositories?: number): string;
+export interface GitScanProjection {
+    readonly repos: ScannedRepository[];
+    readonly complete: boolean;
+    readonly truncated: boolean;
+}
+/** Parse both legacy lines and v2 NUL frames; completion is never inferred from records. */
+export declare function parseGitScanProjection(stdout: string): GitScanProjection;
+/** Backward-compatible repository-only projection for existing callers. */
 export declare function parseGitScanOutput(stdout: string): ScannedRepository[];
 /**
  * Scan one remote device over SSH. Failures are reported, never thrown: a
  * device that cannot be scanned must not look like a device with no projects.
  */
-export declare function scanRemoteGitRepos(transport: SshTransportConfig, roots: readonly string[], options?: {
-    readonly maxDepth?: number;
-    readonly timeoutMs?: number;
-}): Promise<{
+export type GitRepoScanResult = {
     ok: true;
     repos: ScannedRepository[];
+    truncated?: boolean;
 } | {
     ok: false;
     error: string;
-}>;
+    repos?: ScannedRepository[];
+    truncated?: boolean;
+};
+/** Scan roots in cancellable shards with one overall deadline, retaining useful partial results. */
+export declare function scanRemoteGitRepos(transport: SshTransportConfig, roots: readonly string[], options?: ScanOptions & {
+    readonly timeoutMs?: number;
+    readonly shardSize?: number;
+}): Promise<GitRepoScanResult>;
 /**
  * Scan the local machine. Uses the filesystem directly so it works on Windows
  * too, where the plugin has no POSIX shell guarantee.
  */
 export declare function scanLocalGitRepos(roots: readonly string[], options?: ScanOptions): ScannedRepository[];
+/** Async local scan used by Git Match; no synchronous directory walk blocks cancellation/UI progress. */
+export declare function scanLocalGitReposAsync(roots: readonly string[], options?: ScanOptions): Promise<GitRepoScanResult>;
 /**
  * Collapse repositories sharing one normalized origin to a single path.
  * The shortest path wins so a main checkout beats any deeper copy.

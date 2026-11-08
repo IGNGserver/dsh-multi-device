@@ -56,9 +56,13 @@ export declare function connectionRequestRejection(ctx: Context, headers: Incomi
  */
 export declare function admitMultiDeviceRequest(ctx: Context, req: IncomingMessage): boolean;
 export interface ControlPlaneRequest {
-    readonly action: 'snapshot' | 'diagnostics' | 'setDisplayMode' | 'upsertDevice' | 'removeDevice' | 'reconnectDevice' | 'authenticateDevice' | 'testDevice' | 'listSshKeys' | 'startSessionOnDevice' | 'createSession' | 'createRemoteWorkspace' | 'updateAggregationConfig' | 'upsertManualRule' | 'removeManualRule' | 'setMemberExcluded' | 'setPreferredDevice' | 'setCustomTitle' | 'startGitMatch' | 'cancelGitMatch' | 'setActiveSession' | 'markSessionRead' | 'markDeviceRead' | 'setUiPreferences';
+    readonly action: 'snapshot' | 'catalogSessionAction' | 'searchCatalogSessions' | 'modelCatalog' | 'diagnostics' | 'setDisplayMode' | 'upsertDevice' | 'removeDevice' | 'reconnectDevice' | 'authenticateDevice' | 'testDevice' | 'listSshKeys' | 'startSessionOnDevice' | 'createSession' | 'createRemoteWorkspace' | 'updateAggregationConfig' | 'upsertManualRule' | 'removeManualRule' | 'setMemberExcluded' | 'setPreferredDevice' | 'setCustomTitle' | 'startGitMatch' | 'cancelGitMatch' | 'setActiveSession' | 'markSessionRead' | 'markDeviceRead' | 'setUiPreferences';
     readonly payload?: Record<string, unknown>;
 }
+/** Validate the transport envelope before TypeScript erases its runtime types. */
+export declare function parseControlPlaneRequest(value: unknown): ControlPlaneRequest;
+/** Field-level runtime schemas shared by HTTP parsing and direct dispatch. */
+export declare function validateControlPlanePayload(request: ControlPlaneRequest): void;
 /**
  * Browser geometry the Client volunteers with a Diagnostics request. The Host
  * cannot read the viewport, but a clipped Native Mode bar is a layout fact on
@@ -138,6 +142,8 @@ export interface MultiDeviceDiagnostics {
         readonly allRunningSessions: number;
     };
     readonly devices: readonly DiagnosticsDevice[];
+    /** Session identities and categories only; no conversation content or credentials. */
+    readonly attentionByDevice?: MultiDeviceSnapshot['attentionByDevice'];
     readonly client?: DiagnosticsClientReport;
 }
 /** Parse the Client's Diagnostics payload; unknown fields are dropped. */
@@ -155,9 +161,10 @@ export declare function buildDiagnostics(snapshot: MultiDeviceSnapshot, client?:
 export declare class MultiDeviceControlPlane {
     private readonly registry;
     private readonly admitRequest?;
+    private activeControlRequests;
     constructor(registry: DeviceRegistry, admitRequest?: ((req: IncomingMessage) => boolean) | undefined);
     /** Execute one control-plane action and return a JSON-serializable result envelope. */
-    dispatch(request: ControlPlaneRequest): Promise<{
+    dispatch(request: ControlPlaneRequest, signal?: AbortSignal): Promise<{
         ok: true;
         value: unknown;
     } | {

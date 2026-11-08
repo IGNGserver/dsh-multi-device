@@ -1,5 +1,17 @@
 import React from 'react';
+import { type DeviceView } from '../contract.ts';
 import type { MultiDeviceLocaleKey } from './locales.ts';
+/**
+ * Single device's persistent frame (Electron `<webview>` when available and permitted,
+ * or standard authenticated `<iframe>`).
+ */
+export declare function KeepAliveDeviceFrame({ device, active, reloadCount, t, onOpenSettings, }: {
+    device: DeviceView;
+    active: boolean;
+    reloadCount: number;
+    t: (key: MultiDeviceLocaleKey) => string;
+    onOpenSettings: () => void;
+}): React.ReactElement;
 /**
  * Always-visible Native Mode tab strip. 本机 is the first tab and the stable
  * fallback when no remote device is selected.

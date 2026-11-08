@@ -1,4 +1,6 @@
 import { type DeviceAuthState, type DeviceCatalogCache, type DeviceConfig, DeviceId, type DeviceView, type DisplayMode, type GitMatchRun, type MultiDeviceSnapshot, type MultiDeviceUiPreferences, type RemoteSessionCreateInput, type RemoteWorkspaceCreateInput, type SshKeyEntry, type UpsertDeviceInput, type WorkspaceAggregationConfig } from '../contract.ts';
+import { type SessionAttentionFact } from '../attention.ts';
+import { type CatalogSummaryInput } from './aggregated-catalog.ts';
 import { DeviceAuthManager } from './auth.ts';
 import { type PhysicalWorkspaceInput, WorkspaceAggregator } from './git-aggregator.ts';
 import { NativeProxyManager } from './native-proxy.ts';
@@ -9,12 +11,16 @@ import { RemoteDeviceClient } from './remote-client.ts';
  */
 export declare function describeProbeFailure(status: number | undefined, input: UpsertDeviceInput): string;
 export interface LocalHostProvider {
+    /** Full persisted + live identities. Undefined means unavailable, never an authoritative empty list. */
+    readonly localSessionCatalog?: (signal?: AbortSignal) => Promise<readonly SessionAttentionFact[] | undefined>;
     /** Local webserver port, used for self-loop prevention. */
     readonly localPort: () => number | undefined;
     /** Read current local workspaces from `ctx.workspaceRegistry`. */
     readonly localWorkspaces: () => PhysicalWorkspaceInput[];
     /** Read current local session summaries. */
     readonly localSessionUpdatedAt: () => Map<string, number>;
+    readonly localSessionSummaries?: () => readonly CatalogSummaryInput[];
+    readonly localPinnedSessionIds?: () => readonly string[];
     /**
      * Local archived Session IDs (`ctx.workspaceRegistry.archivedSessionIds`).
      * Optional so registries built by older callers and tests keep working;
@@ -49,25 +55,44 @@ export declare class DeviceRegistry {
     readonly aggregator: WorkspaceAggregator;
     private readonly configs;
     private readonly clients;
+    /** Invalidates asynchronous proxy mounts when a device is updated, removed or disposed. */
+    private readonly mountGenerations;
     private readonly listeners;
     private readonly eventListeners;
     private readonly projectionListeners;
     private readonly workspaceListeners;
     private readonly modelCatalogListeners;
     private readonly modeListeners;
-    private activeSessionSeq;
-    private activeSessionClientId;
-    private activeSessionIsRemote;
-    private activeSessionDeviceId;
-    private activeSessionId;
-    /** The one framed device currently rendered as the aggregated pane. */
-    private paneEmbeddedDeviceId;
+    /** Navigation belongs to a browser instance, never to the Host process. */
+    private readonly activeSessions;
+    private readonly paneEmbeddedDevices;
     private revision;
+    private readonly snapshotCache;
+    private disposed;
+    private readonly lifetime;
+    private localCatalog;
+    private localCatalogFresh;
+    private localCatalogInflight;
+    private localCatalogMutations;
+    private readonly localStatus;
+    private readonly localPending;
     private displayMode;
     private gitMatchRunner;
     private gitMatchRun;
     private localWorkspaceCreator;
     private localSessionCreator;
+    private localCatalogAction;
+    private localCatalogSearch;
+    setLocalCatalogAdapters(action: (sessionId: string, action: import('../contract.ts').CatalogSessionAction, title?: string, stopActivity?: boolean) => Promise<{
+        sessionId?: string;
+    }>, search: (query: string, signal?: AbortSignal) => Promise<readonly string[]>): void;
+    catalogSessionAction(sessionId: string, action: import('../contract.ts').CatalogSessionAction, title?: string, stopActivity?: boolean): Promise<{
+        sessionId?: string;
+    }>;
+    searchCatalogSessions(query: string, signal?: AbortSignal): Promise<{
+        readonly sessionIds: readonly string[];
+        readonly errors: Readonly<Record<string, string>>;
+    }>;
     private aggregatedGatewayActive;
     private aggregatedGatewayError;
     private nativeProxyActive;
@@ -76,12 +101,22 @@ export declare class DeviceRegistry {
     private readonly catalogs;
     /** Why one device's summaries could not be projected into the merged `session.list`. */
     private readonly sessionListErrors;
+    /**
+     * Live `$events` generations that must be told to (re)publish Session
+     * summaries before a Workspace row referencing them reaches the sidebar.
+     */
+    private readonly sessionPublishListeners;
     /** Injected Native Pane bridge lifecycle, last page selection/title, and visibility per device. */
     private readonly nativePanes;
     /** Previous connection state per device, so workspace rows are recomputed on a real transition. */
     private readonly lastDeviceStates;
     /** Host-owned fold state per device, restored into the framed page before its first render. */
     private readonly nativeGroups;
+    private readonly remoteRunningEvidence;
+    private readonly completionBindings;
+    private readonly completionBindingOffsets;
+    private readonly sharedReadStateDirty;
+    private readonly sharedReadStateFailures;
     /** Host-owned read/unread state for namespaced remote Sessions. */
     private readonly readTracker;
     /** Stable Host identity (used by the optional cross-Host state file). */
@@ -90,7 +125,6 @@ export declare class DeviceRegistry {
     private readonly hostEpoch;
     /** Low-frequency catalog refresh that heals lost running-status frames. */
     private runningReconcileTimer;
-    private readonly catalogRefreshInFlight;
     private uiPreferences;
     private catalogPersistTimer;
     private persistTimer;
@@ -99,6 +133,14 @@ export declare class DeviceRegistry {
     private readonly sharedReadStateInFlight;
     private readonly sharedReadStateInitialized;
     private readonly sharedReadStatePushTimers;
+    private readonly storage;
+    private readonly catalogStorage;
+    private catalogWrite;
+    private catalogWriteAgain;
+    private catalogDirty;
+    private catalogMigrationPending;
+    private catalogPersistFailures;
+    private catalogPersistenceError;
     constructor(dataFilePath: string, secretsFilePath: string, localHost: LocalHostProvider, options?: {
         enableTunnels?: boolean;
         enableNativeProxy?: boolean;
@@ -106,6 +148,16 @@ export declare class DeviceRegistry {
         allowDirectTransport?: boolean;
     });
     setGatewayStatus(active: boolean, error?: string): void;
+    /**
+     * Whether entering Aggregated Mode is safe right now. Without the gateway
+     * the mode is a broken pseudo-aggregate: no merged `session.list`, no
+     * multiplexed streams, and every remote Workspace renders empty while the
+     * repair loop can never close the gap.
+     */
+    aggregatedGatewayHealth(): {
+        readonly ok: boolean;
+        readonly error?: string;
+    };
     onSnapshotChanged(listener: () => void): () => void;
     onRemoteEvent(listener: (deviceId: DeviceId, frame: {
         type: 'emit';
@@ -128,6 +180,20 @@ export declare class DeviceRegistry {
         seq: number;
     }) => void): () => void;
     onWorkspacesChanged(listener: () => void): () => void;
+    /**
+     * Ask every live multiplexed `$events` generation to publish
+     * `api-session/added` for the given namespaced Session ids.
+     *
+     * The sidebar silently skips Workspace children that have no summary in the
+     * browser's Session store, so a Workspace frame must never outrun the
+     * summaries it references. The aggregated `workspace/follow` stream calls
+     * this before emitting any frame that carries `sessionIds`; each event
+     * generation dedupes against the ids it already pushed. Cross-stream wire
+     * order is not guaranteed, but the store update re-renders the row, so the
+     * "expanded but empty" state can only last milliseconds, never forever.
+     */
+    requestSessionPublish(sessionIds: readonly string[]): void;
+    onSessionPublishRequest(listener: (sessionIds: readonly string[]) => void): () => void;
     /**
      * Record that one device's summaries could not be projected into the merged
      * `session.list`. The rest of the list still ships, and the failing device
@@ -156,7 +222,7 @@ export declare class DeviceRegistry {
      * actually removed a marker, so callers can distinguish a real transition
      * from a redundant read touch.
      */
-    markSessionRead(sessionId: string): boolean;
+    markSessionRead(sessionId: string, expectedCompletionId?: string): boolean;
     /**
      * Clear every unread marker owned by one device (本机 included).
      *
@@ -170,6 +236,16 @@ export declare class DeviceRegistry {
     markDeviceRead(deviceId: DeviceId): number;
     /** Local DSH session status, observed through this Host's own event bus. */
     observeLocalSessionStatus(sessionId: string, running: boolean): void;
+    /** A local live summary was added or changed; a full query supplies persisted identities. */
+    observeLocalSessionAdded(fact: SessionAttentionFact): void;
+    /** Internal adapter for the local gateway's still-pending requests; never persists requests. */
+    observeLocalPending(requests: readonly {
+        eventId: string;
+        sessionId: string;
+        kind: 'approval' | 'question' | 'plan-review';
+    }[]): void;
+    /** Complete, successful persisted+live query only; failed/unavailable reads never mean deleted. */
+    refreshLocalCatalog(): Promise<void>;
     /**
      * Forget Host-owned read state for a local Session DSH deleted. Remote
      * removals arrive as `api-session/removed` on the device stream.
@@ -185,13 +261,9 @@ export declare class DeviceRegistry {
     private setNativeGroupState;
     /** Raw remote Session IDs that are unread on one device. */
     private unreadForDevice;
+    private completionsForDevice;
     /** Push the new unread set to the owning device's framed page. */
     private publishUnreadState;
-    /**
-     * True when the conversation the user is actually looking at owns this
-     * Session. A completion then counts as read instead of leaving a reminder.
-     */
-    private isCurrentlyViewedSession;
     /**
      * Reconcile running flags from the authoritative list. DSH can miss a
      * `api-session/status` frame across a stream gap; the list refresh still
@@ -228,6 +300,8 @@ export declare class DeviceRegistry {
     private maybeInitializeSharedReadState;
     private sharedReadStateTarget;
     private scheduleSharedReadStatePush;
+    /** Resolve only a bounded batch of idle completions using real durable terminal events. */
+    private promoteSharedCompletions;
     /** Read the remote file and merge every Host's Session entries locally. */
     private pullSharedReadState;
     /**
@@ -245,15 +319,9 @@ export declare class DeviceRegistry {
      * restore every other frame's sidebar for full native rendering.
      */
     private syncNativePaneEmbedding;
-    /**
-     * Ask the framed page of the active remote device to show the selected
-     * Session. Called on every selection and when a bridge becomes ready; the
-     * proxy queues the command until then, so an iframe that is still loading
-     * still lands on the right conversation.
-     */
     private publishNativePaneSession;
-    /** Ask the native frame on the active remote Session's device to open it. */
     private openActiveRemoteSessionInNative;
+    private paneKey;
     private setNativePaneState;
     private setNativePaneSelection;
     /** Persist the framed page's own document title for window chrome. */
@@ -268,7 +336,9 @@ export declare class DeviceRegistry {
     private persistNativeProxyPort;
     private withNativePane;
     /** Scope `session/modelCatalog` to the Session currently shown on the right. */
-    activeSessionScope(): ActiveSessionScope;
+    activeSessionScope(clientId?: string): ActiveSessionScope;
+    /** Explicit request scope; official browser Peers are shared, not tab identities. */
+    sessionScope(sessionId: string | undefined): ActiveSessionScope;
     private notifyModelCatalogChanged;
     onDisplayModeChanged(listener: (mode: DisplayMode) => void): () => void;
     /** Host-authoritative UI mode. Defaults to aggregated for existing installs. */
@@ -362,6 +432,7 @@ export declare class DeviceRegistry {
         ok: false;
         error: string;
     }>;
+    mutateAggregation(change: () => WorkspaceAggregationConfig): WorkspaceAggregationConfig;
     updateAggregationConfig(patch: Partial<WorkspaceAggregationConfig>): WorkspaceAggregationConfig;
     /** Wire the local Workspace controller so a match can register local folders. */
     setLocalWorkspaceCreator(creator: (path: string) => Promise<void>): void;
@@ -397,7 +468,7 @@ export declare class DeviceRegistry {
     /** Local subagent-origin Session IDs; same failure policy as {@link localArchivedIds}. */
     private localSubagentIds;
     /** Build the complete snapshot for the Client UI and Aggregated Gateway. */
-    snapshot(): MultiDeviceSnapshot;
+    snapshot(clientId?: string): MultiDeviceSnapshot;
     /** Persisted display preferences (Snapshot also carries them under `ui`). */
     ui(): MultiDeviceUiPreferences;
     /** Update and persist display preferences; unknown keys are ignored by the type. */
@@ -441,6 +512,10 @@ export declare class DeviceRegistry {
      * rewritten atomically on each save.
      */
     private scheduleCatalogPersist;
+    /** Coalesce bursts into the newest document while one async write is active. */
+    private persistCatalogsAsync;
+    /** Wait for the final asynchronous catalog write during Host shutdown. */
+    flushPersistence(): Promise<void>;
     /** Copy each client's current catalog into the durable map. */
     private flushCatalogCache;
     saveToDisk(): void;

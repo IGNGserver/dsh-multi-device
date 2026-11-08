@@ -132,9 +132,10 @@ dsh plugin --profile web add ssh2
 
 - 从旧 `$DSH_HOME/plugins/dsh-multi-device.json` 与 `$DSH_HOME/plugins/dsh-multi-device-secrets.json` **仅在目标不存在时复制**，不 move、不删除原件。各 Profile 获得独立 `hostId`；迁移后数据不再自动互相同步。
 - 旧版没有目标/凭据绑定的 Cookie 缓存安全失效，显式 credential / SSH passphrase 保留，首次升级可能需要重新认证。备份中也可能含敏感信息。
+- 设备目录另存为版本化 `catalogs.json` v2，原始 Session/Workspace ID 不二次编码；旧 `devices.json` 内嵌目录先完整写入 v2，再删除 legacy 副本。目录异步写按文件串行并合并突发变化，Host 停用会等待最终 flush；`catalogPersistenceError` 表示持久化失败，不能把界面仍有缓存当作磁盘已保存。
 - JSON 以 `0600` 临时文件、fsync、rename 原子替换（权限实际效果依操作系统），保留上一份有效 `.bak`。损坏主文件可从有效备份恢复并保留 `.corrupt-<id>`；没有有效备份、未来/不支持 schema 或文件不可读时拒写，不用空默认覆盖。这里只保证单文件原子性与尽力补偿，不承诺跨文件断电 ACID。
 - 自定义同路径遇到 stale / “Storage changed outside this Host” 会拒绝陈旧覆盖；不自动合并配置。停止所有写入该路径的 Host，备份现场，解决路径共享后重启受影响 Host 读取最新状态；仅刷新浏览器不能重新读取 Host 的磁盘快照。
-- 遇到 busy / `.lock` 先确认其他写入是否仍运行；不要在活跃写入时清理锁。仅在所有相关 Host 都已停止、已备份并确认锁为残留时再人工处理。
+- 遇到 busy / `.lock` 先确认其他写入是否仍运行；锁只自动回收“结构完整、同一 hostname、PID 已退出”的残留，活跃、损坏、旧文本或其他主机锁均拒绝写入。不要在活跃写入时清理锁；仅在所有相关 Host 都已停止、已备份并确认锁为残留时再人工处理。
 - 恢复失败时：停机 → 备份主文件、`.bak`、`.corrupt-*` 和对应配置 → 校验备份 JSON/schema 与版本兼容性 → 恢复同一次备份的设备及秘密文件 → 重启验证。不要删除损坏原件来“重置”；回滚参考安装章节。
 
 ### 配置示例
@@ -186,6 +187,8 @@ pnpm run build
 pnpm run test
 # check = verify:version + build（含 tsc）+ test
 pnpm run check
+# CI/Release 另在 Git checkout 中检查 lib/** 零 drift 与 bundle 预算：
+pnpm run verify:artifacts
 
 # 仅开发调试：先停测试 Host，用完整引用保护含空格的构建路径。
 dsh plugin --profile web add "file:$(pwd)"

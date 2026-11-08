@@ -164,11 +164,13 @@ export function discoverLocalGitRemote(
  * Unlike manual discovery this never falls back to synchronous filesystem I/O.
  * A failed process rejects, preserving a previously known origin.
  */
-export async function discoverLocalGitRemoteAsync(directoryPath: string): Promise<string | undefined> {
+export async function discoverLocalGitRemoteAsync(directoryPath: string, signal?: AbortSignal): Promise<string | undefined> {
   if (!directoryPath || !isAbsolute(directoryPath)) throw new Error('Local Git paths must be absolute')
+  if (signal?.aborted === true) throw new Error('Git origin read cancelled')
   const run = (args: string[]): Promise<string> => new Promise((resolveResult, reject) => {
     execFile('git', args, {
       encoding: 'utf8', timeout: 3_000, maxBuffer: 256 * 1024, windowsHide: true,
+      ...(signal !== undefined ? { signal } : {}),
     }, (error, stdout) => {
       if (error !== null) reject(error)
       else resolveResult(stdout)
@@ -194,9 +196,9 @@ export function buildGitOriginScript(paths: readonly string[], platform: GitRemo
         `$d = ${quotePowerShell(path)}; if (-not (Test-Path -LiteralPath $d -PathType Container)) { throw 'Invalid workspace path (${index})' }`,
         "$ErrorActionPreference='Continue'; & git -C $d rev-parse --git-dir >$null 2>$null; $repoCode = $LASTEXITCODE; $u = $null; $ErrorActionPreference='Stop'",
         `if ($repoCode -eq 0) { $ErrorActionPreference='Continue'; $u = & git -C $d config --includes --get remote.origin.url 2>$null; $code=$LASTEXITCODE; $ErrorActionPreference='Stop'; if ($code -ne 0 -and $code -ne 1) { throw 'Git origin read failed (${index})' } } elseif (Test-Path -LiteralPath (Join-Path $d '.git')) { throw 'Invalid Git metadata (${index})' }`,
-        `Write-Output ("__DSH_GIT_${index}__" + [char]9 + ($u -join ""))`,
+        `[Console]::Out.Write('__DSH_GIT_${index}__' + [char]0 + ($u -join '') + [char]0)`,
       ].join('; ')),
-      "Write-Output '__DSH_GIT_DONE__'",
+      "[Console]::Out.Write('__DSH_GIT_DONE_V2__' + [char]0)",
     ].join('\n')
   }
   return [
@@ -207,30 +209,53 @@ export function buildGitOriginScript(paths: readonly string[], platform: GitRemo
       '  code=0; u=$(git -C "$d" config --includes --get remote.origin.url) || code=$?',
       '  [ "$code" -le 1 ] || exit "$code"',
       'elif [ -e "$d/.git" ]; then exit 2; fi',
-      `printf '__DSH_GIT_${index}__\\t%s\\n' "$u"`,
+      `printf '%s\\0%s\\0' '__DSH_GIT_${index}__' "$u"`,
     ].join('\n')),
-    "printf '__DSH_GIT_DONE__\\n'",
+    "printf '%s\\0' '__DSH_GIT_DONE_V2__'",
   ].join('\n')
+}
+
+function parseGitOriginResponse(stdout: string, paths: readonly string[], result: Map<string, string>): boolean {
+  const tokens = stdout.split('\0')
+  if (tokens.length > 1) {
+    for (let index = 0; index < tokens.length; index += 1) {
+      const match = /^__DSH_GIT_(\d+)__$/.exec(tokens[index]!)
+      if (match?.[1] === undefined) continue
+      const path = paths[Number(match[1])]
+      const url = tokens[++index]?.trim() ?? ''
+      if (path !== undefined && url !== '') result.set(path, url)
+    }
+    return tokens.includes('__DSH_GIT_DONE_V2__')
+  }
+  for (const line of stdout.split(/\r?\n/)) {
+    const match = /^__DSH_GIT_(\d+)__\t(.*)$/.exec(line)
+    if (match?.[1] === undefined || match[2] === undefined) continue
+    const path = paths[Number(match[1])]
+    const url = match[2].trim()
+    if (path !== undefined && url !== '') result.set(path, url)
+  }
+  return /^__DSH_GIT_DONE__\r?$/m.test(stdout)
 }
 
 /** Errors throw, rather than making a failed device look like an empty catalog. */
 export async function discoverRemoteGitRemotesViaSsh(
   transport: SshTransportConfig,
   paths: readonly string[],
+  signal?: AbortSignal,
 ): Promise<Map<string, string>> {
   const result = new Map<string, string>()
   const uniquePaths = [...new Set(paths.filter(p => p.trim() !== ''))]
   if (uniquePaths.length === 0) return result
   const platform = await gitPlatformProbe.detect(transport)
-  const res = await execSshCommand(transport, encodeGitScript(platform, buildGitOriginScript(uniquePaths, platform)), 8_000)
-  if (!res.ok) throw new Error(res.error)
-  if (!/^__DSH_GIT_DONE__\r?$/m.test(res.stdout)) throw new Error('Incomplete Git origin response')
-  for (const line of res.stdout.split(/\r?\n/)) {
-    const match = /^__DSH_GIT_(\d+)__\t(.*)$/.exec(line)
-    if (match?.[1] === undefined || match[2] === undefined) continue
-    const path = uniquePaths[Number(match[1])]
-    const url = match[2].trim()
-    if (path !== undefined && url !== '') result.set(path, url)
+  const started = Date.now()
+  for (let offset = 0; offset < uniquePaths.length; offset += 64) {
+    if (signal?.aborted === true) throw new Error('Git origin discovery cancelled')
+    const remaining = 30_000 - (Date.now() - started)
+    if (remaining <= 0) throw new Error('Git origin discovery timed out')
+    const shard = uniquePaths.slice(offset, offset + 64)
+    const res = await execSshCommand(transport, encodeGitScript(platform, buildGitOriginScript(shard, platform)), remaining, signal)
+    if (!res.ok) throw new Error(res.error)
+    if (!parseGitOriginResponse(res.stdout, shard, result)) throw new Error('Incomplete Git origin response')
   }
   return result
 }

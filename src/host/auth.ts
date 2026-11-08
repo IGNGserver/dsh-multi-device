@@ -143,9 +143,10 @@ export function parseSigningSecretFromCredentialsYaml(yamlText: string): string 
  */
 export function resolveRemoteAuthority(device: DeviceConfig): string {
   if (device.transport.kind === 'ssh') {
-    const host = device.transport.remoteBindHost ?? '127.0.0.1'
+    const host = (device.transport.remoteBindHost ?? '127.0.0.1').trim()
     const port = device.transport.remotePort ?? 3080
-    return `${host}:${port}`
+    const hostname = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host
+    return `${hostname.includes(':') ? `[${hostname}]` : hostname}:${String(port)}`
   }
   try {
     return new URL(device.transport.baseUrl).host
@@ -508,6 +509,7 @@ export class DeviceAuthManager {
       const exchanged = await this.exchangeLaunchToken(
         device.id, effectiveBaseUrl, authority, cookieAuthority,
         extractLaunchToken(configuredCredential), cacheBinding,
+        device.transport.kind === 'direct' ? device.transport.rejectUnauthorized !== false : true,
       )
       if (exchanged.ok || auth.mode === 'token') return exchanged
     }
@@ -568,6 +570,7 @@ export class DeviceAuthManager {
     cookieAuthority: string,
     launchToken: string,
     cacheBinding?: string,
+    rejectUnauthorized = true,
   ): Promise<{ ok: true } | { ok: false; error: string }> {
     const credentialVersion = this.secrets.get(deviceId)?.credentialVersion ?? 0
     try {
@@ -579,6 +582,7 @@ export class DeviceAuthManager {
         method: 'GET',
         headers: { Host: authority },
         timeoutMs: 15_000,
+        rejectUnauthorized,
       })
       const rawSetCookie = response.headers['set-cookie']
       const setCookies = Array.isArray(rawSetCookie)

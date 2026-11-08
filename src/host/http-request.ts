@@ -150,7 +150,12 @@ export function responseAsFetchResponse(response: RemoteHttpResponse): Response 
       headers.set(key, value)
     }
   }
-  return new Response(new Uint8Array(response.body), { headers })
+  const nullBody = response.status === 204 || response.status === 205 || response.status === 304
+  return new Response(nullBody ? null : new Uint8Array(response.body), {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  })
 }
 
 /** Normalize a header value that may be a string or an array. */

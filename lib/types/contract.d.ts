@@ -7,6 +7,7 @@
  *
  * @module dsh-multi-device/contract
  */
+import type { DeviceAttentionView } from './attention.ts';
 /** Branded string helper compatible with `@deepseek-ai/dsh-brand`. */
 export type Branded<T extends string> = string & {
     readonly __brand?: T;
@@ -232,6 +233,12 @@ export interface DeviceView {
     readonly nativePaneError?: string;
     /** Raw remote Session the framed page currently shows, for no-flash switching. */
     readonly nativePaneSessionId?: string;
+    readonly nativeNavigation?: {
+        readonly sessionId: string;
+        readonly requestSeq: number;
+        readonly openState: 'loading' | 'open' | 'error';
+        readonly error?: string;
+    };
     /**
      * The framed page's own `document.title`, reported by the bridge. The client
      * uses it for the window/taskbar title while that device is the active tab or
@@ -241,6 +248,8 @@ export interface DeviceView {
 }
 /** One cached remote Session summary; projections are never persisted. */
 export interface CachedSessionSummary {
+    /** Display hint only, not a projection seed or execution state. */
+    readonly title?: string;
     readonly sessionId: string;
     readonly updatedAt: number;
     readonly agentAvailable: boolean;
@@ -276,6 +285,11 @@ export interface DeviceCatalogCache {
     readonly workspaces: readonly CachedWorkspace[];
     readonly archivedSessionIds: readonly string[];
     readonly pinnedSessionIds: readonly string[];
+    /**
+     * True when this cache was cut down to the persistence limits, i.e. the
+     * aggregated view is known to be missing older Sessions after a restart.
+     */
+    readonly catalogTruncated?: boolean;
 }
 /** A local private key discovered under `~/.ssh` for the device form. */
 export interface SshKeyEntry {
@@ -470,8 +484,38 @@ export interface MultiDeviceUiPreferences {
      */
     readonly crossHostReadState: boolean;
 }
+/** A navigation-only row. Never inserted into the local DSH Session Controller. */
+export interface AggregatedSessionRow {
+    readonly id: string;
+    readonly rawSessionId: string;
+    readonly deviceId: DeviceId;
+    readonly title: string;
+    readonly updatedAt: number;
+    readonly running: boolean;
+    readonly blank: boolean;
+    readonly cwd?: string;
+    readonly parentSessionId?: string;
+    readonly origin?: 'subagent';
+    readonly stale: boolean;
+    readonly missing?: boolean;
+}
+/** One self-contained sidebar read model, committed with the workspace projection. */
+export interface AggregatedCatalogView {
+    readonly schema: 1;
+    readonly revision: number;
+    readonly sessions: Readonly<Record<string, AggregatedSessionRow>>;
+    readonly pinnedSessionIds: readonly string[];
+    readonly issues: Readonly<Record<string, string>>;
+}
+export type CatalogSessionAction = 'rename' | 'archive' | 'unarchive' | 'pin' | 'unpin' | 'fork';
 /** Complete Hub snapshot returned to the Client UI. */
 export interface MultiDeviceSnapshot {
+    /** Present on the independent-directory implementation; absent on legacy Hosts. */
+    readonly catalog?: AggregatedCatalogView;
+    readonly catalogSelection?: {
+        readonly sessionId: string;
+        readonly requestSeq: number;
+    };
     readonly revision: number;
     /** Stable Host identity used to detect self-loops across any hostname/IP. */
     readonly hostId?: string;
@@ -494,6 +538,8 @@ export interface MultiDeviceSnapshot {
         readonly aggregatedGatewayActive: boolean;
         readonly aggregatedGatewayError?: string;
         readonly nativeProxyActive: boolean;
+        /** Last asynchronous catalog persistence failure; successful retry clears it. */
+        readonly catalogPersistenceError?: string;
     };
     readonly devices: readonly DeviceView[];
     readonly sshConfigHosts: readonly SshConfigHostEntry[];
@@ -507,6 +553,10 @@ export interface MultiDeviceSnapshot {
      * client and both UI modes agree on read state.
      */
     readonly unreadSessionIds: readonly string[];
+    /** Opaque completion identities; read requests may only consume the identity they observed. */
+    readonly readCompletions?: Readonly<Record<string, string>>;
+    /** Shared sidebar-policy projection, including local; members make badges explainable. */
+    readonly attentionByDevice?: Readonly<Record<string, DeviceAttentionView>>;
     /**
      * Sessions archived on their owning device. Local Session IDs are plain;
      * remote ones are namespaced. DSH hides archived rows by default, so the
@@ -525,6 +575,20 @@ export interface MultiDeviceSnapshot {
     readonly gitMatch: GitMatchRun;
     /** Persisted display preferences; optional so older Hosts still parse. */
     readonly ui?: MultiDeviceUiPreferences;
+    /**
+     * Why one device's Sessions could not be projected into the aggregated
+     * view, keyed by device id. Empty when every device merged cleanly. The
+     * client renders this as Workspace-load warnings so a silently partial
+     * aggregation is never mistaken for "this project really has no sessions".
+     * Optional so an older Client still parses a newer Host's snapshot.
+     */
+    readonly workspaceLoadErrors?: Readonly<Record<string, string>>;
+    /**
+     * True when at least one device catalog was trimmed to the session limit,
+     * so the aggregated list/sidebar is known to be incomplete. Optional so an
+     * older Client still parses a newer Host's snapshot.
+     */
+    readonly catalogTruncated?: boolean;
 }
 /** True when a Session ID is already namespaced by `dsh-multi-device`. */
 export declare function isNamespacedSessionId(sessionId: string): boolean;

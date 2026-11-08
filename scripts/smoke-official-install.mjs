@@ -49,7 +49,9 @@ export function redact(text) {
     })
     .replace(/((?:set-cookie|cookie|authorization)\s*[:=])[^\r\n]*/gi, '$1 [redacted]')
     .replace(/[^\s"']*\.credentials[^\s"']*/gi, '[private credential path]')
-    .replace(/((?:token|password|secret|api[_-]?key)\s*[:=]\s*)[^\s,;}]+/gi, '$1[redacted]')
+    .replace(/((?:["']?(?:token|password|passphrase|secret|credential|authCredential|api[_-]?key)["']?)\s*[:=]\s*)"[^"]*"/gi, '$1"[redacted]"')
+    .replace(/((?:["']?(?:token|password|passphrase|secret|credential|authCredential|api[_-]?key)["']?)\s*[:=]\s*)'[^']*'/gi, "$1'[redacted]'")
+    .replace(/((?:["']?(?:token|password|passphrase|secret|credential|authCredential|api[_-]?key)["']?)\s*[:=]\s*)(?!["'])[^\s,;}]+/gi, '$1[redacted]')
 }
 
 export function startupUrl(output) {
@@ -148,9 +150,9 @@ function isolatedEnv(temp) {
     HOME: join(temp, 'home'), USERPROFILE: join(temp, 'home'), DSH_HOME: join(temp, 'dsh'), DSH_AGENTS_HOME: join(temp, 'agents'),
     XDG_CONFIG_HOME: join(temp, 'config'), XDG_CACHE_HOME: join(temp, 'cache'), XDG_DATA_HOME: join(temp, 'data'), XDG_STATE_HOME: join(temp, 'state'),
     APPDATA: join(temp, 'config'), LOCALAPPDATA: join(temp, 'data'), TMPDIR: join(temp, 'tmp'), TMP: join(temp, 'tmp'), TEMP: join(temp, 'tmp'),
-    COREPACK_HOME: join(temp, 'corepack'), COREPACK_ENABLE_PROJECT_SPEC: '0', PNPM_MANAGE_PACKAGE_MANAGER_VERSIONS: 'false',
+    COREPACK_HOME: join(temp, 'corepack'), COREPACK_ENABLE_PROJECT_SPEC: '0', pnpm_config_pm_on_fail: 'ignore',
     npm_config_userconfig: join(temp, 'empty.npmrc'), npm_config_globalconfig: join(temp, 'global.npmrc'),
-    npm_config_cache: join(temp, 'npm-cache'), npm_config_store_dir: join(temp, 'pnpm-store'), npm_config_manage_package_manager_versions: 'false',
+    npm_config_cache: join(temp, 'npm-cache'), npm_config_store_dir: join(temp, 'pnpm-store'),
     CI: 'true', NO_COLOR: '1', DO_NOT_TRACK: '1', OTEL_SDK_DISABLED: 'true',
   })
 }
@@ -361,7 +363,7 @@ export async function main() {
     await writeFile(env.npm_config_userconfig, ''); await writeFile(env.npm_config_globalconfig, '')
     const runtime = (await command(cli[0], [...cli.slice(1), '--version'], options, 'Read official CLI version')).trim()
     const pnpm = (await command('pnpm', ['--version'], options, 'Read isolated pnpm version')).trim()
-    check(/^11\./.test(pnpm), `Expected CI pnpm 11, received ${pnpm}; disable Corepack project-spec/package-manager switching`)
+    check(/^11\./.test(pnpm), `Expected CI pnpm 11, received ${pnpm}; set pnpm_config_pm_on_fail=ignore for the isolated qualification run`)
     log(`Official CLI ${redact(runtime)}; Node ${process.versions.node}; pnpm ${pnpm}`)
     const fixture = await unpack(packagePath, join(temp, 'fixture'), options)
     const version = fixture.manifest.version
@@ -406,6 +408,9 @@ export async function main() {
     await server.settled({ installed: false, enabled: false })
     await server.stop()
     log('PASS: official Web install/toggles/restart/remove; factory registration is NOT UI rendering; Desktop/profile acceptance and historical compatibility NOT tested')
+  } catch (error) {
+    if (!interrupted) throw error
+    log('Interrupted; owned servers and install resources will be cleaned before exit')
   } finally {
     process.removeListener('SIGINT', sigint); process.removeListener('SIGTERM', sigterm)
     await server.stop()
@@ -436,8 +441,9 @@ export function selfTest() {
   assert.throws(() => rpcEnvelope('x', []))
   for (const application of ['failed', 'cancelled', 'overridden', undefined]) assert.throws(() => changeApplication({ application }))
   assert.equal(changeApplication({ application: 'restart-required' }), 'restart-required')
-  const safe = redact('dsh web: http://127.0.0.1:12345/?token=TOPSECRET\nCookie: PRIVATE\n/home/test/.credentials/private')
+  const safe = redact('dsh web: http://127.0.0.1:12345/?token=TOPSECRET\nCookie: PRIVATE\n/home/test/.credentials/private\n{"credential":"JSONSECRET","passphrase":"PASSSECRET"}\npassword: YAMLSECRET')
   assert(!safe.includes('TOPSECRET') && !safe.includes('PRIVATE') && !safe.includes('.credentials'))
+  for (const secret of ['JSONSECRET', 'PASSSECRET', 'YAMLSECRET']) assert(!safe.includes(secret), `Unredacted fixture secret: ${secret}`)
   log('Pure helper self-tests passed (JSON extraction, URL ownership, RPC named args, business outcomes, factory-only VM timeout, redaction)')
 }
 

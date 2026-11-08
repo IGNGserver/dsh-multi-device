@@ -27,6 +27,9 @@ import { type DeviceId, type LogicalWorkspaceView } from '../contract.ts';
  *   the Host's own DSH instance and are not checked here.
  */
 export declare function countableUnreadIds(unreadSessionIds: readonly string[], archivedSessionIds?: readonly string[], subagentSessionIds?: readonly string[], existsRemoteSession?: (sessionId: string) => boolean): Set<string>;
+export declare const EMPTY_UNREAD_SESSION_IDS: readonly string[];
+/** Decode every unread ID once per snapshot instead of once per rendered device tab. */
+export declare function groupUnreadSessionIds(unread: ReadonlySet<string>): ReadonlyMap<DeviceId, readonly string[]>;
 /**
  * Count unread Sessions owned by one device.
  *

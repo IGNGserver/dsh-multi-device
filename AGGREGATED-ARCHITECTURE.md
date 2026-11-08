@@ -15,6 +15,20 @@
 - 断线保留轻量目录与标题提示，运行状态视为陈旧而不是继续假装正在执行。目录不再裁至 2000 会话／300 工作区；未解析引用显示明确占位和诊断，不悄悄隐藏。
 - 固定设备故障不阻塞其他设备；未知/移除设备的命令报错，不降级到本机执行。
 
+## 持久化、取消与控制面边界
+
+- `devices.json` / `secrets.json` 保留同步配置与凭据事务，因为 schema 预检、回滚和跨文件补偿 API 是同步的；目录快照独立写入版本化 `catalogs.json` v2，原始 Session/Workspace ID 不做二次命名空间编码。
+- 旧内嵌 catalogs 采用两阶段迁移：先让 v2 文件持久化成功，再删除主文档内嵌副本。清理失败保留 legacy 数据并重试，不先丢唯一副本。异步 catalog 写按文件串行、dirty-bit 合并突发变化，失败后保留 dirty 并有界退避；`hostStatus.catalogPersistenceError` 公开诊断。
+- 同步 `dispose()` 只冻结状态；Host 生命周期随后显式等待 `flushPersistence()`。 pristine 空 Registry 不创建无意义 catalog 文件，删除最后设备仍持久化有意为空的 v2 文档。调用方若在 `dispose()` 后立即释放目录，不得另有未等待的写重新创建目录。
+- 每文件 process-owned lock 记录版本、PID、hostname、owner 和时间；只回收本机 hostname 且 PID 已退出且结构完整的 stale lock。 malformed、legacy-text、远端 hostname 或活跃 PID 一律 fail-closed，release 校验 owner。
+- HTTP 解析和 direct dispatch 共用字段级 schema，在 Registry 副作用前拒绝类型强转、非整数端口/序号和越界字段。内容搜索与只读 `modelCatalog` 的 AbortSignal 贯通 HTTP 调用方、direct dispatch、本地 Controller 与远端 unary RPC；用户取消不是单设备 partial failure。非幂等 HTTP deadline 仍只报告结果未知，不声称已回滚；设备连接由 lifetime/generation 控制，Git 扫描由显式 cancel 控制。
+
+## 前端投影与渲染预算
+
+- Sidebar model、归档/置顶/未读集合和设备索引按引用 memoize；快照更新必须不可变。未读 ID 一次解码并按设备分组，Workspace 计数使用规范化父路径索引和 slash boundary，不做 Workspace² 或逐标签重复过滤。
+- 可见目录树先 flatten，再按固定行高 prefix offsets + binary search 计算虚拟窗口；只挂载 overscan 范围，保留全模型过滤/计数、父子键盘导航和折叠状态。一个 ResizeObserver 与一个 latest-value scroll rAF 限制观察器/滚动工作量，离屏焦点按 item index 滚动后恢复。
+- 快照缓存以 Host revision 为键；任何有效本地/远端选择、清选或 requestSeq 提升都必须 bump revision，防止同 Session 重试命中旧 `catalogSelection`。
+
 ## 原生导航事务
 
 导航以客户端 ID、目标设备、原始会话 ID、请求序号归属。桥接 ready 仅表示服务契约存在，selection 仅表示已选中；只有目标 binding 的 `openState=open` 才确认成功（允许空历史）。错误、超时、快切和重连均显式处理，旧 socket 与旧 binding 回调不能确认新导航。
@@ -35,7 +49,7 @@ origin-only，手工映射优先。本地 Git 从快照热路径移除，后台�
 
 ## 验证与集成
 
-快速验证：`pnpm run verify:version`、`pnpm run typecheck`、`pnpm run test`。构建与打包只在 CI 或隔离本机构建区，发行仍需用户明确要求。
+快速验证：`pnpm run verify:version`、`pnpm run typecheck`、`pnpm run test`。构建与打包只在 CI 或隔离本机构建区；CI/Release 在 build 后运行 `pnpm run verify:artifacts`，要求 `lib/**` 与提交零 drift 且 Host/Browser/Contract bundle 不超预算，实际 pack 的 `lib/**` 与构建输出精确一致。发行仍需用户明确要求。
 
 真实官方浏览器烟测：`pnpm run test:aggregated-browser`。需要 Node 24+、pnpm 11、官方 DSH CLI、预构建 tgz、Playwright 和浏览器，环境变量见脚本顶部。它创建两个隔离官方实例、独立 Profile 和临时端口，通过官方 SDK seed 非空历史而不调用模型；验证侧栏、原生历史、切换、刷新、重连和多标签隔离。不会替换当前 GUI、使用真实用户凭据或部署测试包到真实 Profile。测试日志与截图保留，含凭据运行目录在 finally 中清理。
 

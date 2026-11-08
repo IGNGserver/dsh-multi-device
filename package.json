@@ -70,6 +70,7 @@
     "test": "vitest run",
     "check": "pnpm run verify:version && pnpm run build && pnpm run test",
     "verify:package": "node scripts/verify-package.mjs",
+    "verify:artifacts": "node scripts/verify-artifacts.mjs",
     "test:install": "node scripts/smoke-official-install.mjs",
     "test:aggregated-browser": "node scripts/smoke-aggregated-browser.mjs"
   },

@@ -96,5 +96,11 @@ export interface ClientContextLike {
  * `sidebar.settings`.
  */
 export declare function openSettingsSection(ctx: ClientContextLike, sectionId?: string): boolean;
+/**
+ * Apply the Host-owned mode to the local DSH stores. The Host already filters
+ * the data; this refreshes the local Session catalog and, on entering Native
+ * Mode, moves the main conversation off a remote Session.
+ */
+export declare function installModeSideEffects(source: ClientContextLike): () => void;
 export declare function apply(ctx: ClientContextLike): void;
 export {};

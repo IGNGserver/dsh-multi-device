@@ -51,6 +51,20 @@ export function countableUnreadIds(
   return unread
 }
 
+export const EMPTY_UNREAD_SESSION_IDS: readonly string[] = []
+
+/** Decode every unread ID once per snapshot instead of once per rendered device tab. */
+export function groupUnreadSessionIds(unread: ReadonlySet<string>): ReadonlyMap<DeviceId, readonly string[]> {
+  const grouped = new Map<DeviceId, string[]>()
+  for (const sessionId of unread) {
+    const deviceId = decodeSessionId(sessionId).deviceId
+    const ids = grouped.get(deviceId) ?? []
+    ids.push(sessionId)
+    grouped.set(deviceId, ids)
+  }
+  return grouped
+}
+
 /**
  * Count unread Sessions owned by one device.
  *
@@ -99,16 +113,14 @@ function folderPath(path: string): string {
  * `workspace-tree` grouping: the longest matching registered ancestor wins, so
  * intermediate directories that are not Workspaces never become parents.
  */
-function owningParentFolder(path: string, parents: readonly string[]): string | undefined {
+function owningParentFolder(path: string, parents: ReadonlyMap<string, string>): string | undefined {
   const child = folderPath(path)
   let owner: string | undefined
-  let length = -1
-  for (const parent of parents) {
-    const root = folderPath(parent)
-    if (root.length > length && child !== root && child.startsWith(`${root}/`)) {
-      owner = parent
-      length = root.length
-    }
+  // Every strict directory ancestor ends immediately before a slash. Looking
+  // up those prefixes avoids comparing every Workspace with every other one.
+  for (let index = child.indexOf('/'); index >= 0; index = child.indexOf('/', index + 1)) {
+    const parent = parents.get(child.slice(0, index))
+    if (parent !== undefined) owner = parent
   }
   return owner
 }
@@ -138,10 +150,10 @@ export function workspaceUnreadCounts(
 
   const own = new Map<string, number>()
   const idByPath = new Map<string, string>()
-  const paths: string[] = []
+  const parentByFolder = new Map<string, string>()
   for (const workspace of workspaces) {
     const path = pathOf(workspace)
-    paths.push(path)
+    parentByFolder.set(folderPath(path), path)
     // DSH builds its own path map with `Map`, so a duplicate path resolves to
     // the last Workspace; mirroring that keeps ancestor chains identical.
     idByPath.set(path, workspace.logicalWorkspaceId)
@@ -152,7 +164,7 @@ export function workspaceUnreadCounts(
 
   const parentOf = new Map<string, string>()
   for (const workspace of workspaces) {
-    const parentPath = owningParentFolder(pathOf(workspace), paths)
+    const parentPath = owningParentFolder(pathOf(workspace), parentByFolder)
     const parentId = parentPath === undefined ? undefined : idByPath.get(parentPath)
     if (parentId !== undefined) parentOf.set(workspace.logicalWorkspaceId, parentId)
   }

@@ -5,17 +5,18 @@
  * it. When the same user runs DSH on several machines, each Host has its own
  * data file, so this module lets every Host publish a tiny section into each
  * remote device's DSH home over the existing SSH transport. Sessions IDs and
- * timestamps only; message bodies never leave the device.
+ * timestamps and optional completion cursors only; message bodies never leave
+ * the device. Version 1 remains readable by legacy Hosts.
  *
- * The file is Host-versioned and merges per Session by the newest `at`
- * timestamp (reads win ties), which makes concurrent Hosts converge instead of
- * treating the last writer as authoritative for every Session.
+ * A matching completion read is monotonic, regardless of wall-clock skew.
+ * Independent Hosts mint different UUIDs for the same execution: those tokens
+ * cannot be ordered or used to clear the local current completion. Only legacy
+ * entries without cursors use timestamp LWW. This is not cross-Host exactly-once.
  *
  * @module dsh-multi-device/host/shared-state
  */
-export interface SharedReadEntry {
-    readonly unread: boolean;
-    readonly at: number;
+import type { SessionReadState } from './read-state.ts';
+export interface SharedReadEntry extends SessionReadState {
 }
 export interface SharedReadHostSection {
     readonly updatedAt: number;
@@ -32,10 +33,9 @@ export declare const SHARED_READ_HOST_LIMIT = 20;
 /** Parse and bound a state file; malformed content is ignored, never thrown. */
 export declare function parseSharedReadDocument(text: string): SharedReadDocument | undefined;
 /**
- * Merge every Host section into the local Session map.
- *
- * Newest `at` wins; a read at the same instant wins over unread so two Hosts
- * clearing the same completion cannot resurrect the dot.
+ * Merge Host sections, preserving the local completion identity and tombstones.
+ * Same-token read wins even against a later unread; different tokens have no
+ * ordering. Legacy entries retain timestamp LWW until cursorized.
  */
 export declare function mergeSharedReadEntries(local: Readonly<Record<string, SharedReadEntry>>, doc: SharedReadDocument): Record<string, SharedReadEntry>;
 /**
@@ -50,4 +50,4 @@ export declare function sharedReadStatePath(remoteHome: string): string;
 /** Read command; a missing file is an empty document, not a failure. */
 export declare function buildReadSharedStateCommand(path: string): string;
 /** Atomic write through a sibling temp file, with GNU/BSD base64 fallback. */
-export declare function buildWriteSharedStateCommand(path: string, document: SharedReadDocument): string;
+export declare function buildWriteSharedStateCommand(path: string, document: SharedReadDocument, hostId?: string): string;

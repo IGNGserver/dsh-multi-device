@@ -580,6 +580,8 @@ export interface MultiDeviceSnapshot {
     readonly aggregatedGatewayActive: boolean
     readonly aggregatedGatewayError?: string
     readonly nativeProxyActive: boolean
+    /** Last asynchronous catalog persistence failure; successful retry clears it. */
+    readonly catalogPersistenceError?: string
   }
   readonly devices: readonly DeviceView[]
   readonly sshConfigHosts: readonly SshConfigHostEntry[]

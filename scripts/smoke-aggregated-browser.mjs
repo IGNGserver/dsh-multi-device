@@ -43,9 +43,9 @@ function isolatedEnv(root) {
     HOME: join(root, 'home'), USERPROFILE: join(root, 'home'), DSH_HOME: join(root, 'dsh'), DSH_AGENTS_HOME: join(root, 'agents'),
     XDG_CONFIG_HOME: join(root, 'config'), XDG_CACHE_HOME: join(root, 'cache'), XDG_DATA_HOME: join(root, 'data'), XDG_STATE_HOME: join(root, 'state'),
     APPDATA: join(root, 'config'), LOCALAPPDATA: join(root, 'data'), TMPDIR: join(root, 'tmp'), TMP: join(root, 'tmp'), TEMP: join(root, 'tmp'),
-    COREPACK_HOME: join(root, 'corepack'), COREPACK_ENABLE_PROJECT_SPEC: '0', PNPM_MANAGE_PACKAGE_MANAGER_VERSIONS: 'false',
+    COREPACK_HOME: join(root, 'corepack'), COREPACK_ENABLE_PROJECT_SPEC: '0', pnpm_config_pm_on_fail: 'ignore',
     npm_config_userconfig: join(root, 'empty.npmrc'), npm_config_globalconfig: join(root, 'global.npmrc'),
-    npm_config_cache: join(root, 'npm-cache'), npm_config_store_dir: join(root, 'pnpm-store'), npm_config_manage_package_manager_versions: 'false', pnpm_config_pm_on_fail: 'ignore',
+    npm_config_cache: join(root, 'npm-cache'), npm_config_store_dir: join(root, 'pnpm-store'),
     CI: 'true', NO_COLOR: '1', DO_NOT_TRACK: '1', OTEL_SDK_DISABLED: 'true',
   })
 }
@@ -302,8 +302,15 @@ export async function main() {
   log(`Artifacts: ${run}`)
   const records = []; const report = { status: 'running', coverage: [], artifacts: run, fixture: 'official SDK append, no prompt/model calls', existingGuiTouched: false }
   let context; let page
-  const onSignal = () => { interrupted = true; cancellation.abort(); void Promise.all([...children].map(stopChild)); void context?.close().catch(() => {}) }
-  process.once('SIGINT', onSignal); process.once('SIGTERM', onSignal)
+  const onSignal = signal => {
+    interrupted = true
+    cancellation.abort()
+    process.exitCode = signal === 'SIGINT' ? 130 : 143
+    void Promise.all([...children].map(stopChild))
+    void context?.close().catch(() => {})
+  }
+  const sigint = () => onSignal('SIGINT'); const sigterm = () => onSignal('SIGTERM')
+  process.once('SIGINT', sigint); process.once('SIGTERM', sigterm)
   const servers = []
   try {
     report.packageSha256 = createHash('sha256').update(await readFile(packagePath)).digest('hex')
@@ -462,8 +469,9 @@ export async function main() {
     report.status = known.length ? 'passed-with-upstream-cancellation' : 'passed'
     log(`PASS: official isolated browser E2E; known upstream cancellation diagnostics=${known.length}; NOT console-clean when nonzero, Desktop, SSH, deployment or paid-model acceptance`)
   } catch (error) {
-    report.status = 'failed'; report.error = redact(error?.stack ?? error)
-    if (page && !page.isClosed()) {
+    report.status = interrupted ? 'interrupted' : 'failed'
+    report.error = redact(error?.stack ?? error)
+    if (!interrupted && page && !page.isClosed()) {
       await page.screenshot({ path: join(run, 'failure.png'), fullPage: true }).catch(() => {})
       await writeFile(join(run, 'failure-dom.txt'), redact(await page.locator('body').innerText().catch(() => '')))
       const frames = []
@@ -492,7 +500,8 @@ export async function main() {
       }
       await writeFile(join(run, 'failure-frames.json'), redact(JSON.stringify(frames, null, 2)))
     }
-    throw error
+    if (!interrupted) throw error
+    log('Interrupted; owned servers and browser resources will be cleaned before exit')
   } finally {
     await context?.unrouteAll({ behavior: 'ignoreErrors' }).catch(() => {})
     await context?.close().catch(() => {})
@@ -500,7 +509,7 @@ export async function main() {
     for (const server of servers) if (server.child) await writeFile(join(run, `${server.label}-server.log`), redact(server.child.smokeOutput))
     await writeFile(join(run, 'browser-events.json'), JSON.stringify(records, null, 2))
     await writeFile(join(run, 'report.json'), JSON.stringify(report, null, 2))
-    process.removeListener('SIGINT', onSignal); process.removeListener('SIGTERM', onSignal)
+    process.removeListener('SIGINT', sigint); process.removeListener('SIGTERM', sigterm)
     const actual = await realpath(runtime)
     check(actual === join(await realpath(run), 'runtime') && dirname(run) === root && basename(run).startsWith('aggregated-browser-'), 'Refusing unsafe runtime cleanup')
     await rm(actual, { recursive: true, force: true })
