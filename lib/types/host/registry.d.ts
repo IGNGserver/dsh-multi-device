@@ -319,6 +319,17 @@ export declare class DeviceRegistry {
      * restore every other frame's sidebar for full native rendering.
      */
     private syncNativePaneEmbedding;
+    /**
+     * Push the Client's selected remote Session into that device's framed page.
+     *
+     * Both modes use it: Aggregated Mode shows the page inside the conversation
+     * pane, Native Mode shows the same page full-screen under its tab. The
+     * earlier `displayMode !== 'aggregated'` guard meant a Native Mode selection
+     * (for example opening a Session from an attention menu) switched tabs but
+     * left the framed page on whatever it showed before. `NativeDeviceProxy`
+     * remembers the command and replays it when the frame's bridge connects, so
+     * publishing before the tab is mounted is safe.
+     */
     private publishNativePaneSession;
     private openActiveRemoteSessionInNative;
     private paneKey;

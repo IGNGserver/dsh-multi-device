@@ -160,6 +160,59 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
   }
   export const MenuItemButton: React.ComponentType<MenuItemButtonProps>
 
+  /** One row of the declarative `Menu` list. */
+  export interface MenuItemSpec {
+    readonly id: string
+    readonly label: React.ReactNode
+    readonly icon?: React.ReactNode
+    readonly shortcut?: { readonly keys: readonly string[]; readonly aria?: string }
+    readonly danger?: boolean
+    readonly disabled?: boolean
+    readonly submenu?: readonly MenuItemSpec[]
+  }
+  /** Non-selectable rows accepted next to {@link MenuItemSpec}. */
+  export type MenuEntry =
+    | MenuItemSpec
+    | { readonly type: 'separator'; readonly id: string }
+    | { readonly type: 'label'; readonly id: string; readonly text: React.ReactNode }
+
+  export interface MenuProps {
+    readonly open: boolean
+    /** Measured element; still rendered in place, the surface floats beside it. */
+    readonly anchor: React.ReactElement
+    readonly items?: readonly MenuEntry[]
+    /** Custom rows rendered above `footer`; a `button[role="menuitem"]` click closes the menu. */
+    readonly children?: React.ReactNode
+    readonly footer?: readonly MenuEntry[]
+    readonly selectedId?: string
+    readonly selectedIds?: readonly string[]
+    readonly onSelect?: (id: string) => void
+    readonly onClose: () => void
+    readonly align?: 'start' | 'end'
+    readonly side?: 'bottom' | 'top' | 'right'
+    /** Portal the surface to `document.body` (escapes clipped/stacked shells). */
+    readonly portal?: boolean
+    readonly dense?: boolean
+    readonly compact?: boolean
+    readonly autoFocus?: boolean
+    readonly selection?: 'check' | 'fill'
+    readonly getAnchorRect?: () => DOMRect | null
+    readonly minWidthFromAnchor?: boolean
+    readonly closeOnPointerLeave?: boolean
+    /** Extra class on the anchor wrapper span (not the popup card). */
+    readonly className?: string
+    /** Extra class on the dropdown card — the only hook that reaches a portalled list. */
+    readonly listClassName?: string
+  }
+  export const Menu: React.ComponentType<MenuProps>
+
+  export interface MenuGroupProps {
+    readonly label: React.ReactNode
+    readonly children?: React.ReactNode
+  }
+  /** Sticky-capable heading + rows inside a {@link Menu}. */
+  export const MenuGroup: React.ComponentType<MenuGroupProps>
+
   export const IconPlusOutlineRegular: IconComponent
   export const IconRefreshOutlineRegular: IconComponent
   export const IconEditOutlineRegular: IconComponent

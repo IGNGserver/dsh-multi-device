@@ -138,13 +138,27 @@ export function SessionDeviceChip({
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') close()
     }
+    // Dismiss on an outside pointer instead of painting a full-window backdrop.
+    // The old backdrop used `z-index: 2147483000`, so while this popover was
+    // open the Native Mode tab strip and its Aggregated switch were unclickable
+    // — and in Native Mode the popover itself is usually hidden behind the
+    // remote frame, which made the blocked clicks look like a phantom overlay.
+    const onPointerDown = (event: Event): void => {
+      const target = event.target
+      if (!(target instanceof Node)) return
+      if (popoverRef.current?.contains(target) === true) return
+      if (buttonRef.current?.contains(target) === true) return
+      close()
+    }
     window.addEventListener('resize', close)
     window.addEventListener('scroll', onScroll, true)
     document.addEventListener('keydown', onKeyDown)
+    document.addEventListener('pointerdown', onPointerDown, true)
     return () => {
       window.removeEventListener('resize', close)
       window.removeEventListener('scroll', onScroll, true)
       document.removeEventListener('keydown', onKeyDown)
+      document.removeEventListener('pointerdown', onPointerDown, true)
     }
   }, [open])
 
@@ -352,7 +366,6 @@ export function SessionDeviceChip({
 
       {open && position !== null && (
         <>
-          <div className="dsh-md-device-chip-backdrop" onClick={() => setOpen(false)} />
           {panel === 'other' ? (
             <div
               ref={popoverRef}
