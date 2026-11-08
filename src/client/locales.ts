@@ -59,9 +59,10 @@ export const zh = {
   openExternal: '在浏览器中打开',
   reloadPage: '刷新远端页面',
   releaseKeepAlive: '关闭后台保活页面',
-  attentionPending: '待确认',
+  attentionPending: '待回复',
   attentionRunning: '运行中',
-  attentionUnread: '未读',
+  attentionUnread: '完成未读',
+  attentionStatus: '状态',
   attentionStale: '同步中 / 数据过期',
   attentionLastKnown: '上次已知',
   attentionMembers: '会话成员',
@@ -105,9 +106,9 @@ export const zh = {
   diagnosticsSummaryLine: '设备 {devices} 台 · 已连接 {connected} 台',
   keyReveal: '显示凭据',
   keyHide: '隐藏凭据',
-  pendingCount: '{count} 待确认',
+  pendingCount: '{count} 待回复',
   runningCount: '{count} 运行中',
-  unreadCount: '{count} 未读',
+  unreadCount: '{count} 完成未读',
 } as const
 
 export type MultiDeviceLocaleKey = keyof typeof zh
@@ -165,7 +166,8 @@ export const en: Record<MultiDeviceLocaleKey, string> = {
   releaseKeepAlive: 'Close background page',
   attentionPending: 'Needs reply',
   attentionRunning: 'Running',
-  attentionUnread: 'Unread',
+  attentionUnread: 'Finished, unread',
+  attentionStatus: 'status',
   attentionStale: 'Syncing / stale data',
   attentionLastKnown: 'Last known',
   attentionMembers: 'Session members',
@@ -211,5 +213,5 @@ export const en: Record<MultiDeviceLocaleKey, string> = {
   keyHide: 'Hide credential',
   pendingCount: '{count} needs reply',
   runningCount: '{count} running',
-  unreadCount: '{count} unread',
+  unreadCount: '{count} finished, unread',
 }

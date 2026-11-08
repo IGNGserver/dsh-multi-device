@@ -715,17 +715,28 @@ html[data-platform='darwin'] .dsh-md-native-bar {
 }
 
 /*
- * The keep-alive release button lives in a slot that exists for every device
- * that can be kept alive, not only for the ones currently mounted. Adding it on
- * the first click resized the tab and shifted every tab beside it.
+ * The keep-alive release control exists only while that device's page is really
+ * mounted, and it stays invisible until its tab is hovered or focused. The old
+ * fixed slot reserved 26px on every keep-alive-capable tab for a button that
+ * was usually absent; keeping the box in flow while fading only the glyph means
+ * revealing it never reflows the strip under the pointer.
  */
-.dsh-md-tab-action-slot {
+.dsh-md-tab-release {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: 22px;
+  height: 22px;
   flex: none;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.dsh-md-native-tab-item:hover .dsh-md-tab-release,
+.dsh-md-native-tab-item:focus-within .dsh-md-tab-release {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .dsh-md-pill-inner {
@@ -744,99 +755,133 @@ html[data-platform='darwin'] .dsh-md-native-bar {
 }
 
 /*
- * Attention chips: a number with a category icon, never a sentence. Every
- * category owns a slot of this exact width whether or not it has members, and
- * the freshness marker is a dot instead of a text chip, so a Session starting
- * or finishing never changes the strip's geometry.
+ * Tab status capsule: ONE capsule per device, numbers only. Colour is the
+ * category — needs-reply (amber) → running (blue) → finished-unread (green) —
+ * and the words live in the title attribute, the aria-label and the menu heading.
+ *
+ * Only categories with members render a segment, so a quiet device carries no
+ * invisible reservation; the three 30px slots plus the separate freshness marker
+ * this replaces are what made the strip read as a row of scattered dots. Digits
+ * are tabular and every segment keeps a two-digit cell, so 1 ↔ 9 ↔ 99 cannot
+ * nudge the neighbouring tabs; only a category appearing or disappearing
+ * reflows, which is a real change worth showing.
  */
 html {
-  --dsh-md-attention-slot-width: 30px;
+  --dsh-md-tone-pending: var(--dsw-alias-state-warn-label, var(--dsw-alias-state-warn-primary, #f59e0b));
+  --dsh-md-tone-running: var(--dsw-alias-state-business-primary, #679efe);
+  --dsh-md-tone-done: var(--dsw-alias-state-success-label, var(--dsw-alias-state-success-primary, #1f8b4c));
+  --dsh-md-status-segment-width: 22px;
 }
+
 .dsh-md-attention {
   position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
   flex: none;
 }
 
-/* Menu wraps its anchor in a span; keep the chip inline with the pill. */
-.dsh-md-attention > span {
+/* Nothing to report and nothing stale: stay out of the tab's gap arithmetic so
+ * a quiet device's tab is exactly as wide as its pill. */
+.dsh-md-attention:empty {
+  display: none;
+}
+
+.dsh-md-tab-status {
   display: inline-flex;
   align-items: center;
-}
-
-/* Freshness marker and the empty slot that replaces it share one box, so a
- * snapshot flipping between cached and live cannot resize the tab. */
-.dsh-md-attention-stale,
-.dsh-md-attention-stale-slot {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 8px;
-  height: 20px;
-  flex: none;
-}
-
-.dsh-md-attention-stale-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--dsw-alias-state-warn-primary);
-}
-
-/* Reserved space for an empty category. Same width as a chip, invisible. */
-.dsh-md-attention-slot {
-  display: inline-flex;
-  width: var(--dsh-md-attention-slot-width, 30px);
-  height: 20px;
-  flex: none;
-}
-
-.dsh-md-attention-chip {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
   gap: 2px;
   box-sizing: border-box;
-  width: var(--dsh-md-attention-slot-width, 30px);
   height: 20px;
-  padding: 0;
-  overflow: hidden;
+  padding: 0 3px;
   flex: none;
-  border: 0.5px solid transparent;
+  border: 0.5px solid var(--dsw-alias-border-l2);
   border-radius: 999px;
-  background: var(--dsw-alias-interactive-bg-selected, rgba(103, 158, 254, 0.12));
+  background: var(--dsw-alias-bg-layer-3);
+}
+
+/* Menu wraps its anchor in a span; keep the segments flush inside the capsule. */
+.dsh-md-tab-status > span {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Dock the capsule to its device tab; Settings rows keep their own row gap. */
+.dsh-md-native-tab-item .dsh-md-tab-status {
+  margin-inline-start: 4px;
+}
+
+/*
+ * Cached or partial data is not an authoritative zero, so the capsule states
+ * that itself instead of adding a second amber marker beside the numbers: it
+ * dims and goes dashed, and with nothing to count it collapses to an empty ring.
+ */
+.dsh-md-tab-status[data-stale='true'] {
+  opacity: 0.5;
+  border-style: dashed;
+}
+
+.dsh-md-tab-status[data-empty='true'] {
+  width: 10px;
+  height: 10px;
+  padding: 0;
+}
+
+.dsh-md-tab-status-seg {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-width: var(--dsh-md-status-segment-width, 22px);
+  height: 18px;
+  padding: 0 4px;
+  flex: none;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
   color: var(--dsw-alias-label-secondary);
   font: inherit;
   font-size: 11px;
-  line-height: 18px;
+  font-weight: 600;
+  line-height: 1;
   font-variant-numeric: tabular-nums;
   cursor: pointer;
   -webkit-app-region: no-drag;
-  transition: border-color 0.12s ease, background-color 0.12s ease;
+  transition: background-color 0.12s ease;
 }
 
-.dsh-md-attention-chip:hover {
-  border-color: var(--dsw-alias-border-l2);
+/* The number stays small while the hit box still clears a comfortable target.
+ * The button must not clip: a pseudo-element that overflows a clipping box stops
+ * receiving pointer events, which would silently undo the enlargement. */
+.dsh-md-tab-status-seg::after {
+  content: '';
+  position: absolute;
+  inset: -3px -1px;
 }
 
-.dsh-md-attention-chip[data-open='true'] {
-  border-color: var(--dsw-alias-border-l1);
+.dsh-md-tab-status-seg[data-tone='pending'] {
+  color: var(--dsh-md-tone-pending);
 }
 
-.dsh-md-attention-chip:focus-visible {
+.dsh-md-tab-status-seg[data-tone='running'] {
+  color: var(--dsh-md-tone-running);
+}
+
+.dsh-md-tab-status-seg[data-tone='done'] {
+  color: var(--dsh-md-tone-done);
+}
+
+.dsh-md-tab-status-seg:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.dsh-md-tab-status-seg[data-open='true'] {
+  background: var(--dsw-alias-interactive-bg-selected);
+}
+
+.dsh-md-tab-status-seg:focus-visible {
   outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
   outline-offset: 1px;
-}
-
-.dsh-md-attention-chip[data-category='pending'] {
-  color: var(--dsw-alias-state-warn-primary);
-  background: transparent;
-}
-
-.dsh-md-attention-count {
-  font-weight: 500;
 }
 
 /* The menu surface and rows are rendered by the Host's Menu; only the two

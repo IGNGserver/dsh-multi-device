@@ -94,11 +94,14 @@ function render(props: Record<string, unknown> = {}): ReactTestRenderer {
   return renderer
 }
 
-function chip(renderer: ReactTestRenderer) {
-  const chips = renderer.root.findAll(
-    node => node.type === 'button' && node.props.className === 'dsh-md-attention-chip',
+function segments(renderer: ReactTestRenderer) {
+  return renderer.root.findAll(
+    node => node.type === 'button' && node.props.className === 'dsh-md-tab-status-seg',
   )
-  return chips[0]!
+}
+
+function chip(renderer: ReactTestRenderer) {
+  return segments(renderer)[0]!
 }
 
 async function openMenu(renderer: ReactTestRenderer): Promise<void> {
@@ -188,25 +191,42 @@ describe('attention menu', () => {
     expect(markup).not.toContain('过期的 Host 标题')
   })
 
-  it('reserves a slot for every category so attention changes cannot resize the tab', () => {
-    // One running Session: the running category is a chip, the other two are
-    // invisible slots of the same width. Counts flip constantly, and a tab that
-    // resized on every flip moved every tab beside it.
-    const empty = { ...running, runningSessionIds: [], eligibleSessionIds: [], unreadSessionIds: [] }
-    const busy = render()
-    const idle = render({ view: empty, deviceName: 'ubuntu-dev' })
+  it('orders the capsule by urgency and never renders an empty category', () => {
+    // Needs-reply → running → finished-unread, colour-coded. An empty category
+    // used to get a 30px invisible slot of its own; the capsule only carries
+    // numbers that exist, so a quiet device reserves nothing at all.
+    const busy = render({
+      view: {
+        ...running,
+        pendingSessionIds: ['remote-pending'],
+        runningSessionIds: [remoteSession],
+        unreadSessionIds: ['remote-unread'],
+      },
+    })
+    expect(segments(busy).map(node => String(node.props['data-tone'])))
+      .toEqual(['pending', 'running', 'done'])
+    expect(busy.root.findAll(node => node.props['data-attention-slot'] !== undefined)).toHaveLength(0)
+    expect(busy.root.findAll(node => node.props.className === 'dsh-md-attention-slot')).toHaveLength(0)
+  })
 
-    const slotsOf = (renderer: ReactTestRenderer): string[] => renderer.root
-      .findAll(node => typeof node.props['data-attention-slot'] === 'string')
-      .map(node => String(node.props['data-attention-slot']))
-    const chipsOf = (renderer: ReactTestRenderer): number => renderer.root
-      .findAll(node => node.type === 'button' && node.props.className === 'dsh-md-attention-chip')
-      .length
+  it('renders no capsule at all when a device has nothing to report', () => {
+    const idle = render({
+      view: { ...running, eligibleSessionIds: [], runningSessionIds: [], unreadSessionIds: [] },
+    })
+    expect(segments(idle)).toHaveLength(0)
+    expect(idle.root.findAll(node => node.props.className === 'dsh-md-tab-status')).toHaveLength(0)
+  })
 
-    expect(slotsOf(busy)).toEqual(['pending', 'unread'])
-    expect(chipsOf(busy)).toBe(1)
-    expect(slotsOf(idle)).toEqual(['pending', 'running', 'unread'])
-    expect(chipsOf(idle)).toBe(0)
+  it('states cached data on the capsule instead of adding a fifth marker', () => {
+    // The amber freshness dot used the very same colour as "needs reply", so a
+    // stale device read as a second pending reminder. The capsule dims and goes
+    // dashed instead, and says so in its accessible name.
+    const renderer = render({ view: { ...running, fresh: false } })
+    const capsule = renderer.root
+      .findAll(node => node.props.className === 'dsh-md-tab-status')[0]!
+    expect(capsule.props['data-stale']).toBe('true')
+    expect(renderer.root.findAll(node => node.props['data-attention-stale'] !== undefined)).toHaveLength(0)
+    expect(markupOf(renderer)).toContain('同步中 / 数据过期')
   })
 
   it('explains absent member IDs for an older Host instead of showing an empty list', async () => {

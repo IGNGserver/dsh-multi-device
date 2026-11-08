@@ -57,9 +57,10 @@ export declare const zh: {
     readonly openExternal: "在浏览器中打开";
     readonly reloadPage: "刷新远端页面";
     readonly releaseKeepAlive: "关闭后台保活页面";
-    readonly attentionPending: "待确认";
+    readonly attentionPending: "待回复";
     readonly attentionRunning: "运行中";
-    readonly attentionUnread: "未读";
+    readonly attentionUnread: "完成未读";
+    readonly attentionStatus: "状态";
     readonly attentionStale: "同步中 / 数据过期";
     readonly attentionLastKnown: "上次已知";
     readonly attentionMembers: "会话成员";
@@ -103,9 +104,9 @@ export declare const zh: {
     readonly diagnosticsSummaryLine: "设备 {devices} 台 · 已连接 {connected} 台";
     readonly keyReveal: "显示凭据";
     readonly keyHide: "隐藏凭据";
-    readonly pendingCount: "{count} 待确认";
+    readonly pendingCount: "{count} 待回复";
     readonly runningCount: "{count} 运行中";
-    readonly unreadCount: "{count} 未读";
+    readonly unreadCount: "{count} 完成未读";
 };
 export type MultiDeviceLocaleKey = keyof typeof zh;
 export declare const en: Record<MultiDeviceLocaleKey, string>;
