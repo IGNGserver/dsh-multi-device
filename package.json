@@ -1,7 +1,7 @@
 {
   "name": "dsh-multi-device",
   "description": "Multi-device management plugin for DeepSeek Harness (DSH) Desktop & Web: SSH tunnel connections, system SSH config and key reuse, and a persistent keep-alive device tab strip that runs each remote machine\u2019s own DSH UI.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
