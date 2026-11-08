@@ -11,7 +11,7 @@
  *    transparently injects the authenticated `Cookie`/`Authorization` headers, rewrites `Host` and `Origin`
  *    to the remote server's expected authority, strips `X-Frame-Options` and `frame-ancestors` CSP directives,
  *    and forwards both HTTP requests and WebSocket upgrades (`/api/remote.mux`, `/api/events.mux`).
- * 4. Completely independent of Aggregated Mode: even if Aggregated Mode fails or is disabled, Native Mode
+ * 4. Completely independent of the local DSH surface: even if the local shell changes, Native Mode
  *    continues to work as long as the device's HTTP/tunnel endpoint is reachable.
  * 5. Intercepts upstream 401/403, forces one re-authentication (stale cookies are common after a
  *    remote restart), and serves a branded authorization page instead of the remote's plain-text
@@ -477,7 +477,7 @@ export class NativeDeviceProxy {
     return state
   }
 
-  /** Current bridge lifecycle for this client only (legacy never aggregates). */
+  /** Current bridge lifecycle for this client only. */
   bridgeSnapshot(clientId = LEGACY_CLIENT_ID): NativeBridgeSnapshot {
     const state = this.clientStates.get(clientId)
     return {
@@ -1426,11 +1426,6 @@ export class NativeProxyManager {
     if (proxy === undefined) return false
     proxy.requestRefresh()
     return true
-  }
-
-  /** Toggle the remote sidebar for pane vs full native rendering. */
-  setEmbedded(deviceId: DeviceId, enabled: boolean, clientId = LEGACY_CLIENT_ID): void {
-    this.proxies.get(deviceId)?.setEmbedded(enabled, clientId)
   }
 
   /** Push Host-owned fold state to the device's framed page(s). */

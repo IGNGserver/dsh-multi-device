@@ -1,15 +1,10 @@
 /**
- * Native Mode tab bar and keep-alive viewport.
+ * The device tab bar and its keep-alive viewports. This is the plugin's only
+ * navigation surface.
  *
- * Native Mode is a tab strip that never disappears:
  * - 本机 (leftmost) reveals the unmodified local DSH page; it is not an iframe.
  * - Every configured remote device opens its complete remote DSH Web UI below
  *   the same strip.
- * - The rightmost action switches back to Aggregated Mode, so the two surfaces
- *   stay one click apart without opening Settings. The Host still owns the mode.
- *   The switch moves into the leading cluster when the visible bar is narrow or
- *   when the Host frame is wider than the viewport (Windows Desktop), so the way
- *   back to Aggregated Mode can never be clipped off-screen.
  * - Each tab carries its owner's unread completion count (本机 included), so a
  *   finished conversation on another device stays visible without switching.
  *   Archived and subagent Sessions never get a standalone row and are excluded.
@@ -17,8 +12,7 @@
  * Keep-Alive:
  * - Every device in `keepAliveDeviceIds` stays mounted in the DOM.
  * - Inactive devices are hidden with `display: none` instead of unmounting, so
- *   switching tabs or entering Aggregated Mode preserves live WebSocket state,
- *   conversations, and composer drafts.
+ *   switching tabs preserves live WebSocket state, conversations and drafts.
  * - Supports Electron Desktop's `<webview>` guest bridge
  *   (`globalThis.dshDesktop?.browser`) and a standard authenticated `<iframe>`.
  *
@@ -26,7 +20,6 @@
  */
 import {
   Button,
-  IconChevronLeftOutlineRegular,
   IconCloseOutlineRegular,
   IconGlobeOutlineRegular,
   IconRefreshOutlineRegular,
@@ -35,7 +28,6 @@ import {
   IconWarningOutlineRegular,
   Pill,
   StateDot,
-  Toast,
   Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
@@ -52,11 +44,8 @@ import {
 } from './barMetrics.ts'
 import { attentionUnreadIds } from '../attention.ts'
 import { AttentionDetails } from './AttentionDetails.tsx'
-import { useSessionSummary } from './clientServices.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
-import { SessionDeviceChip } from './SessionDeviceChip.tsx'
 import { assessBrowserNativeAccess } from '../host/browser-relay.ts'
-import { nativePaneTarget, shouldShowNativePane } from './nativePane.ts'
 import { clientStore, deviceStateToDotState, useMultiDeviceState } from './state.ts'
 import { countableUnreadIds, EMPTY_UNREAD_SESSION_IDS, groupUnreadSessionIds } from './unreadCounts.ts'
 
@@ -332,19 +321,15 @@ export function NativeTabBar({
 }): React.ReactElement | null {
   const state = useMultiDeviceState()
   const { devices } = state.snapshot
-  const [switching, setSwitching] = useState(false)
-  const [switchFailure, setSwitchFailure] = useState<{ seq: number; message: string } | null>(null)
   const [layout, setLayout] = useState<BarLayout | undefined>(undefined)
   const [obstructed, setObstructed] = useState<string | undefined>(undefined)
-  const failureSeq = useRef(0)
   const barRef = useRef<HTMLDivElement | null>(null)
-  const switchRef = useRef<HTMLSpanElement | null>(null)
+  const trailingRef = useRef<HTMLDivElement | null>(null)
 
   // Measure the frame (and only the frame). The result depends solely on the
   // frame box and the viewport, so growing the window back after shrinking it
   // restores the full width on the very next measurement.
   useEffect(() => {
-    if (state.displayMode !== 'native') return
     if (typeof window === 'undefined') return
     let frame: HTMLElement | undefined
     let frameObserver: ResizeObserver | undefined
@@ -411,16 +396,16 @@ export function NativeTabBar({
       hostObserver?.disconnect()
       recordNativeBarMetrics(undefined)
     }
-  }, [state.displayMode])
+  }, [])
 
-  // Occlusion probe: name whatever sits on top of the mode switch. The Host's
-  // native window controls and its own in-frame seats are the only candidates,
-  // and guessing between them from a screenshot is hopeless.
+  // Occlusion probe: name whatever sits on top of the trailing controls. The
+  // Host's native window controls and its own in-frame seats are the only
+  // candidates, and guessing between them from a screenshot is hopeless.
   useEffect(() => {
-    if (state.displayMode !== 'native' || layout === undefined) return
+    if (layout === undefined) return
     if (typeof document === 'undefined' || typeof document.elementFromPoint !== 'function') return
     const probe = (): void => {
-      const element = switchRef.current
+      const element = trailingRef.current
       const barElement = barRef.current
       if (element === null || barElement === null) {
         setObstructed(undefined)
@@ -436,42 +421,24 @@ export function NativeTabBar({
     }
     const handle = requestAnimationFrame(probe)
     return () => cancelAnimationFrame(handle)
-  }, [state.displayMode, layout, devices.length, switching, state.activeNativeDeviceId])
-
-  if (state.displayMode !== 'native') return null
+  }, [layout, devices.length, state.activeNativeDeviceId])
 
   // Count only unread Sessions that DSH can actually show as rows: archived
   // completions and subagent children never appear in the sidebar, and a
   // remote ID that is no longer in any catalog is a deleted Session whose
   // persisted marker must not keep the badge alive.
   const attentionByDevice = state.snapshot.attentionByDevice
-  const unread = attentionByDevice !== undefined ? attentionUnreadIds(attentionByDevice) : countableUnreadIds(
-    state.snapshot.unreadSessionIds,
-    state.snapshot.archivedSessionIds,
-    state.snapshot.subagentSessionIds,
-    sessionId => state.snapshot.sessionOrigins[sessionId] !== undefined,
-  )
+  const unread = attentionByDevice !== undefined
+    ? attentionUnreadIds(attentionByDevice)
+    : countableUnreadIds(
+        state.snapshot.unreadSessionIds,
+        state.snapshot.archivedSessionIds,
+        state.snapshot.subagentSessionIds,
+      )
   const unreadByDevice = groupUnreadSessionIds(unread)
 
   const activeDevice = devices.find(device => device.id === state.activeNativeDeviceId)
   const localActive = activeDevice === undefined
-
-  // The Host owns the mode; this only asks it to stop merging and applies the
-  // snapshot it returns. A failed RPC is surfaced instead of leaving the user
-  // in Native Mode with no visible reaction to the click.
-  const switchToAggregated = (): void => {
-    if (switching) return
-    setSwitching(true)
-    void clientStore.setDisplayMode('aggregated').then((res) => {
-      setSwitching(false)
-      if (res.ok) return
-      failureSeq.current += 1
-      setSwitchFailure({
-        seq: failureSeq.current,
-        message: `${t('actionFailed')}: ${res.error ?? ''}`,
-      })
-    })
-  }
 
   const compact = layout?.compact === true
   const clipped = layout?.clipped === true
@@ -489,28 +456,6 @@ export function NativeTabBar({
     </Tooltip>
   )
 
-  // The way back to Aggregated Mode. Rightmost while there is room; the leading
-  // cluster when the bar is narrow, so it can never be pushed off-screen by a
-  // Host frame that is wider than the viewport.
-  const aggregatedSwitch = (
-    <span ref={switchRef} className="dsh-md-native-mode-switch-wrap">
-      <Tooltip label={t('switchToAggregated')} side="bottom" align={compact ? 'start' : 'end'}>
-        <Button
-          variant="outline"
-          size="sm"
-          className="dsh-md-native-mode-switch"
-          icon={<IconChevronLeftOutlineRegular size={12} />}
-          aria-label={t('switchToAggregated')}
-          aria-busy={switching || undefined}
-          disabled={switching}
-          onClick={switchToAggregated}
-        >
-          {compact ? null : t('modeAggregated')}
-        </Button>
-      </Tooltip>
-    </span>
-  )
-
   const bar = (
     <div
       className="dsh-md-native-bar"
@@ -523,12 +468,7 @@ export function NativeTabBar({
         ? undefined
         : { left: `${layout.left}px`, top: `${layout.top}px`, width: `${layout.width}px` }}
     >
-      {compact && (
-        <div className="dsh-md-native-bar-leading">
-          {aggregatedSwitch}
-          {settingsButton}
-        </div>
-      )}
+      {compact && <div className="dsh-md-native-bar-leading">{settingsButton}</div>}
 
       <div className="dsh-md-native-tabs" role="tablist" aria-label={t('nativeTabsLabel')}>
         <div className="dsh-md-native-tab-item">
@@ -603,8 +543,8 @@ export function NativeTabBar({
 
       {/* Trailing cluster: always pinned to the bar's right edge. `flex: none` +
           `margin-inline-start: auto` keeps it out of the tab strip's scroll
-          area, so the Aggregated switch can never be scrolled away or clipped. */}
-      <div className="dsh-md-native-bar-trailing">
+          area, so the Settings entry can never be scrolled away or clipped. */}
+      <div className="dsh-md-native-bar-trailing" ref={trailingRef}>
         {activeDevice !== undefined && (
           <div className="dsh-md-native-bar-actions">
             <Tooltip label={t('reloadPage')} side="bottom">
@@ -636,23 +576,7 @@ export function NativeTabBar({
         )}
 
         {!compact && settingsButton}
-
-        {!compact && <span className="dsh-md-native-bar-sep" aria-hidden="true" />}
-
-        {/* Rightmost action while there is room: Aggregated Mode is one click
-            away, never buried in Settings. The Host persists the switch and
-            re-merges remote rows. Compact bars render it first instead. */}
-        {!compact && aggregatedSwitch}
       </div>
-
-      {switchFailure !== null && (
-        <Toast
-          key={switchFailure.seq}
-          text={switchFailure.message}
-          tone="error"
-          onDone={() => setSwitchFailure(null)}
-        />
-      )}
     </div>
   )
 
@@ -664,154 +588,9 @@ export function NativeTabBar({
 }
 
 /**
- * Measure the local conversation column (centre + right track) so the
- * aggregated pane covers exactly the local conversation, never the aggregated
- * sidebar. Re-measured on frame resize, sidebar drag, right-panel toggle and
- * layout mutations; a zero/invalid box hides the pane instead of covering the
- * whole window.
- */
-const useBrowserLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect
-
-function usePaneGeometry(
-  stageRef: React.RefObject<HTMLDivElement | null>,
-  enabled: boolean,
-): React.CSSProperties | undefined {
-  const [style, setStyle] = useState<React.CSSProperties | undefined>(undefined)
-
-  useBrowserLayoutEffect(() => {
-    if (!enabled) {
-      setStyle(undefined)
-      return
-    }
-    const stage = stageRef.current
-    const frame = stage?.closest('[data-shell-overlay]')?.parentElement
-    if (!(frame instanceof HTMLElement)) {
-      setStyle(undefined)
-      return
-    }
-
-    let frameId = 0
-    const measure = (): void => {
-      frameId = 0
-      const center = frame.querySelector('[class*="_centerCol"]')
-      if (!(center instanceof HTMLElement)) {
-        setStyle(undefined)
-        return
-      }
-      const frameRect = frame.getBoundingClientRect()
-      const centerRect = center.getBoundingClientRect()
-      const left = Math.max(0, Math.round(centerRect.left - frameRect.left))
-      const top = Math.max(0, Math.round(centerRect.top - frameRect.top))
-      const width = Math.max(0, Math.round(frameRect.right - centerRect.left))
-      // Stop at the conversation column's bottom edge so the local shell's
-      // bottom status row (if any) stays visible; the right track is covered
-      // horizontally because it lives in the same grid row.
-      const height = Math.max(0, Math.round(centerRect.height))
-      if (width < 160 || height < 120) {
-        setStyle(undefined)
-        return
-      }
-      setStyle({ left, top, width, height, right: 'auto', bottom: 'auto' })
-    }
-    const schedule = (): void => {
-      if (frameId !== 0 || typeof requestAnimationFrame !== 'function') return
-      frameId = requestAnimationFrame(measure)
-    }
-
-    measure()
-    const ResizeObserverCtor = (globalThis as { ResizeObserver?: typeof ResizeObserver }).ResizeObserver
-    const resizeObserver = ResizeObserverCtor === undefined ? undefined : new ResizeObserverCtor(schedule)
-    resizeObserver?.observe(frame)
-    const center = frame.querySelector('[class*="_centerCol"]')
-    if (center instanceof HTMLElement) resizeObserver?.observe(center)
-    const mutationObserver = typeof MutationObserver === 'undefined'
-      ? undefined
-      : new MutationObserver(schedule)
-    mutationObserver?.observe(frame, {
-      attributes: true,
-      attributeFilter: ['style', 'class', 'data-sidebar-collapsed', 'data-dragging'],
-    })
-    window.addEventListener('resize', schedule)
-
-    return () => {
-      if (frameId !== 0) cancelAnimationFrame(frameId)
-      resizeObserver?.disconnect()
-      mutationObserver?.disconnect()
-      window.removeEventListener('resize', schedule)
-    }
-  }, [enabled, stageRef])
-
-  return style
-}
-
-/** Slim local strip above the framed page: device identity + full-UI handoff. */
-function NativePaneBar({
-  device,
-  sessionId,
-  t,
-  onOpenSettings,
-}: {
-  device: DeviceView
-  sessionId: string
-  t: (key: MultiDeviceLocaleKey) => string
-  onOpenSettings: () => void
-}): React.ReactElement {
-  // A blank remote conversation uses the same device picker as the local hero,
-  // so "start on another device" survives the native pane covering the hero.
-  const summary = useSessionSummary(sessionId)
-  const blank = summary?.blank === true
-  return (
-    <div className="dsh-md-pane-bar" data-state={device.state}>
-      <span className="dsh-md-pane-identity">
-        <SessionDeviceChip
-          sessionId={sessionId}
-          variant={blank ? 'hero' : 'header'}
-          t={t}
-          onOpenSettings={onOpenSettings}
-        />
-        <span className="dsh-md-pane-mode">{t('nativePaneLabel')}</span>
-      </span>
-      <span className="dsh-md-pane-actions">
-        {device.state !== 'connected' && device.state !== 'disabled' && (
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => { void clientStore.reconnectDevice(device.id) }}
-          >
-            {t('reconnect')}
-          </Button>
-        )}
-        <Tooltip label={t('reloadPage')} side="bottom">
-          <Button
-            variant="ghost"
-            size="icon"
-            aria-label={t('reloadPage')}
-            onClick={() => clientStore.reloadNativeDevice(device.id)}
-          >
-            <IconRefreshOutlineRegular size={14} />
-          </Button>
-        </Tooltip>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => { void clientStore.selectNativeDevice(device.id) }}
-        >
-          {t('nativePaneOpenFull')}
-        </Button>
-      </span>
-    </div>
-  )
-}
-
-/**
- * Remote viewports for both modes:
- * - Native Mode: full frame below the tab bar.
- * - Aggregated Mode: a pane covering only the local conversation column while
- *   a remote Session is selected; the aggregated sidebar stays interactive.
- *
- * The pane is visible only after the injected bridge reports the selected raw
- * Session (see `shouldShowNativePane`). Until then the local mirror remains
- * visible, so a slow bridge or a version mismatch never shows a blank pane.
+ * Remote device viewports: one full frame per mounted device, directly below
+ * the tab strip. Inactive devices stay mounted but hidden so Keep-Alive keeps
+ * their live WebSocket state, conversations and drafts.
  */
 export function NativeViewport({
   t,
@@ -822,53 +601,8 @@ export function NativeViewport({
 }): React.ReactElement {
   const state = useMultiDeviceState()
   const { devices } = state.snapshot
-  const isNative = state.displayMode === 'native'
   const activeDevice = devices.find(device => device.id === state.activeNativeDeviceId)
-  const paneEnabled = state.snapshot.ui?.nativePane !== false && state.snapshot.hostStatus.nativeProxyActive
-  const target = paneEnabled
-    ? nativePaneTarget(state.displayMode, state.activeSessionId)
-    : undefined
-  const paneDevice = target === undefined
-    ? undefined
-    : devices.find(device => device.id === target.deviceId)
   const stageRef = useRef<HTMLDivElement | null>(null)
-  // Measure whenever a pane target exists or a kept-alive frame is mounted, so
-  // the hidden frame keeps a realistic width and does not reflow when shown.
-  const measureStage = !isNative && (target !== undefined || state.keepAliveDeviceIds.length > 0)
-  const geometry = usePaneGeometry(stageRef, measureStage)
-  const paneVisible = shouldShowNativePane({
-    enabled: paneEnabled,
-    target,
-    device: paneDevice,
-    geometryReady: geometry !== undefined,
-    independentCatalog: state.snapshot.catalog !== undefined,
-  })
-
-  // The framed page visually covers the local conversation, but the local DOM
-  // would still be tabbable underneath. Make the covered columns inert so a
-  // keyboard user cannot operate the hidden mirror through the pane.
-  useEffect(() => {
-    if (isNative) return
-    const stage = stageRef.current
-    const frame = stage?.closest('[data-shell-overlay]')?.parentElement
-    if (!(frame instanceof HTMLElement)) return
-    const targets: HTMLElement[] = []
-    for (const selector of ['[class*="_centerCol"]', '[class*="_rightbarCol"]']) {
-      const element = frame.querySelector(selector)
-      if (element instanceof HTMLElement) targets.push(element)
-    }
-    for (const element of targets) {
-      if (paneVisible) element.setAttribute('inert', '')
-      else element.removeAttribute('inert')
-    }
-    return () => {
-      for (const element of targets) element.removeAttribute('inert')
-    }
-  }, [isNative, paneVisible])
-
-  useEffect(() => {
-    if (target !== undefined) clientStore.ensureKeepAliveDevice(target.deviceId)
-  }, [target?.deviceId])
 
   // A framed status page cannot recover on its own when the tunnel returns.
   // Reload exactly once on any mounted device's non-connected -> connected edge.
@@ -884,96 +618,57 @@ export function NativeViewport({
         prevState !== 'connected' &&
         dev.state === 'connected' &&
         (dev.nativePaneState === 'idle' || dev.nativePaneState === 'failed' || dev.nativePaneState === undefined) &&
-        (state.keepAliveDeviceIds.includes(dev.id) || activeDevice?.id === dev.id || paneDevice?.id === dev.id)
+        (state.keepAliveDeviceIds.includes(dev.id) || activeDevice?.id === dev.id)
       ) {
         clientStore.reloadNativeDevice(dev.id)
       }
     }
     previousStates.current = nextMap
-  }, [devices, state.keepAliveDeviceIds, activeDevice?.id, paneDevice?.id])
+  }, [devices, state.keepAliveDeviceIds, activeDevice?.id])
 
-  // Keep every keep-alive device, the native tab and the pane's device mounted.
+  // Every keep-alive device and the active tab stay mounted.
   const mountedDeviceIds = new Set<DeviceId>(state.keepAliveDeviceIds)
   if (activeDevice !== undefined) mountedDeviceIds.add(activeDevice.id)
-  if (paneDevice !== undefined) mountedDeviceIds.add(paneDevice.id)
   const mountedDevices = devices.filter(device => mountedDeviceIds.has(device.id))
-
-  const stageVisible = isNative ? activeDevice !== undefined : paneVisible
-  const paneStyle = isNative
-    ? undefined
-    : (geometry ?? { left: 0, top: 0, width: 0, height: 0, right: 'auto', bottom: 'auto' })
+  const stageVisible = activeDevice !== undefined
 
   return (
     <div
       ref={stageRef}
       className="dsh-md-native-stage"
-      data-scope={isNative ? 'full' : 'pane'}
       data-visible={stageVisible ? 'true' : 'false'}
-      data-bridge={paneDevice?.nativePaneState ?? 'idle'}
-      style={paneStyle}
+      data-bridge={activeDevice?.nativePaneState ?? 'idle'}
       aria-hidden={!stageVisible}
     >
-      {!isNative && paneDevice !== undefined && paneVisible && state.activeSessionId !== undefined && (
-        <NativePaneBar
-          device={paneDevice}
-          sessionId={state.activeSessionId}
-          t={t}
-          onOpenSettings={onOpenSettings}
-        />
-      )}
-      {(() => {
-        // A failed bridge used to leave a blank stage with no explanation.
-        // Surface the reason and a reload action; the automatic reload-on-reconnect
-        // logic above stays as the recovery path for transient failures.
-        const failedDevice = isNative ? activeDevice : paneDevice
-        if (failedDevice === undefined || failedDevice.nativePaneState !== 'failed') return null
-        const error = failedDevice.nativePaneError
-        return (
-          <div className="dsh-md-bridge-failed" role="status">
-            <IconWarningOutlineRegular size={16} />
-            <div className="dsh-md-bridge-failed-text">
-              <span className="dsh-md-bridge-failed-title">
-                {t('bridgeFailedTitle').replace('{name}', failedDevice.name)}
+      {activeDevice !== undefined && activeDevice.nativePaneState === 'failed' && (
+        <div className="dsh-md-bridge-failed" role="status">
+          <IconWarningOutlineRegular size={16} />
+          <div className="dsh-md-bridge-failed-text">
+            <span className="dsh-md-bridge-failed-title">
+              {t('bridgeFailedTitle').replace('{name}', activeDevice.name)}
+            </span>
+            {activeDevice.nativePaneError !== undefined && activeDevice.nativePaneError !== '' && (
+              <span className="dsh-md-bridge-failed-error" title={activeDevice.nativePaneError}>
+                {t('bridgeFailedError').replace('{error}', activeDevice.nativePaneError)}
               </span>
-              {error !== undefined && error !== '' && (
-                <span className="dsh-md-bridge-failed-error" title={error}>
-                  {t('bridgeFailedError').replace('{error}', error)}
-                </span>
-              )}
-            </div>
-            <Button
-              variant="outline"
-              size="sm"
-              icon={<IconRefreshOutlineRegular size={14} />}
-              onClick={() => clientStore.reloadNativeDevice(failedDevice.id)}
-            >
-              {t('bridgeFailedReload')}
-            </Button>
+            )}
           </div>
-        )
-      })()}
+          <Button
+            variant="outline"
+            size="sm"
+            icon={<IconRefreshOutlineRegular size={14} />}
+            onClick={() => clientStore.reloadNativeDevice(activeDevice.id)}
+          >
+            {t('bridgeFailedReload')}
+          </Button>
+        </div>
+      )}
       <div className="dsh-md-native-stage-body">
-        {!isNative && state.snapshot.catalog && target && paneDevice && paneDevice.authState !== 'required' && paneDevice.authState !== 'error' && (() => {
-          const access = assessBrowserNativeAccess({ pageUrl: typeof window === 'undefined' ? 'http://127.0.0.1:3080/' : window.location.href ?? `${window.location.protocol}//${window.location.hostname}:3080/`, proxyUrl: paneDevice.nativeProxyUrl, desktopGuest: getDesktopBrowserBridge() !== undefined })
-          const navigation = paneDevice.nativeNavigation
-          const opened = navigation?.sessionId === target.rawSessionId && navigation.openState === 'open'
-          if (opened) return null
-          const error = access.status === 'unsupported' ? access.message : navigation?.sessionId === target.rawSessionId && navigation.openState === 'error' ? navigation.error : paneDevice.nativePaneState === 'failed' ? paneDevice.nativePaneError : undefined
-          return <div className="dsh-md-navigation-status" role={error ? 'alert' : 'status'} data-testid="native-navigation-status" style={{ position: 'absolute', inset: 0, zIndex: 5, display: 'grid', placeContent: 'center', gap: 12, padding: 24, background: 'var(--dsw-alias-bg-layer-1)' }}>
-            <span>{error ?? (paneDevice.state === 'connected' ? '正在打开原生会话…' : '设备尚未就绪，正在等待连接…')}</span>
-            <Button variant="outline" size="sm" onClick={() => { clientStore.reloadNativeDevice(paneDevice.id); void clientStore.retryCatalogNavigation() }}>重试</Button>
-          </div>
-        })()}
         {mountedDevices.map((device) => (
           <KeepAliveDeviceFrame
             key={device.id}
             device={device}
-            active={isNative
-              ? stageVisible && device.id === activeDevice?.id
-              // The aggregated pane can keep the frame mounted while its
-              // geometry is not ready or the bridge is still loading; the
-              // stage is hidden then, so the frame must not report visible.
-              : stageVisible && device.id === paneDevice?.id}
+            active={stageVisible && device.id === activeDevice?.id}
             reloadCount={state.reloadCounters[device.id] ?? 0}
             t={t}
             onOpenSettings={onOpenSettings}

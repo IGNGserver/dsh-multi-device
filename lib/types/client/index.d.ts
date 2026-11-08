@@ -2,20 +2,16 @@
  * `dsh-multi-device` Browser Client Entry.
  *
  * Contributes strictly to official DSH 0.2 UI extension slots:
- * 1. `settings.section` (`id: 'multi-device'`): Native top-level Settings section
- *    for managing remote SSH devices, display mode, and Git repository auto-aggregation.
- *    The mode can be switched here or from the rightmost button of the Native Mode
- *    tab bar; Aggregated Mode has no device navigation.
- * 2. `plugins.bundle.config` (`key: 'dsh-multi-device'`): Companion configuration surface
- *    inside DSH's Plugin Manager bundle detail view.
- * 3. `shell.overlay` (`id: 'multi-device-switcher'`): persistent Native Mode tab bar
- *    (本机 + remote devices), its rightmost "Aggregated" switch, and Keep-Alive
- *    remote viewports.
- * 4. `conversation.input.right`, `conversation.session.header.utilities`, and
- *    `sidebar.session.row.hover`: report the active Session to the Host, show
- *    its owning device (本机 included) as a chip on the conversation page with a
- *    details popover, and keep hover metadata. These are labels/scope hints,
- *    never device navigation entries.
+ * 1. `settings.section` (`id: 'multi-device'`): the Device Settings section.
+ * 2. `plugins.bundle.config` (`key: 'dsh-multi-device'`): Companion configuration
+ *    surface inside DSH's Plugin Manager bundle detail view.
+ * 3. `shell.overlay` (`id: 'multi-device-switcher'`): the persistent device tab
+ *    strip (本机 + remote devices) and the Keep-Alive remote viewports.
+ *
+ * Remote Sessions are never projected into the local DSH surface: they are only
+ * ever rendered by their own device's page inside the tab strip. The only
+ * cross-device state the plugin publishes into the local shell is unread
+ * completions, which the Host owns for every device.
  *
  * @module dsh-multi-device/client
  */
@@ -54,14 +50,10 @@ interface SessionsServiceLike {
     };
     refresh(): Promise<void>;
 }
-interface UiWorkspaceServiceLike {
-    openSession(sessionId: string): void;
-    openWorkspace(workspaceId: string): Promise<void>;
-}
 export interface ClientContextLike {
     effect(fn: () => (() => void) | void, label?: string): void;
     inject(deps: readonly string[], fn: (ctx: ClientContextLike) => void): void;
-    /** Resolve a Client service (active-Session scope and model-picker refresh). */
+    /** Resolve a Client service (layout panel ownership). */
     get?(key: string): unknown;
     locale: {
         register(ns: string, dicts: {
@@ -80,7 +72,6 @@ export interface ClientContextLike {
         };
     };
     sessions?: SessionsServiceLike;
-    uiWorkspace?: UiWorkspaceServiceLike;
     uiSession?: {
         readonly sessionStatus?: SessionStatusSource;
     };
@@ -97,10 +88,14 @@ export interface ClientContextLike {
  */
 export declare function openSettingsSection(ctx: ClientContextLike, sectionId?: string): boolean;
 /**
- * Apply the Host-owned mode to the local DSH stores. The Host already filters
- * the data; this refreshes the local Session catalog and, on entering Native
- * Mode, moves the main conversation off a remote Session.
+ * Report which local Session owns the main view.
+ *
+ * The Host needs it for two independent reasons: a completion that lands on the
+ * conversation the user is currently looking at must clear immediately, and a
+ * brand-new blank Session must not count toward the 本机 tab badge. A global
+ * panel (plugin manager, settings) hides the main view, so presence is not
+ * reported while one is open.
  */
-export declare function installModeSideEffects(source: ClientContextLike): () => void;
+export declare function installLocalSessionTracking(source: ClientContextLike): () => void;
 export declare function apply(ctx: ClientContextLike): void;
 export {};

@@ -20,7 +20,7 @@
 - [ ] 兼容矩阵：记录实际 DSH / Node / pnpm / OS 版本，覆盖声明的 DSH 下界及当前目标 DSH、所支持的 pnpm 主版本。只有实际通过的格子能标记通过；未覆盖的 Desktop / Windows / macOS 视觉与系统集成单列，不据 Linux smoke 外推“全平台可用”。
 - [ ] 升级/回滚：精确旧/新版本资产、旧数据夹具、停 Host 后官方 CLI `add` 版本 URL；验证重启加载、数据隔离和认证缓存失效。管理器 `already-installed` 要走卸载→新 URL→启用，不能把重复添加当作更新。
 - [ ] 安全/生命周期：迁移只复制、源文件保留、Profile 独立 `hostId`；credential/passphrase 保留而旧无绑定 Cookie 失效；单文件原子写、`.bak` / `.corrupt-*`、stale/busy 拒写、取消/停用无监听残留。
-- [ ] 真实客户端人工验收：本地 Web iframe 与真实 Electron webview / iframe 回退、模式/设备切换、未读可见性、多客户端隔离、上传与审批路由。IPv6 父页面、HTTPS 和远程浏览器应有准确限制/聚合镜像退路，不能要求原生嵌入全部成功。私有 readState adapter 不可用时应提示 refresh。
+- [ ] 真实客户端人工验收：本地 Web iframe 与真实 Electron webview / iframe 回退、设备标签切换与保活、未读可见性、多客户端隔离、上传与审批路由。IPv6 父页面、HTTPS 和远程浏览器应有准确限制提示，不能要求原生嵌入全部成功。私有 readState adapter 不可用时应提示 refresh。
 
 单元/集成测试覆盖协议、状态和资源回收；React effect 回归不证明 Electron 视觉正确。HTTP 下载 Browser bundle 不证明浏览器已执行它。验收记录必须区分自动 smoke、浏览器执行证据和人工视觉测试，不把未跑项打勾。诊断、截图和日志分享前审查脱敏，不能附秘密数据及未经审查的备份。
 

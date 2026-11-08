@@ -188,12 +188,12 @@ describe('native attention chips', () => {
     const view = selectDeviceAttention([fact('request', { pendingRequestCount: 2 })], new Set(), { fresh: false }).local
     const html = renderToStaticMarkup(React.createElement(AttentionDetails, { view, deviceName: 'Local', t: tEn }))
     expect(html).toContain('Syncing / stale data')
-    expect(html).toContain('aria-label="Local: 1 pending; Session members"')
+    expect(html).toContain('aria-label="Local: 1 needs reply; Session members"')
     expect(html).not.toContain('需回复')
   })
 
-  it('uses the same selector-backed members in native, workspace and Hub surfaces', () => {
-    for (const file of ['NativeViewport.tsx', 'projectBadges.ts', 'MultiDeviceHubPanel.tsx']) {
+  it('uses the same selector-backed members in every rendered surface', () => {
+    for (const file of ['NativeViewport.tsx', 'MultiDeviceHubPanel.tsx']) {
       const source = readFileSync(new URL(`../src/client/${file}`, import.meta.url), 'utf8')
       expect(source).toContain('attentionByDevice')
       expect(source).toContain('attentionUnreadIds')

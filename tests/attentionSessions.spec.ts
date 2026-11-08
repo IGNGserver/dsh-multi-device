@@ -1,6 +1,10 @@
 /**
  * Pure joins behind the attention menu: a Session ID becomes a readable row
  * without the Host sending titles, and every lookup degrades on its own.
+ *
+ * Since 0.3.0 the Host projects no cross-device catalog into the local
+ * snapshot, so this join only knows identity plus whatever the browser's own
+ * Session store can resolve.
  */
 import { describe, expect, it } from 'vitest'
 import {
@@ -11,7 +15,6 @@ import {
 } from '../src/contract.ts'
 import {
   pathBasename,
-  relativeAge,
   resolveAttentionSession,
   resolveAttentionSessions,
 } from '../src/client/attentionSessions.ts'
@@ -23,12 +26,8 @@ function snapshot(patch: Partial<Record<string, unknown>> = {}): MultiDeviceSnap
   return {
     revision: 1,
     devices: [{ id: deviceId, name: 'ubuntu-dev', state: 'connected' }],
-    catalog: { schema: 1, revision: 1, issues: {}, pinnedSessionIds: [], sessions: {} },
-    logicalWorkspaces: [],
-    allPhysicalWorkspaces: [],
-    sessionOrigins: {},
     unreadSessionIds: [],
-    readCompletions: [],
+    readCompletions: {},
     archivedSessionIds: [],
     subagentSessionIds: [],
     sshConfigHosts: [],
@@ -37,76 +36,36 @@ function snapshot(patch: Partial<Record<string, unknown>> = {}): MultiDeviceSnap
   } as unknown as MultiDeviceSnapshot
 }
 
-const options = { localDeviceName: '本机', now: 1_000_000 }
+const options = { localDeviceName: '本机', owningDeviceName: 'ubuntu-dev' }
 
 describe('attention Session join', () => {
-  it('prefers the Host catalog title, then the live store, then nothing', () => {
-    const withCatalog = snapshot({
-      catalog: {
-        schema: 1, revision: 1, issues: {}, pinnedSessionIds: [],
-        sessions: { [remoteId]: { id: remoteId, rawSessionId: 'raw-1', deviceId, title: ' 重构聚合后端 ', updatedAt: 1, running: true, blank: false, stale: false } },
-      },
-    })
-    expect(resolveAttentionSession(remoteId, withCatalog, options).title).toBe('重构聚合后端')
-
+  it('uses a live title when the browser has one and degrades to the raw id otherwise', () => {
     const storeTitle = (id: string): string | undefined => (id === remoteId ? '来自会话库' : undefined)
     expect(resolveAttentionSession(remoteId, snapshot(), { ...options, title: storeTitle }).title).toBe('来自会话库')
 
     const unknown = resolveAttentionSession(remoteId, snapshot(), options)
     expect(unknown.title).toBe('')
     expect(unknown.rawSessionId).toBe('raw-1')
-  })
-
-  it('names the workspace from the aggregated projection, then the path basename', () => {
-    const workspace = {
-      logicalWorkspaceId: 'logical-1', title: 'DSH多设备插件', kind: 'git', targetDeviceId: deviceId,
-      targetPath: '/p', effectiveTargetDeviceId: deviceId, effectiveTargetPath: '/p',
-      effectiveTargetOnline: true, members: [], sessionIds: [remoteId], createdAt: '', updatedAt: '',
-    }
-    const withWorkspace = snapshot({ logicalWorkspaces: [workspace] })
-    expect(resolveAttentionSession(remoteId, withWorkspace, options).workspace).toBe('DSH多设备插件')
-
-    const fromPath = snapshot({
-      catalog: {
-        schema: 1, revision: 1, issues: {}, pinnedSessionIds: [],
-        sessions: { [remoteId]: { id: remoteId, rawSessionId: 'raw-1', deviceId, title: 't', updatedAt: 1, running: false, blank: false, stale: false, cwd: '/home/me/other-project' } },
-      },
-    })
-    expect(resolveAttentionSession(remoteId, fromPath, options).workspace).toBe('other-project')
+    expect(unknown.sessionId).toBe(remoteId)
   })
 
   it('reports the owning device and keeps local Sessions on this machine', () => {
-    const withOrigin = snapshot({
-      sessionOrigins: {
-        [remoteId]: {
-          namespacedSessionId: remoteId, rawSessionId: 'raw-1', deviceId,
-          deviceName: 'ubuntu-dev', deviceState: 'connected', running: true,
-        },
-      },
-    })
-    const remote = resolveAttentionSession(remoteId, withOrigin, options)
+    const remote = resolveAttentionSession(remoteId, snapshot(), options)
     expect(remote.deviceName).toBe('ubuntu-dev')
     expect(remote.deviceId).toBe(deviceId)
 
-    const local = resolveAttentionSession('local-session', withOrigin, options)
+    const local = resolveAttentionSession('local-session', snapshot(), options)
     expect(local.deviceId).toBe(LOCAL_DEVICE_ID)
     expect(local.deviceName).toBe('本机')
     expect(local.rawSessionId).toBe('local-session')
   })
 
   it('never throws away a row whose device disappeared', () => {
-    const rows = resolveAttentionSessions([remoteId, 'local-session'], snapshot(), options)
+    const rows = resolveAttentionSessions([remoteId, 'local-session'], snapshot({ devices: [] }), options)
     expect(rows.map(row => row.sessionId)).toEqual([remoteId, 'local-session'])
-    expect(rows[0]?.deviceName).toBe('本机')
-  })
-
-  it('derives a coarse relative age', () => {
-    const now = 10 * 86_400_000
-    expect(relativeAge(undefined, now)).toBeUndefined()
-    expect(relativeAge(now - 1_000, now)).toEqual({ unit: 'now' })
-    expect(relativeAge(now - 5 * 60_000, now)).toEqual({ unit: 'minutes', n: 5 })
-    expect(relativeAge(now - 3 * 3_600_000, now)).toEqual({ unit: 'hours', n: 3 })
-    expect(relativeAge(now - 2 * 86_400_000, now)).toEqual({ unit: 'days', n: 2 })
+    // The tab that renders the menu already knows which device it belongs to.
+    expect(rows[0]?.deviceName).toBe('ubuntu-dev')
+    expect(rows[1]?.deviceName).toBe('本机')
   })
 
   it('reads the last path segment for both separators', () => {

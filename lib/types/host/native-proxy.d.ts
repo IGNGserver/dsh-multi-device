@@ -105,7 +105,7 @@ export declare class NativeDeviceProxy {
     /** Keep recent disconnected panes/pending navigation without evicting live bridges. */
     private trimClientStates;
     private clientState;
-    /** Current bridge lifecycle for this client only (legacy never aggregates). */
+    /** Current bridge lifecycle for this client only. */
     bridgeSnapshot(clientId?: string): NativeBridgeSnapshot;
     /** Queue/replay navigation only within the requesting browser client. */
     openSession(sessionId: string, clientId?: string, requestSeq?: number): void;
@@ -161,8 +161,6 @@ export declare class NativeProxyManager {
     openSession(deviceId: DeviceId, sessionId: string, clientId?: string, requestSeq?: number): boolean;
     /** Ask the framed page to refresh its own Session catalog. */
     requestRefresh(deviceId: DeviceId): boolean;
-    /** Toggle the remote sidebar for pane vs full native rendering. */
-    setEmbedded(deviceId: DeviceId, enabled: boolean, clientId?: string): void;
     /** Push Host-owned fold state to the device's framed page(s). */
     setGroupState(deviceId: DeviceId, groups: Readonly<Record<string, boolean>>): void;
     /** Push Host-owned unread Session IDs to the device's framed page(s). */

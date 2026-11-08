@@ -1,11 +1,10 @@
 /**
  * Host Control-Plane HTTP & RPC Endpoints (`MultiDeviceControlPlane`).
  *
- * Exposes all device management, SSH config discovery, connection testing,
- * and Git workspace aggregation operations over:
+ * Exposes device management, SSH config discovery, connection testing and the
+ * device-tab attention state over:
  * 1. Direct authenticated HTTP JSON route `/multi-device/api` (plus SSE `/multi-device/events`),
- *    which has zero dependency on Typert reflection or Aggregated Gateway state — ensuring
- *    that Native Mode and Device Management ALWAYS work even if Aggregated Mode fails!
+ *    with zero dependency on Typert reflection.
  * 2. Optional Typert Remote registration (`multiDevice/*`) when `ctx.typert` is present.
  *
  * @module dsh-multi-device/runtime
@@ -56,7 +55,7 @@ export declare function connectionRequestRejection(ctx: Context, headers: Incomi
  */
 export declare function admitMultiDeviceRequest(ctx: Context, req: IncomingMessage): boolean;
 export interface ControlPlaneRequest {
-    readonly action: 'snapshot' | 'catalogSessionAction' | 'searchCatalogSessions' | 'modelCatalog' | 'diagnostics' | 'setDisplayMode' | 'upsertDevice' | 'removeDevice' | 'reconnectDevice' | 'authenticateDevice' | 'testDevice' | 'listSshKeys' | 'startSessionOnDevice' | 'createSession' | 'createRemoteWorkspace' | 'updateAggregationConfig' | 'upsertManualRule' | 'removeManualRule' | 'setMemberExcluded' | 'setPreferredDevice' | 'setCustomTitle' | 'startGitMatch' | 'cancelGitMatch' | 'setActiveSession' | 'markSessionRead' | 'markDeviceRead' | 'setUiPreferences';
+    readonly action: 'snapshot' | 'diagnostics' | 'upsertDevice' | 'removeDevice' | 'reconnectDevice' | 'authenticateDevice' | 'testDevice' | 'listSshKeys' | 'setActiveSession' | 'markSessionRead' | 'markDeviceRead' | 'setUiPreferences';
     readonly payload?: Record<string, unknown>;
 }
 /** Validate the transport envelope before TypeScript erases its runtime types. */
@@ -80,30 +79,11 @@ export interface DiagnosticsClientReport {
     readonly barClampedWidth?: number;
     readonly compact?: boolean;
     /**
-     * What the bar's occlusion probe found on top of the Aggregated switch, if
+     * What the bar's occlusion probe found on top of the trailing controls, if
      * anything: `tag#id.class z=N`. Absent while the switch is clickable.
      */
     readonly barObstruction?: string;
     readonly userAgent?: string;
-    /**
-     * Whether the cached Workspace projection resolves inside the browser's
-     * Session store. `missing > 0` is the mechanical cause of a "Workspace
-     * expands but shows no conversations" report.
-     */
-    readonly sessionLink?: DiagnosticsSessionLink;
-}
-/** Session-store link evidence volunteered by the browser. */
-export interface DiagnosticsSessionLink {
-    readonly referenced: number;
-    readonly missing: number;
-    readonly byDevice: Readonly<Record<string, number>>;
-    readonly sample: readonly string[];
-    readonly connectedDevices: number;
-    readonly attempts: number;
-    readonly resolved: boolean;
-    readonly refreshedAt?: number;
-    /** Last `sessions.refresh()` failure, when the Host could not answer. */
-    readonly lastError?: string;
 }
 /** One device row of the Diagnostics report. */
 export interface DiagnosticsDevice {
@@ -129,19 +109,15 @@ export interface DiagnosticsDevice {
     /** Why this device was dropped from the merged `session.list`, if it was. */
     readonly sessionListError?: string;
 }
-/** Aggregated snapshot of everything a support report needs to explain a UI state. */
+/** Snapshot of everything a support report needs to explain the device UI state. */
 export interface MultiDeviceDiagnostics {
     readonly kind: 'dsh-multi-device/diagnostics';
     readonly generatedAt: number;
     readonly hostId: string;
-    readonly displayMode: MultiDeviceSnapshot['displayMode'];
-    readonly hostStatus: MultiDeviceSnapshot['hostStatus'];
     readonly counts: {
         readonly devices: number;
         readonly connectedDevices: number;
         readonly staleDevices: number;
-        readonly logicalWorkspaces: number;
-        readonly physicalWorkspaces: number;
         readonly runningSessions: number;
         /** Raw catalog total, including archived and subagent Sessions. */
         readonly allRunningSessions: number;
@@ -153,14 +129,11 @@ export interface MultiDeviceDiagnostics {
 }
 /** Parse the Client's Diagnostics payload; unknown fields are dropped. */
 export declare function readDiagnosticsClientReport(raw: unknown): DiagnosticsClientReport | undefined;
-/** Parse the browser's Session-store link evidence; unknown fields are dropped. */
-export declare function readDiagnosticsSessionLink(raw: unknown): DiagnosticsSessionLink | undefined;
 /**
  * Build the Diagnostics report from one Host snapshot.
  *
- * The mode is the first field on purpose: a "missing conversations" report is
- * almost always the Native/Aggregated distinction, and the per-device staging
- * (`state`, `catalogStale`, counts) explains the rest.
+ * Per-device staging (`state`, `catalogStale`, counts, last error) is what
+ * explains a "device tab shows nothing" report.
  */
 export declare function buildDiagnostics(snapshot: MultiDeviceSnapshot, client?: DiagnosticsClientReport, now?: number): MultiDeviceDiagnostics;
 export declare class MultiDeviceControlPlane {

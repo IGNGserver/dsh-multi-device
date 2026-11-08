@@ -1,32 +1,21 @@
 /**
  * Turn the Host's attention projection (bare Session IDs) into rows a person
- * can actually read: real conversation title, owning workspace, owning device
- * and last activity.
+ * can read: owning device, category and — when the browser already knows the
+ * Session — the conversation title from DSH's own Session store.
  *
- * The projection itself stays ID-only on purpose (`src/attention.ts` never
- * carries titles or message text), so this module joins the IDs against data
- * the Client already holds:
- *
- * 1. `snapshot.catalog.sessions[id]` — the Host's own row (title, cwd, time),
- *    present for both modes and for devices that are currently offline.
- * 2. `snapshot.sessionOrigins[id]` — owning device and path. Local Sessions
- *    have no origin entry, so the caller passes the localized local name.
- * 3. `snapshot.logicalWorkspaces` — the aggregated workspace the row belongs
- *    to, whose title is what the sidebar shows.
- * 4. An optional title resolver for the live DSH Session store, which knows a
- *    Session the Host catalog has not published yet.
+ * The projection itself is ID-only on purpose (`src/attention.ts` never carries
+ * titles or message text), and in Native Mode the Host does not project remote
+ * Session rows into the local snapshot any more: each device's conversations
+ * live inside that device's own page. So this join deliberately has no
+ * cross-device catalog to read. It supplies the identity and lets the caller
+ * pass a live title resolver for Sessions the local store does know.
  *
  * Pure and synchronous: the component owns rendering, this owns the join.
  *
  * @module dsh-multi-device/client/attentionSessions
  */
 
-import {
-  decodeSessionId,
-  LOCAL_DEVICE_ID,
-  type AggregatedSessionRow,
-  type MultiDeviceSnapshot,
-} from '../contract.ts'
+import { decodeSessionId, LOCAL_DEVICE_ID, type MultiDeviceSnapshot } from '../contract.ts'
 
 /** One readable attention row. */
 export interface AttentionSessionRow {
@@ -34,21 +23,23 @@ export interface AttentionSessionRow {
   readonly rawSessionId: string
   readonly deviceId: string
   readonly deviceName: string
-  /** Real conversation title; `''` when neither source knows one yet. */
+  /** Real conversation title; `''` when nothing knows one yet. */
   readonly title: string
-  /** Workspace title, falling back to the last path segment of `cwd`. */
-  readonly workspace?: string
   readonly cwd?: string
-  readonly updatedAt?: number
 }
 
 export interface AttentionJoinOptions {
   /** Localized label for this machine (本机 / This Device). */
   readonly localDeviceName: string
-  /** Live DSH Session store lookup, used when the Host catalog has no row. */
+  /** Live DSH Session store lookup, used when the browser already has a row. */
   readonly title?: (sessionId: string) => string | undefined
-  /** Relative time reference; injectable for tests. */
-  readonly now?: number
+  /**
+   * The device this attention view belongs to. The tab strip renders one view
+   * per device, so the caller already knows it and the snapshot does not have
+   * to carry a cross-device origin map.
+   */
+  readonly owningDeviceId?: string
+  readonly owningDeviceName?: string
 }
 
 function cleanTitle(value: string | undefined): string | undefined {
@@ -65,50 +56,31 @@ export function pathBasename(path: string | undefined): string | undefined {
   return trimmed.slice(index + 1) === '' ? undefined : trimmed.slice(index + 1)
 }
 
-function catalogRow(snapshot: MultiDeviceSnapshot, sessionId: string): AggregatedSessionRow | undefined {
-  return snapshot.catalog?.sessions[sessionId]
-}
-
-function workspaceTitleOf(snapshot: MultiDeviceSnapshot, sessionId: string): string | undefined {
-  for (const workspace of snapshot.logicalWorkspaces) {
-    if (workspace.sessionIds.includes(sessionId)) return cleanTitle(workspace.title)
-  }
-  return undefined
-}
-
 /**
- * Join one ID to everything the UI shows for it.
+ * Join one ID to what the device UI can show for it.
  *
- * Every lookup degrades independently: a Session whose catalog row has not
- * arrived still renders its workspace and device, and a Session whose device
- * was just removed still renders its raw ID — the popover never blanks out.
+ * Every lookup degrades independently: a Session whose device was just removed
+ * still renders its raw ID instead of blanking the popover out.
  */
 export function resolveAttentionSession(
   sessionId: string,
   snapshot: MultiDeviceSnapshot,
   options: AttentionJoinOptions,
 ): AttentionSessionRow {
-  const origin = snapshot.sessionOrigins?.[sessionId]
-  const row = catalogRow(snapshot, sessionId)
   const decoded = decodeSessionId(sessionId)
-  const cwd = row?.cwd ?? origin?.cwd
-  const title =
-    cleanTitle(row?.title)
-    ?? cleanTitle(options.title?.(sessionId))
-    ?? ''
-  const workspace =
-    workspaceTitleOf(snapshot, sessionId)
-    ?? cleanTitle(origin?.gitRemote)
-    ?? pathBasename(cwd)
+  const deviceId = decoded.isRemote
+    ? String(decoded.deviceId)
+    : options.owningDeviceId ?? String(LOCAL_DEVICE_ID)
+  const device = snapshot.devices.find(candidate => String(candidate.id) === deviceId)
+  const deviceName = decoded.isRemote
+    ? cleanTitle(options.owningDeviceName) ?? cleanTitle(device?.name) ?? String(decoded.deviceId)
+    : options.localDeviceName
   return {
     sessionId,
-    rawSessionId: origin?.rawSessionId ?? (decoded.isRemote ? decoded.rawSessionId : sessionId),
-    deviceId: origin?.deviceId ?? LOCAL_DEVICE_ID,
-    deviceName: cleanTitle(origin?.deviceName) ?? options.localDeviceName,
-    title,
-    ...(workspace !== undefined ? { workspace } : {}),
-    ...(cwd !== undefined ? { cwd } : {}),
-    ...(row?.updatedAt !== undefined ? { updatedAt: row.updatedAt } : {}),
+    rawSessionId: decoded.isRemote ? decoded.rawSessionId : sessionId,
+    deviceId,
+    deviceName,
+    title: cleanTitle(options.title?.(sessionId)) ?? '',
   }
 }
 
@@ -119,17 +91,4 @@ export function resolveAttentionSessions(
   options: AttentionJoinOptions,
 ): AttentionSessionRow[] {
   return sessionIds.map(sessionId => resolveAttentionSession(sessionId, snapshot, options))
-}
-
-/** Coarse relative age; the caller supplies the localized unit. */
-export type RelativeAge = { readonly unit: 'now' } | { readonly unit: 'minutes' | 'hours' | 'days'; readonly n: number }
-
-/** Age of `updatedAt` relative to `now`, in the coarsest useful unit. */
-export function relativeAge(updatedAt: number | undefined, now: number): RelativeAge | undefined {
-  if (updatedAt === undefined || !Number.isFinite(updatedAt)) return undefined
-  const delta = Math.max(0, now - updatedAt)
-  if (delta < 60_000) return { unit: 'now' }
-  if (delta < 3_600_000) return { unit: 'minutes', n: Math.max(1, Math.floor(delta / 60_000)) }
-  if (delta < 86_400_000) return { unit: 'hours', n: Math.floor(delta / 3_600_000) }
-  return { unit: 'days', n: Math.floor(delta / 86_400_000) }
 }

@@ -1,15 +1,11 @@
 /**
- * Comprehensive unit and integration tests for `dsh-multi-device`:
- * 1. Deterministic identity mapping (`SessionId`, `WorkspaceId`, `LogicalWorkspaceId`, `EventId`) & Git URL normalization.
+ * Unit and integration tests for the Native-Mode-only `dsh-multi-device`:
+ * 1. Deterministic Session/Event identity mapping.
  * 2. System `~/.ssh/config` parser (`Host` wildcards, negation `!`, `Include`, `%h`/`%p`/`%r` tokens, CLI arg builder).
  * 3. Persistent authentication (`dshCookieName`, `mintDshBrowserCookie`, launch token exchange, `.credentials.yaml` parser).
- * 4. Git Remote Auto-Discovery (`.git/config` + worktree `.git` gitdir pointers) & `WorkspaceAggregator`
- *    (auto Git aggregation, manual merge rules, member exclusion/splitting, preferred target device).
- * 5. End-to-end integration with simulated remote DSH 0.2 & DSH 0.1 servers:
- *    - `RemoteDeviceClient` handshake, live WebSocket `/api/remote.mux` (`workspace/follow`, `session/control`, `$events`),
- *      session list/history/prompt/cancel/rename/fork, and `approval/request` waterfall round-trip.
- *    - `NativeDeviceProxy` authenticated HTTP + WebSocket reverse proxy (header rewriting, X-Frame-Options stripping).
- *    - `AggregatedGateway` + `MultiDeviceControlPlane` mode independence & fallback verification.
+ * 4. `RemoteDeviceClient` handshake, live WebSocket `/api/remote.mux` streams, and offline catalog retention.
+ * 5. `NativeDeviceProxy` authenticated HTTP + WebSocket reverse proxy, bridge injection and read acknowledgements.
+ * 6. Host-owned attention/read state and the device tab strip's projections.
  */
 import { execSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
@@ -22,26 +18,16 @@ import { gzipSync } from 'node:zlib'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { WebSocket, WebSocketServer } from 'ws'
 import {
-  decodeLogicalWorkspaceId,
-  decodeRemoteEventId,
-  decodeRemoteWorkspaceId,
   decodeSessionId,
   DeviceId,
-  encodeLogicalWorkspaceId,
   encodeRemoteEventId,
   encodeRemoteSessionId,
-  encodeRemoteWorkspaceId,
   type DeviceConnectionState,
   type DeviceView,
-  type GitMatchRun,
   isNamespacedEventId,
   isNamespacedSessionId,
-  isNamespacedWorkspaceId,
   LOCAL_DEVICE_ID,
-  type LogicalWorkspaceView,
   type MultiDeviceSnapshot,
-  normalizeGitRemote,
-  normalizeWorkspacePath,
 } from '../src/contract.ts'
 import {
   DeviceAuthManager,
@@ -56,55 +42,6 @@ import {
   resolveRemoteCookieAuthority,
   resolveRemoteScheme,
 } from '../src/host/auth.ts'
-import {
-  discoverLocalGitRemote,
-  parseGitConfigRemoteUrl,
-  WorkspaceAggregator,
-} from '../src/host/git-aggregator.ts'
-import {
-  buildGitScanScript,
-  deriveScanRoots,
-  parseGitScanOutput,
-  primaryRepoByOrigin,
-  type ScannedRepository,
-  scanLocalGitRepos,
-} from '../src/host/git-scan.ts'
-import {
-  createIdleGitMatch,
-  GitMatchRunner,
-  type GitMatchContext,
-  titleFromPath,
-} from '../src/host/git-match.ts'
-import {
-  deviceOfflineError,
-  installAggregatedGateway02,
-  isSameDeviceChildSession,
-  reusableSessionIdFor,
-  shouldEndFollowStream,
-  supportsWorkspaceReplaceFrames,
-  unavailableRemoteCatalog,
-  type SessionControllerLike,
-  type TypertGatewayLike,
-  type WorkspaceControllerLike,
-} from '../src/host/gateway.ts'
-import { nativePaneTarget, resolveSameSiteProxyUrl, shouldShowNativePane } from '../src/client/nativePane.ts'
-import { resolveWindowTitle } from '../src/client/windowTitle.ts'
-import { shouldDecorateProjectRows } from '../src/client/projectBadges.ts'
-import { shouldApplySnapshot } from '../src/client/state.ts'
-import {
-  countableUnreadIds,
-  groupUnreadSessionIds,
-  unreadCountForDevice,
-  unreadCountInSessions,
-  workspaceUnreadCounts,
-} from '../src/client/unreadCounts.ts'
-import {
-  deviceTargetsForWorkspace,
-  effectiveTargetOf,
-  memberTargetsForWorkspace,
-  resolveSessionDevice,
-  resolveSessionLogicalWorkspace,
-} from '../src/client/sessionDevice.ts'
 import {
   buildNativeBridgeScript,
   injectNativeBridge,
@@ -126,6 +63,9 @@ import {
 } from '../src/host/shared-state.ts'
 import { describeProbeFailure, DeviceRegistry } from '../src/host/registry.ts'
 import { installReadStateOverlay, mergeSessionStatus } from '../src/client/readState.ts'
+import { shouldApplySnapshot } from '../src/client/state.ts'
+import { resolveWindowTitle } from '../src/client/windowTitle.ts'
+import { countableUnreadIds, groupUnreadSessionIds, unreadCountForDevice } from '../src/client/unreadCounts.ts'
 import {
   listLocalSshKeys,
   parseSshConfigText,
@@ -183,26 +123,6 @@ afterEach(() => {
       try { rmSync(dir, { recursive: true, force: true }) } catch { /* ignore */ }
     }
   }
-})
-
-describe('0. Mode/chrome regressions', () => {
-  it('only decorates workspace rows in aggregated mode', () => {
-    expect(shouldDecorateProjectRows('aggregated')).toBe(true)
-    expect(shouldDecorateProjectRows('native')).toBe(false)
-    expect(shouldDecorateProjectRows(undefined)).toBe(false)
-  })
-
-  it('enables incremental workspace replace frames only on clients that support them', () => {
-    expect(supportsWorkspaceReplaceFrames(undefined)).toBe(false)
-    expect(supportsWorkspaceReplaceFrames('0.2.0-rc.2')).toBe(false)
-    expect(supportsWorkspaceReplaceFrames('0.2.1-alpha.5')).toBe(false)
-    expect(supportsWorkspaceReplaceFrames('0.2.1-rc.0')).toBe(false)
-    expect(supportsWorkspaceReplaceFrames('0.2.1-rc.1')).toBe(true)
-    expect(supportsWorkspaceReplaceFrames('0.2.1-rc.5')).toBe(true)
-    expect(supportsWorkspaceReplaceFrames('0.2.1')).toBe(true)
-    expect(supportsWorkspaceReplaceFrames('0.2.2-rc.1')).toBe(true)
-    expect(supportsWorkspaceReplaceFrames('v0.3.0')).toBe(true)
-  })
 })
 
 describe('0b. Host-owned read state and native page state', () => {
@@ -400,8 +320,8 @@ describe('0b. Host-owned read state and native page state', () => {
     const registry = new DeviceRegistry(
       dataFile,
       secretsFile,
-      { localPort: () => 3080, localWorkspaces: () => [], localSessionUpdatedAt: () => new Map() },
-      { allowDirectTransport: true, enableNativeProxy: false },
+      { localPort: () => 3080 },
+      { allowDirectTransport: true },
     )
     try {
       expect(registry.snapshot().unreadSessionIds).toEqual([remoteId, remoteId2])
@@ -462,8 +382,8 @@ describe('0b. Host-owned read state and native page state', () => {
     const registry = new DeviceRegistry(
       dataFile,
       secretsFile,
-      { localPort: () => 3080, localWorkspaces: () => [], localSessionUpdatedAt: () => new Map() },
-      { allowDirectTransport: true, enableNativeProxy: false },
+      { localPort: () => 3080 },
+      { allowDirectTransport: true },
     )
     try {
       expect(typeof registry.snapshot().hostEpoch).toBe('string')
@@ -563,7 +483,7 @@ describe('0c. Optional cross-Host read state file', () => {  it('merges Host sec
 })
 
 describe('1. Identity Mapping & Git Remote URL Normalization', () => {
-  it('losslessly encodes and decodes remote SessionIds, WorkspaceIds, LogicalWorkspaceIds, and EventIds', () => {
+  it('losslessly encodes and decodes remote SessionIds and EventIds', () => {
     const devId = DeviceId('ubuntu~gpu%1')
     const rawSid = 'session-9f8e7d6c-1234'
     const encodedSid = encodeRemoteSessionId(devId, rawSid)
@@ -582,44 +502,11 @@ describe('1. Identity Mapping & Git Remote URL Normalization', () => {
       isRemote: false,
     })
 
-    const encodedWs = encodeRemoteWorkspaceId(devId, 'ws-abc')
-    expect(decodeRemoteWorkspaceId(encodedWs)).toEqual({
-      deviceId: devId,
-      rawWorkspaceId: 'ws-abc',
-      isRemote: true,
-    })
-
-    const encodedLogical = encodeLogicalWorkspaceId('git', 'github.com/deepseek-ai/deepseek-harness')
-    expect(decodeLogicalWorkspaceId(encodedLogical)).toEqual({
-      kind: 'git',
-      key: 'github.com/deepseek-ai/deepseek-harness',
-    })
-
     const encodedEv = encodeRemoteEventId(devId, 'ev-42')
-    expect(decodeRemoteEventId(encodedEv)).toEqual({
-      deviceId: devId,
-      remoteEventId: 'ev-42',
-    })
+    expect(encodedEv).toBe('md-ev~ubuntu%7Egpu%251~ev-42')
+    expect(isNamespacedEventId(encodedEv)).toBe(true)
   })
 
-  it('normalizes SSH, SCP, HTTPS, and custom-port Git remote URLs to a canonical repo key', () => {
-    const expected = 'github.com/deepseek-ai/deepseek-harness'
-    expect(normalizeGitRemote('git@github.com:deepseek-ai/deepseek-harness.git')).toBe(expected)
-    expect(normalizeGitRemote('https://github.com/DeepSeek-AI/DeepSeek-Harness.git')).toBe(expected)
-    expect(normalizeGitRemote('https://token@github.com/deepseek-ai/deepseek-harness/')).toBe(expected)
-    expect(normalizeGitRemote('ssh://git@github.com:22/deepseek-ai/deepseek-harness.git')).toBe(expected)
-    expect(normalizeGitRemote('ssh://git@github.com:2222/deepseek-ai/deepseek-harness.git')).toBe(
-      'github.com:2222/deepseek-ai/deepseek-harness',
-    )
-    expect(normalizeGitRemote('git://github.com/deepseek-ai/deepseek-harness')).toBe(expected)
-    expect(normalizeGitRemote('C:\\Users\\me\\repo')).toBeUndefined()
-    expect(normalizeGitRemote('')).toBeUndefined()
-  })
-
-  it('normalizes POSIX and Windows workspace paths consistently', () => {
-    expect(normalizeWorkspacePath('/Users/lvziw/project///')).toBe('/Users/lvziw/project')
-    expect(normalizeWorkspacePath('C:\\Users\\Dev\\Project\\')).toBe('c:/users/dev/project')
-  })
 })
 
 describe('2. System ~/.ssh/config Parser & Tunnel Argument Builder', () => {
@@ -718,8 +605,8 @@ records:
     const registry = new DeviceRegistry(
       dataFile,
       secretsFile,
-      { localPort: () => 3080, localWorkspaces: () => [], localSessionUpdatedAt: () => new Map() },
-      { allowDirectTransport: true, enableNativeProxy: false },
+      { localPort: () => 3080 },
+      { allowDirectTransport: true },
     )
     try {
       const added = await registry.upsertDevice({
@@ -826,501 +713,6 @@ records:
   })
 })
 
-describe('4. Git Remote Discovery & WorkspaceAggregator', () => {
-  it('discovers Git remotes from both standard .git/config and worktree .git pointer files', () => {
-    const root = makeTempDir('dsh-md-git-')
-    const repoDir = join(root, 'main-repo')
-    mkdirSync(join(repoDir, '.git', 'worktrees', 'feat-1'), { recursive: true })
-    writeFileSync(
-      join(repoDir, '.git', 'config'),
-      `[core]\n\trepositoryformatversion = 0\n[remote "origin"]\n\turl = git@github.com:acme/platform.git\n`,
-    )
-    expect(discoverLocalGitRemote(repoDir)).toBe('git@github.com:acme/platform.git')
-
-    const wtDir = join(root, 'wt-feat-1')
-    mkdirSync(wtDir, { recursive: true })
-    writeFileSync(join(wtDir, '.git'), `gitdir: ${join(repoDir, '.git', 'worktrees', 'feat-1')}\n`)
-    writeFileSync(join(repoDir, '.git', 'worktrees', 'feat-1', 'commondir'), '../..\n')
-    expect(discoverLocalGitRemote(wtDir)).toBe('git@github.com:acme/platform.git')
-  })
-
-  it('aggregates workspaces sharing a Git remote across devices, and honors manual rules & exclusions', () => {
-    const agg = new WorkspaceAggregator({ autoGitAggregate: true, prefixUnmatchedWithDevice: true })
-    const devUbuntu = DeviceId('dev-ubuntu')
-    const devMac = DeviceId('dev-mac')
-
-    agg.noteGitRemote(LOCAL_DEVICE_ID, '/Users/me/platform', 'https://github.com/acme/platform.git')
-    agg.noteGitRemote(devUbuntu, '/home/ubuntu/platform', 'git@github.com:acme/platform.git')
-    agg.noteGitRemote(devMac, '/Users/mac/other-tool', 'git@github.com:acme/other-tool.git')
-
-    const { logicalWorkspaces } = agg.aggregate(
-      [
-        {
-          deviceId: LOCAL_DEVICE_ID,
-          deviceName: 'Local',
-          workspaceId: 'ws-local-1',
-          path: '/Users/me/platform',
-          title: 'platform',
-          sessionIds: ['s-local-1'],
-          runningSessionCount: 0,
-          createdAt: '2026-10-01T00:00:00.000Z',
-          updatedAt: '2026-10-02T00:00:00.000Z',
-        },
-        {
-          deviceId: devUbuntu,
-          deviceName: 'ubuntu-gpu',
-          workspaceId: 'ws-rem-1',
-          path: '/home/ubuntu/platform',
-          title: 'platform-ubuntu',
-          sessionIds: ['s-rem-1'],
-          runningSessionCount: 1,
-          createdAt: '2026-10-01T00:00:00.000Z',
-          updatedAt: '2026-10-03T00:00:00.000Z',
-        },
-        {
-          deviceId: devMac,
-          deviceName: 'mac-mini',
-          workspaceId: 'ws-rem-2',
-          path: '/Users/mac/other-tool',
-          title: 'other-tool',
-          sessionIds: ['s-rem-2'],
-          runningSessionCount: 0,
-          createdAt: '2026-10-01T00:00:00.000Z',
-          updatedAt: '2026-10-01T00:00:00.000Z',
-        },
-      ],
-      new Map([
-        ['s-local-1', 100],
-        [encodeRemoteSessionId(devUbuntu, 's-rem-1'), 200],
-      ]),
-    )
-
-    expect(logicalWorkspaces).toHaveLength(2)
-    const mergedPlatform = logicalWorkspaces.find(w => w.kind === 'git')!
-    expect(mergedPlatform).toBeDefined()
-    expect(mergedPlatform.gitRemote).toBe('github.com/acme/platform')
-    expect(mergedPlatform.members).toHaveLength(2)
-    expect(mergedPlatform.sessionIds).toEqual([
-      encodeRemoteSessionId(devUbuntu, 's-rem-1'),
-      's-local-1',
-    ])
-
-    const singleMac = logicalWorkspaces.find(w => w.kind === 'single')!
-    // Device identity is a badge now, never a title prefix.
-    expect(singleMac.title).toBe('other-tool')
-
-    // Excluding a member splits the auto-merged workspace back into single workspaces
-    agg.setMemberExcluded(`${devUbuntu}:/home/ubuntu/platform`, true)
-    const afterSplit = agg.aggregate([
-      {
-        deviceId: LOCAL_DEVICE_ID,
-        deviceName: 'Local',
-        workspaceId: 'ws-local-1',
-        path: '/Users/me/platform',
-        title: 'platform',
-        sessionIds: ['s-local-1'],
-        runningSessionCount: 0,
-        createdAt: '2026-10-01T00:00:00.000Z',
-        updatedAt: '2026-10-02T00:00:00.000Z',
-      },
-      {
-        deviceId: devUbuntu,
-        deviceName: 'ubuntu-gpu',
-        workspaceId: 'ws-rem-1',
-        path: '/home/ubuntu/platform',
-        title: 'platform-ubuntu',
-        sessionIds: ['s-rem-1'],
-        runningSessionCount: 1,
-        createdAt: '2026-10-01T00:00:00.000Z',
-        updatedAt: '2026-10-03T00:00:00.000Z',
-      },
-    ])
-    expect(afterSplit.logicalWorkspaces).toHaveLength(2)
-    expect(afterSplit.logicalWorkspaces.every(w => w.kind === 'single')).toBe(true)
-  })
-})
-
-describe('4b. Offline-aware target selection & session ownership', () => {
-  const ubuntu = DeviceId('dev-ubuntu')
-  const mac = DeviceId('dev-mac')
-
-  const localPlatform = {
-    deviceId: LOCAL_DEVICE_ID,
-    deviceName: 'Local',
-    workspaceId: 'ws-local',
-    path: '/home/me/platform',
-    title: 'platform',
-    sessionIds: ['s-local'],
-    runningSessionCount: 0,
-    createdAt: '2026-10-01T00:00:00.000Z',
-    updatedAt: '2026-10-02T00:00:00.000Z',
-  }
-  const ubuntuPlatform = {
-    deviceId: ubuntu,
-    deviceName: 'ubuntu-dev',
-    workspaceId: 'ws-ubuntu',
-    path: '/srv/platform',
-    title: 'platform',
-    sessionIds: ['s-ubuntu'],
-    runningSessionCount: 1,
-    createdAt: '2026-10-01T00:00:00.000Z',
-    updatedAt: '2026-10-03T00:00:00.000Z',
-  }
-  const macPlatform = {
-    deviceId: mac,
-    deviceName: 'mac-mini',
-    workspaceId: 'ws-mac',
-    path: '/Users/mac/platform',
-    title: 'platform',
-    sessionIds: ['s-mac'],
-    runningSessionCount: 0,
-    createdAt: '2026-10-01T00:00:00.000Z',
-    updatedAt: '2026-10-04T00:00:00.000Z',
-  }
-  const preferredState = (deviceId: DeviceId): Partial<Record<string, DeviceId>> => ({
-    [encodeLogicalWorkspaceId('git', 'github.com/acme/platform')]: deviceId,
-  })
-
-  function deviceView(id: DeviceId, name: string, state: DeviceConnectionState): DeviceView {
-    return {
-      id,
-      name,
-      enabled: true,
-      state,
-      transportKind: 'ssh',
-      targetSummary: `ssh://${name}`,
-      keepNativeAlive: true,
-      protocolVersion: '0.2',
-      realtime: true,
-      reconnectAttempt: 0,
-      sessionCount: 1,
-      runningSessionCount: 0,
-      pendingApprovalCount: 0,
-      workspaceCount: 1,
-    }
-  }
-
-  function snapshotFixture(patch: Partial<MultiDeviceSnapshot> = {}): MultiDeviceSnapshot {
-    return {
-      revision: 1,
-      displayMode: 'aggregated',
-      hostStatus: { aggregatedGatewayActive: true, nativeProxyActive: true },
-      devices: [],
-      sshConfigHosts: [],
-      aggregationConfig: {
-        autoGitAggregate: true,
-        prefixUnmatchedWithDevice: false,
-        excludedMemberKeys: [],
-        preferredDeviceByLogicalId: {},
-        customTitleByLogicalId: {},
-        workspaceOrder: [],
-        manualRules: [],
-      },
-      logicalWorkspaces: [],
-      allPhysicalWorkspaces: [],
-      sessionOrigins: {},
-      unreadSessionIds: [],
-      gitMatch: createIdleGitMatch(),
-      ...patch,
-    }
-  }
-
-  it('keeps the preferred device while online and falls back to the local member while offline', () => {
-    const agg = new WorkspaceAggregator({
-      autoGitAggregate: true,
-      preferredDeviceByLogicalId: preferredState(ubuntu) as Record<string, DeviceId>,
-    })
-    agg.noteGitRemote(LOCAL_DEVICE_ID, localPlatform.path, 'git@github.com:acme/platform.git')
-    agg.noteGitRemote(ubuntu, ubuntuPlatform.path, 'git@github.com:acme/platform.git')
-
-    const online = agg.aggregate(
-      [localPlatform, ubuntuPlatform],
-      new Map(),
-      new Map<DeviceId, DeviceConnectionState>([[ubuntu, 'connected']]),
-    ).logicalWorkspaces.find(workspace => workspace.kind === 'git')!
-    expect(online.targetDeviceId).toBe(ubuntu)
-    expect(online.effectiveTargetDeviceId).toBe(ubuntu)
-    expect(online.effectiveTargetPath).toBe('/srv/platform')
-    expect(online.effectiveTargetOnline).toBe(true)
-
-    const offline = agg.aggregate(
-      [localPlatform, ubuntuPlatform],
-      new Map(),
-      new Map<DeviceId, DeviceConnectionState>([[ubuntu, 'error']]),
-    ).logicalWorkspaces.find(workspace => workspace.kind === 'git')!
-    expect(offline.targetDeviceId).toBe(ubuntu)
-    expect(offline.targetPath).toBe('/srv/platform')
-    expect(offline.effectiveTargetDeviceId).toBe(LOCAL_DEVICE_ID)
-    expect(offline.effectiveTargetPath).toBe(localPlatform.path)
-    expect(offline.effectiveTargetOnline).toBe(true)
-  })
-
-  it('falls back to another reachable member and reports an all-offline workspace', () => {
-    const agg = new WorkspaceAggregator({ autoGitAggregate: true, ...preferredState(mac) })
-    agg.setPreferredDevice(encodeLogicalWorkspaceId('git', 'github.com/acme/platform'), mac)
-    agg.noteGitRemote(ubuntu, ubuntuPlatform.path, 'git@github.com:acme/platform.git')
-    agg.noteGitRemote(mac, macPlatform.path, 'git@github.com:acme/platform.git')
-
-    const fallback = agg.aggregate(
-      [ubuntuPlatform, macPlatform],
-      new Map(),
-      new Map<DeviceId, DeviceConnectionState>([[mac, 'error'], [ubuntu, 'connected']]),
-    ).logicalWorkspaces.find(workspace => workspace.kind === 'git')!
-    expect(fallback.targetDeviceId).toBe(mac)
-    expect(fallback.effectiveTargetDeviceId).toBe(ubuntu)
-    expect(fallback.effectiveTargetOnline).toBe(true)
-
-    const allOffline = agg.aggregate(
-      [ubuntuPlatform, macPlatform],
-      new Map(),
-      new Map<DeviceId, DeviceConnectionState>([[mac, 'error'], [ubuntu, 'disabled']]),
-    ).logicalWorkspaces.find(workspace => workspace.kind === 'git')!
-    expect(allOffline.effectiveTargetDeviceId).toBe(mac)
-    expect(allOffline.effectiveTargetOnline).toBe(false)
-  })
-
-  it('treats an unmerged single workspace as online only while its device is reachable', () => {
-    const agg = new WorkspaceAggregator({ autoGitAggregate: false })
-    const online = agg.aggregate(
-      [ubuntuPlatform],
-      new Map(),
-      new Map<DeviceId, DeviceConnectionState>([[ubuntu, 'connected']]),
-    ).logicalWorkspaces[0]!
-    expect(online.kind).toBe('single')
-    expect(online.effectiveTargetOnline).toBe(true)
-
-    const offline = agg.aggregate(
-      [ubuntuPlatform],
-      new Map(),
-      new Map<DeviceId, DeviceConnectionState>([[ubuntu, 'error']]),
-    ).logicalWorkspaces[0]!
-    expect(offline.effectiveTargetOnline).toBe(false)
-  })
-
-  it('resolves Session ownership and logical workspace for local and remote conversations', () => {
-    const lws = {
-      logicalWorkspaceId: encodeLogicalWorkspaceId('git', 'github.com/acme/platform'),
-      title: 'platform',
-      kind: 'git' as const,
-      gitRemote: 'github.com/acme/platform',
-      targetDeviceId: ubuntu,
-      targetPath: '/srv/platform',
-      effectiveTargetDeviceId: ubuntu,
-      effectiveTargetPath: '/srv/platform',
-      effectiveTargetOnline: true,
-      members: [
-        {
-          deviceId: LOCAL_DEVICE_ID,
-          deviceName: 'Local',
-          remoteWorkspaceId: 'ws-local',
-          path: '/home/me/platform',
-          title: 'platform',
-          sessionCount: 1,
-          runningSessionCount: 0,
-        },
-        {
-          deviceId: ubuntu,
-          deviceName: 'ubuntu-dev',
-          remoteWorkspaceId: 'ws-ubuntu',
-          path: '/srv/platform',
-          title: 'platform',
-          sessionCount: 1,
-          runningSessionCount: 0,
-        },
-      ],
-      sessionIds: [encodeRemoteSessionId(ubuntu, 's-ubuntu'), 's-local'],
-      createdAt: '2026-10-01T00:00:00.000Z',
-      updatedAt: '2026-10-04T00:00:00.000Z',
-    }
-    const remoteId = encodeRemoteSessionId(ubuntu, 's-ubuntu')
-    const snapshot = snapshotFixture({
-      devices: [deviceView(ubuntu, 'ubuntu-dev', 'error')],
-      logicalWorkspaces: [lws],
-      allPhysicalWorkspaces: lws.members,
-      sessionOrigins: {
-        [remoteId]: {
-          namespacedSessionId: remoteId,
-          rawSessionId: 's-ubuntu',
-          deviceId: ubuntu,
-          deviceName: 'ubuntu-dev',
-          deviceState: 'error',
-          cwd: '/srv/platform',
-          running: false,
-        },
-      },
-    })
-
-    const local = resolveSessionDevice(snapshot, 's-local', '本机')
-    expect(local.isLocal).toBe(true)
-    expect(local.name).toBe('本机')
-    expect(local.state).toBe('connected')
-
-    const remote = resolveSessionDevice(snapshot, remoteId, '本机')
-    expect(remote.isLocal).toBe(false)
-    expect(remote.name).toBe('ubuntu-dev')
-    expect(remote.state).toBe('error')
-
-    // Unknown remote device ids still render instead of throwing.
-    const gone = resolveSessionDevice(snapshot, encodeRemoteSessionId(DeviceId('dev-gone'), 's-x'), '本机')
-    expect(gone.name).toBe('dev-gone')
-    expect(gone.state).toBe('disabled')
-
-    expect(resolveSessionLogicalWorkspace(snapshot, remoteId)?.logicalWorkspaceId)
-      .toBe(lws.logicalWorkspaceId)
-    expect(resolveSessionLogicalWorkspace(snapshot, 's-local')?.logicalWorkspaceId)
-      .toBe(lws.logicalWorkspaceId)
-    // cwd fallback covers the moment right after create, before list frames land.
-    expect(resolveSessionLogicalWorkspace(snapshot, 'md~never-seen', '/srv/platform')?.logicalWorkspaceId)
-      .toBe(lws.logicalWorkspaceId)
-
-    const targets = deviceTargetsForWorkspace(snapshot, lws, '本机')
-    expect(targets.map(target => target.name)).toEqual(['本机', 'ubuntu-dev'])
-    expect(targets.find(target => target.isLocal)?.online).toBe(true)
-    expect(targets.find(target => !target.isLocal)?.online).toBe(false)
-    expect(targets.find(target => target.deviceId === ubuntu)?.preferred).toBe(true)
-    expect(effectiveTargetOf(snapshot, lws)?.deviceId).toBe(ubuntu)
-  })
-
-  it('describes which devices can host a new Session in a merged workspace', () => {
-    const lws = {
-      logicalWorkspaceId: encodeLogicalWorkspaceId('manual', 'rule-1'),
-      title: 'platform',
-      kind: 'manual' as const,
-      targetDeviceId: LOCAL_DEVICE_ID,
-      targetPath: '/home/me/platform',
-      effectiveTargetDeviceId: LOCAL_DEVICE_ID,
-      effectiveTargetPath: '/home/me/platform',
-      effectiveTargetOnline: true,
-      members: [
-        {
-          deviceId: LOCAL_DEVICE_ID,
-          deviceName: 'Local',
-          remoteWorkspaceId: 'ws-local',
-          path: '/home/me/platform',
-          title: 'platform',
-          sessionCount: 0,
-          runningSessionCount: 0,
-        },
-        {
-          deviceId: ubuntu,
-          deviceName: 'ubuntu-dev',
-          remoteWorkspaceId: 'ws-ubuntu',
-          path: '/srv/platform',
-          title: 'platform',
-          sessionCount: 0,
-          runningSessionCount: 0,
-        },
-      ],
-      sessionIds: [],
-      createdAt: '2026-10-01T00:00:00.000Z',
-      updatedAt: '2026-10-04T00:00:00.000Z',
-    }
-    const snapshot = snapshotFixture({
-      devices: [deviceView(ubuntu, 'ubuntu-dev', 'reconnecting')],
-      logicalWorkspaces: [lws],
-      allPhysicalWorkspaces: lws.members,
-    })
-    const members = memberTargetsForWorkspace(snapshot, lws, '本机')
-    expect(members).toHaveLength(2)
-    expect(members[1]?.state).toBe('reconnecting')
-    expect(members[1]?.online).toBe(false)
-    expect(members[0]?.preferred).toBe(true)
-
-    // New Session may start on any enabled device, including one that has not
-    // registered this workspace yet. Settings keeps the member-only list above.
-    const mac = DeviceId('dev-mac')
-    const withExtra = snapshotFixture({
-      devices: [
-        deviceView(ubuntu, 'ubuntu-dev', 'connected'),
-        deviceView(mac, 'mac-mini', 'connected'),
-        { ...deviceView(DeviceId('dev-off'), 'parked', 'disabled'), enabled: false },
-      ],
-      logicalWorkspaces: [lws],
-      allPhysicalWorkspaces: lws.members,
-    })
-    const choices = deviceTargetsForWorkspace(withExtra, lws, '本机')
-    expect(choices.map(target => target.deviceId)).toEqual([LOCAL_DEVICE_ID, ubuntu, mac])
-    expect(choices.find(target => target.deviceId === mac)?.path).toBe(lws.targetPath)
-  })
-})
-
-describe('4c. New Session device switching', () => {
-  it('persists the chosen member device and restarts the New Session on it', async () => {
-    const { clientStore } = await import('../src/client/state.ts')
-    const calls: Array<string | undefined> = []
-    const ui = { startSession: (workspaceId?: string): void => { calls.push(workspaceId) } }
-    const originalFetch = globalThis.fetch
-    const snapshot = clientStore.getSnapshot().snapshot
-    const requested: unknown[] = []
-    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
-      requested.push(init?.body === undefined ? undefined : JSON.parse(String(init.body)))
-      return new Response(JSON.stringify({
-        ok: true,
-        value: { mode: 'member', snapshot },
-      }), { status: 200 })
-    }) as typeof fetch
-    try {
-      const logicalId = encodeLogicalWorkspaceId('git', 'github.com/acme/platform')
-      const result = await clientStore.switchNewSessionDevice(ui, logicalId, DeviceId('dev-ubuntu'))
-      expect(result.ok).toBe(true)
-      expect(calls).toEqual([logicalId])
-      expect(requested).toContainEqual({
-        action: 'startSessionOnDevice',
-        payload: { logicalWorkspaceId: logicalId, deviceId: 'dev-ubuntu', clientId: expect.any(String) },
-      })
-    } finally {
-      globalThis.fetch = originalFetch
-    }
-  })
-
-  it('opens the Session the Host created on a device that did not own the workspace', async () => {
-    const { clientStore } = await import('../src/client/state.ts')
-    const opened: string[] = []
-    const ui = {
-      startSession: (): void => { throw new Error('member path must not run') },
-      openSession: (sessionId: string): void => { opened.push(sessionId) },
-    }
-    const originalFetch = globalThis.fetch
-    const snapshot = clientStore.getSnapshot().snapshot
-    globalThis.fetch = (async () => new Response(JSON.stringify({
-      ok: true,
-      value: { mode: 'registered', sessionId: 'md~dev-mac~s-new', snapshot },
-    }), { status: 200 })) as typeof fetch
-    try {
-      const result = await clientStore.switchNewSessionDevice(
-        ui,
-        encodeLogicalWorkspaceId('git', 'github.com/acme/platform'),
-        DeviceId('dev-mac'),
-      )
-      expect(result.ok).toBe(true)
-      expect(opened).toEqual(['md~dev-mac~s-new'])
-    } finally {
-      globalThis.fetch = originalFetch
-    }
-  })
-
-  it('reports an unavailable startSession instead of pretending the switch happened', async () => {
-    const { clientStore } = await import('../src/client/state.ts')
-    const originalFetch = globalThis.fetch
-    const snapshot = clientStore.getSnapshot().snapshot
-    globalThis.fetch = (async () => new Response(JSON.stringify({
-      ok: true,
-      value: { mode: 'member', snapshot },
-    }), { status: 200 })) as typeof fetch
-    try {
-      const result = await clientStore.switchNewSessionDevice(
-        undefined,
-        encodeLogicalWorkspaceId('git', 'github.com/acme/other'),
-        DeviceId('dev-mac'),
-      )
-      expect(result.ok).toBe(false)
-      expect(result.error).toBe('startSession-unavailable')
-    } finally {
-      globalThis.fetch = originalFetch
-    }
-  })
-})
-
 describe('4d. Offline catalog cache & reconnect waiting', () => {
   function silentCallbacks(): ConstructorParameters<typeof RemoteDeviceClient>[2] {
     return {
@@ -1398,12 +790,8 @@ describe('4d. Offline catalog cache & reconnect waiting', () => {
     const dir = makeTempDir('dsh-md-registry-cache-')
     const dataFile = join(dir, 'registry.json')
     const secretsFile = join(dir, 'secrets.json')
-    const localHost = {
-      localPort: () => 3080,
-      localWorkspaces: () => [],
-      localSessionUpdatedAt: () => new Map<string, number>(),
-    }
-    const options = { allowDirectTransport: true, enableNativeProxy: false as const }
+    const localHost = { localPort: () => 3080 }
+    const options = { allowDirectTransport: true }
 
     const first = new DeviceRegistry(dataFile, secretsFile, localHost, options)
     const added = await first.upsertDevice({
@@ -1437,12 +825,12 @@ describe('4d. Offline catalog cache & reconnect waiting', () => {
     expect(client.toView().lastSyncedAt).toBe(cachedCatalog.syncedAt)
     expect(client.toView().catalogStale).toBe(true)
 
+    // The offline device keeps last-known counts for its tab instead of
+    // pretending to have none, and reports them as stale.
     const snapshot = second.snapshot()
-    expect(snapshot.logicalWorkspaces.length).toBeGreaterThan(0)
-    expect(snapshot.sessionOrigins[encodeRemoteSessionId(DeviceId('dev-cache'), 's-1')]?.deviceName)
-      .toBe('cache-dev')
-    expect(snapshot.sessionOrigins[encodeRemoteSessionId(DeviceId('dev-cache'), 's-1')]?.deviceState)
-      .not.toBe('connected')
+    expect(snapshot.devices[0]?.name).toBe('cache-dev')
+    expect(snapshot.attentionByDevice?.['dev-cache']?.fresh).toBe(false)
+    expect(snapshot.attentionByDevice?.['dev-cache']?.unreadSessionIds).toEqual([])
     second.dispose()
     await second.flushPersistence()
   })
@@ -1479,1069 +867,9 @@ describe('4d. Offline catalog cache & reconnect waiting', () => {
     expect(client.toView().catalogStale).toBe(true)
   })
 
-  it('builds a wire-compatible offline failure and refuses to wait on an unconfigured device', async () => {
-    const error = deviceOfflineError('ubuntu-dev', 'reconnect attempt 3') as Error & {
-      code: string
-      details: Record<string, unknown>
-      isDSHRemoteError: boolean
-    }
-    expect(error.isDSHRemoteError).toBe(true)
-    expect(error.code).toBe('dsh-md/device-offline')
-    expect(error.message).toContain('ubuntu-dev')
-    expect(error.details).toEqual({ deviceName: 'ubuntu-dev' })
-
-    const dir = makeTempDir('dsh-md-registry-wait-')
-    const registry = new DeviceRegistry(
-      join(dir, 'registry.json'),
-      join(dir, 'secrets.json'),
-      { localPort: () => 3080, localWorkspaces: () => [], localSessionUpdatedAt: () => new Map() },
-      { allowDirectTransport: true, enableNativeProxy: false },
-    )
-    const controller = new AbortController()
-    await expect(registry.waitForDeviceConnected(LOCAL_DEVICE_ID, controller.signal, 10)).resolves.toBe(true)
-    await expect(registry.waitForDeviceConnected(DeviceId('missing'), controller.signal, 10)).resolves.toBe(false)
-    registry.dispose()
-  })
-})
-
-describe('4e. Display preferences for session rows', () => {
-  it('defaults the row device marker off, persists a change, and restores it after a restart', async () => {
-    const dir = makeTempDir('dsh-md-ui-prefs-')
-    const dataFile = join(dir, 'registry.json')
-    const secretsFile = join(dir, 'secrets.json')
-    const localHost = {
-      localPort: () => 3080,
-      localWorkspaces: () => [],
-      localSessionUpdatedAt: () => new Map<string, number>(),
-    }
-    const options = { allowDirectTransport: true, enableNativeProxy: false as const }
-
-    const registry = new DeviceRegistry(dataFile, secretsFile, localHost, options)
-    expect(registry.snapshot().ui?.sessionRowDeviceDot).toBe(false)
-
-    const plane = new MultiDeviceControlPlane(registry, () => true)
-    const toggled = await plane.dispatch({ action: 'setUiPreferences', payload: { sessionRowDeviceDot: true } })
-    expect(toggled.ok).toBe(true)
-    expect(registry.ui().sessionRowDeviceDot).toBe(true)
-    expect((toggled as { value: { ui?: { sessionRowDeviceDot: boolean } } }).value.ui?.sessionRowDeviceDot)
-      .toBe(true)
-    const crossHost = await plane.dispatch({
-      action: 'setUiPreferences',
-      payload: { crossHostReadState: true },
-    })
-    expect(crossHost.ok).toBe(true)
-    expect(registry.ui().crossHostReadState).toBe(true)
-    registry.dispose()
-
-    const second = new DeviceRegistry(dataFile, secretsFile, localHost, options)
-    expect(second.ui().sessionRowDeviceDot).toBe(true)
-    expect(second.snapshot().ui?.sessionRowDeviceDot).toBe(true)
-
-    // Explicit false must stick too (not "undefined means false" twice).
-    second.updateUiPreferences({ sessionRowDeviceDot: false })
-    second.dispose()
-    const third = new DeviceRegistry(dataFile, secretsFile, localHost, options)
-    expect(third.ui().sessionRowDeviceDot).toBe(false)
-    third.dispose()
-  })
-
-  it('treats a malformed preference document as the default instead of throwing', () => {
-    const dir = makeTempDir('dsh-md-ui-prefs-bad-')
-    const dataFile = join(dir, 'registry.json')
-    writeFileSync(dataFile, JSON.stringify({ version: 1, devices: [], ui: { sessionRowDeviceDot: 'yes' } }))
-    const registry = new DeviceRegistry(
-      dataFile,
-      join(dir, 'secrets.json'),
-      { localPort: () => 3080, localWorkspaces: () => [], localSessionUpdatedAt: () => new Map() },
-      { allowDirectTransport: true, enableNativeProxy: false },
-    )
-    expect(registry.ui().sessionRowDeviceDot).toBe(false)
-    registry.dispose()
-  })
-})
-
-describe('5. End-to-End Integration: Remote DSH 0.2 Server, Aggregated Gateway, & Native Proxy', () => {
-  it('connects to a simulated remote DSH 0.2 server, aggregates sessions & workspaces, routes prompts/approvals, and serves Native Mode via reverse proxy', async () => {
-    const dir = makeTempDir('dsh-md-e2e-')
-
-    // Spin up a mock remote DSH 0.2 HTTP + WebSocket server
-    const remotePrompts: unknown[] = []
-    const remoteApprovalResults: unknown[] = []
-    let pushRemoteEvent: ((frame: unknown) => void) | undefined
-    let pushRemoteWorkspaceFrame: ((frame: unknown) => void) | undefined
-
-    const wss = new WebSocketServer({ noServer: true })
-    wss.on('connection', (ws) => {
-      ws.on('message', (raw) => {
-        const msg = JSON.parse(raw.toString()) as {
-          type: string
-          streamId: string
-          endpoint?: string
-          payload?: { args?: Record<string, unknown> }
-        }
-        if (msg.type === 'open') {
-          if (msg.endpoint === '$events') {
-            ws.send(
-              JSON.stringify({
-                type: 'item',
-                streamId: msg.streamId,
-                value: {
-                  type: 'ready',
-                  clientId: 'remote-client-1',
-                  host: { home: '/home/remoteuser' },
-                },
-              }),
-            )
-            pushRemoteEvent = (frame) => {
-              ws.send(JSON.stringify({ type: 'item', streamId: msg.streamId, value: frame }))
-            }
-          } else if (msg.endpoint === 'workspace/follow') {
-            ws.send(
-              JSON.stringify({
-                type: 'item',
-                streamId: msg.streamId,
-                value: {
-                  type: 'baseline',
-                  value: {
-                    items: [
-                      {
-                        workspaceId: 'rws-1',
-                        path: '/home/remoteuser/shared-repo',
-                        title: 'shared-repo',
-                        // Deliberately empty: a workspace registered by manual
-                        // matching must still adopt pre-existing Sessions by cwd.
-                        sessionIds: [],
-                        createdAt: '2026-10-01T00:00:00.000Z',
-                        updatedAt: '2026-10-02T00:00:00.000Z',
-                      },
-                    ],
-                    archivedSessionIds: [],
-                    pinnedSessionIds: [],
-                  },
-                },
-              }),
-            )
-            pushRemoteWorkspaceFrame = (frame) => {
-              ws.send(JSON.stringify({ type: 'item', streamId: msg.streamId, value: frame }))
-            }
-          } else if (msg.endpoint === 'session/control') {
-            ws.send(
-              JSON.stringify({
-                type: 'item',
-                streamId: msg.streamId,
-                value: {
-                  type: 'baseline',
-                  value: {
-                    projections: {
-                      'rsess-1': {
-                        asOfSeq: 2,
-                        values: { title: 'Remote Task 1' },
-                      },
-                    },
-                  },
-                },
-              }),
-            )
-          } else if (msg.endpoint === 'session/follow') {
-            ws.send(
-              JSON.stringify({
-                type: 'item',
-                streamId: msg.streamId,
-                value: {
-                  type: 'snapshot',
-                  header: { version: 2, id: 'rsess-1', createdAt: 1000, cwd: '/home/remoteuser/shared-repo', isSeeded: false },
-                  cursor: 1,
-                  records: [],
-                  hasMore: false,
-                  projections: { asOfSeq: 1, values: { title: 'Remote Task 1' } },
-                  assistantStream: { revision: 0 },
-                },
-              }),
-            )
-          }
-        }
-      })
-    })
-
-    const remoteServer: Server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-      if (req.url === '/' && req.method === 'GET') {
-        res.writeHead(200, {
-          'content-type': 'text/html; charset=utf-8',
-          'x-frame-options': 'DENY',
-          'content-security-policy': "default-src 'self'; frame-ancestors 'none'",
-        })
-        res.end('<html><body>Remote DSH Native Web UI</body></html>')
-        return
-      }
-
-      const chunks: Buffer[] = []
-      for await (const c of req) chunks.push(c as Buffer)
-      const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
-        rpcId: string
-        method: string
-        payload: { args: Record<string, unknown> }
-      }
-
-      const reply = (value: unknown): void => {
-        res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(
-          JSON.stringify({
-            type: 'server-response',
-            rpcId: body.rpcId,
-            result: { ok: true, value },
-          }),
-        )
-      }
-
-      if (body.method === 'session/list') {
-        reply({
-          items: [
-            {
-              sessionId: 'rsess-1',
-              updatedAt: 5000,
-              agentAvailable: true,
-              running: true,
-              blank: false,
-              cwd: '/home/remoteuser/shared-repo',
-              projections: { kind: 'sequenced', asOfSeq: 2, values: { title: 'Remote Task 1' } },
-            },
-          ],
-        })
-        return
-      }
-
-      if (body.method === 'session/modelCatalog') {
-        reply({
-          default: { provider: 'remote-provider', model: 'remote-default' },
-          routableProviders: ['remote-provider'],
-          groups: [
-            {
-              id: 'remote-provider',
-              name: 'Remote Provider',
-              models: [{ id: 'remote-only-model', name: 'Remote Only' }],
-            },
-          ],
-          failures: [],
-        })
-        return
-      }
-
-      if (body.method === 'session/create') {
-        reply({ sessionId: 'rsess-created', agentPreset: 'remote-preset' })
-        return
-      }
-
-      if (body.method === 'workspace/create') {
-        reply({
-          workspace: {
-            workspaceId: 'rws-created',
-            path: '/home/remoteuser/new-repo',
-            title: 'new-repo',
-            sessionIds: [],
-            createdAt: '2026-10-01T00:00:00.000Z',
-            updatedAt: '2026-10-01T00:00:00.000Z',
-          },
-          created: true,
-        })
-        return
-      }
-
-      if (body.method === 'session/prompt') {
-        remotePrompts.push(body.payload.args.request)
-        reply({ accepted: true })
-        return
-      }
-
-      if (body.method === '$events/result') {
-        remoteApprovalResults.push(body.payload.args)
-        reply(undefined)
-        return
-      }
-
-      reply({})
-    })
-
-    remoteServer.on('upgrade', (req, socket, head) => {
-      wss.handleUpgrade(req, socket, head, (ws) => {
-        wss.emit('connection', ws, req)
-      })
-    })
-
-    await new Promise<void>(r => remoteServer.listen(0, '127.0.0.1', () => r()))
-    const remotePort = (remoteServer.address() as { port: number }).port
-    const remoteBaseUrl = `http://127.0.0.1:${remotePort}`
-
-    try {
-      const registry = new DeviceRegistry(
-        join(dir, 'devices.json'),
-        join(dir, 'secrets.json'),
-        {
-          localPort: () => 3080,
-          localWorkspaces: () => [
-            {
-              deviceId: LOCAL_DEVICE_ID,
-              deviceName: 'Local',
-              workspaceId: 'lws-1',
-              path: '/Users/local/shared-repo',
-              title: 'shared-repo',
-              sessionIds: ['lsess-1'],
-              runningSessionCount: 0,
-              createdAt: '2026-10-01T00:00:00.000Z',
-              updatedAt: '2026-10-01T00:00:00.000Z',
-            },
-          ],
-          localSessionUpdatedAt: () => new Map([['lsess-1', 1000]]),
-        },
-        { allowDirectTransport: true },
-      )
-
-      // Add the remote device
-      const added = await registry.upsertDevice({
-        id: 'dev-remote1',
-        name: 'remote-box',
-        transport: { kind: 'direct', baseUrl: remoteBaseUrl },
-        auth: { mode: 'none' },
-      })
-      expect(added.ok).toBe(true)
-
-      // Wait for RemoteDeviceClient to connect and receive workspace/follow + session/control baselines
-      for (let i = 0; i < 40; i++) {
-        const view = registry.client(DeviceId('dev-remote1'))?.toView()
-        if (view?.state === 'connected' && view.workspaceCount > 0) break
-        await new Promise(r => setTimeout(r, 50))
-      }
-
-      const devId = DeviceId('dev-remote1')
-      registry.aggregator.noteGitRemote(LOCAL_DEVICE_ID, '/Users/local/shared-repo', 'git@github.com:org/shared-repo.git')
-      registry.aggregator.noteGitRemote(devId, '/home/remoteuser/shared-repo', 'https://github.com/org/shared-repo.git')
-
-      // Verify Git Auto-Aggregation merges local and remote workspaces into one Logical Workspace
-      const snap = registry.snapshot()
-      expect(snap.logicalWorkspaces).toHaveLength(1)
-      expect(snap.logicalWorkspaces[0]?.kind).toBe('git')
-      expect(snap.logicalWorkspaces[0]?.gitRemote).toBe('github.com/org/shared-repo')
-      expect(snap.logicalWorkspaces[0]?.sessionIds).toEqual([
-        encodeRemoteSessionId(devId, 'rsess-1'),
-        'lsess-1',
-      ])
-      expect(
-        snap.allPhysicalWorkspaces.find(member => member.deviceId === devId)?.sessionCount,
-      ).toBe(1)
-
-      // DSH 0.2.2 replaces the complete workspace projection when remote-access
-      // visibility changes. The plugin's RemoteDeviceClient must treat that as
-      // authoritative instead of ignoring the frame.
-      pushRemoteWorkspaceFrame?.({
-        type: 'replace',
-        value: {
-          items: [{
-            workspaceId: 'rws-1',
-            path: '/home/remoteuser/shared-repo',
-            title: 'shared-repo-replaced',
-            sessionIds: ['rsess-1'],
-            createdAt: '2026-10-01T00:00:00.000Z',
-            updatedAt: '2026-10-03T00:00:00.000Z',
-          }],
-          archivedSessionIds: [],
-          pinnedSessionIds: [],
-        },
-      })
-      for (let i = 0; i < 40; i++) {
-        if (registry.client(devId)?.workspaceItems()[0]?.title === 'shared-repo-replaced') break
-        await new Promise(r => setTimeout(r, 25))
-      }
-      expect(registry.client(devId)?.workspaceItems()[0]?.title).toBe('shared-repo-replaced')
-
-      // Verify Native Mode Reverse Proxy serves remote HTML and strips X-Frame-Options & CSP frame-ancestors
-      const proxyUrl = snap.devices[0]?.nativeProxyUrl
-      expect(proxyUrl).toBeDefined()
-      const proxyBase = new URL(proxyUrl!)
-      const proxyWithoutToken = new URL('/', proxyBase).href
-      const tokenless = await fetch(proxyWithoutToken, { redirect: 'manual' })
-      expect(tokenless.status).toBe(403)
-      const tokenRedirect = await fetch(proxyBase, { redirect: 'manual' })
-      expect(tokenRedirect.status).toBe(302)
-      const proxyCookie = tokenRedirect.headers.get('set-cookie')?.split(';')[0]
-      expect(proxyCookie).toMatch(/^dsh-md-native-[a-f0-9]+=/)
-      const proxyRes = await fetch(proxyWithoutToken, {
-        headers: { cookie: proxyCookie! },
-      })
-      expect(proxyRes.status).toBe(200)
-      expect(proxyRes.headers.get('x-frame-options')).toBeNull()
-      expect(proxyRes.headers.get('content-security-policy') ?? '').not.toContain('frame-ancestors')
-      const html = await proxyRes.text()
-      expect(html).toContain('Remote DSH Native Web UI')
-
-      // Path traversal / protocol-relative targets must never become an open proxy.
-      const ssrf = await fetch(`${proxyBase.origin}//evil.example/steal`, {
-        headers: { cookie: proxyCookie! },
-        redirect: 'manual',
-      })
-      expect(ssrf.status).toBe(400)
-
-      // Install AggregatedGateway over mock local controllers and test session.list, session.prompt, and approval waterfall
-      const mockSessionController: SessionControllerLike = {
-        list: async () => ({
-          items: [
-            {
-              sessionId: 'lsess-1',
-              updatedAt: 1000,
-              agentAvailable: true,
-              running: false,
-              blank: false,
-              cwd: '/Users/local/shared-repo',
-            },
-          ],
-        }),
-        search: async () => ({ items: [], hasMore: false }),
-        create: async () => ({ sessionId: 'lsess-new' }),
-        selectModel: async () => ({ selected: {} }),
-        modelCatalog: async () => ({
-          default: { provider: 'local-provider', model: 'local-default' },
-          routableProviders: ['local-provider'],
-          groups: [
-            {
-              id: 'local-provider',
-              name: 'Local Provider',
-              models: [{ id: 'local-model', name: 'Local Model' }],
-            },
-          ],
-          failures: [],
-        }),
-        rename: async () => ({ title: 'renamed', seq: 1 }),
-        fork: async () => ({ sessionId: 'lsess-fork' }),
-        prompt: async () => ({ accepted: true }),
-        attachment: async () => ({}),
-        updateQueue: async () => ({ accepted: true }),
-        cancel: () => ({ accepted: true }),
-        page: async () => ({ records: [], hasMore: false }),
-        follow: async function* () {},
-        projections: async () => null,
-        control: async function* () {
-          yield { type: 'baseline', value: { projections: {} } }
-        },
-      }
-
-      const mockWorkspaceController: WorkspaceControllerLike = {
-        create: async () => ({ workspace: {}, created: true }),
-        rename: async () => ({ workspace: {} }),
-        delete: async () => ({ deleted: true }),
-        insertBefore: async () => ({ workspaceIds: [] }),
-        insertSessionBefore: async () => ({ workspace: {} }),
-        archiveSession: async () => ({ archivedSessionIds: [] }),
-        unarchiveSession: async () => ({ archivedSessionIds: [] }),
-        pinSession: async () => ({ pinnedSessionIds: [] }),
-        unpinSession: async () => ({ pinnedSessionIds: [] }),
-        follow: async function* () {
-          yield {
-            type: 'baseline',
-            value: { items: [], archivedSessionIds: [], pinnedSessionIds: [] },
-          }
-        },
-      }
-
-      const mockGateway: TypertGatewayLike = {
-        wireStream: {
-          open: async () =>
-            (async function* () {
-              yield { type: 'ready', clientId: 'local-client-1', host: { home: '/Users/local' } }
-            })(),
-          failure: () => ({ code: 'internal', message: 'err', details: {} }),
-        },
-        dispatchRpc: async () => ({ ok: true, value: undefined }),
-      }
-
-      const mockWorkspaceRegistry = {
-        list: () => [
-          {
-            id: 'lws-1',
-            path: '/Users/local/shared-repo',
-            title: 'shared-repo',
-            sessionIds: ['lsess-1'],
-            createdAt: '2026-10-01T00:00:00.000Z',
-            updatedAt: '2026-10-01T00:00:00.000Z',
-          },
-        ],
-        archivedSessionIds: [],
-        pinnedSessionIds: [],
-      }
-
-      const disposeGateway = installAggregatedGateway02(
-        registry,
-        mockSessionController,
-        mockWorkspaceController,
-        mockGateway,
-        mockWorkspaceRegistry,
-        { workspaceReplaceFrames: true },
-      )
-      // Production marks the gateway healthy right after installing it; the
-      // control plane refuses Aggregated Mode while the gateway is degraded.
-      registry.setGatewayStatus(true)
-
-      // 1) Merged session.list
-      const listed = await mockSessionController.list({}, new AbortController().signal)
-      expect(listed.items.map(i => i.sessionId)).toEqual([
-        encodeRemoteSessionId(devId, 'rsess-1'),
-        'lsess-1',
-      ])
-
-      // 1b) A remote Session sees exactly the remote catalog, never local groups.
-      const remoteSessionId = encodeRemoteSessionId(devId, 'rsess-1')
-      expect(registry.setActiveSession(remoteSessionId, 1)).toBe(true)
-      expect((await mockSessionController.modelCatalog()).groups).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'local-provider' })]))
-      const scopedCatalog = await new MultiDeviceControlPlane(registry).dispatch({ action: 'modelCatalog', payload: { sessionId: remoteSessionId } })
-      expect(scopedCatalog.ok).toBe(true)
-      const remoteCatalog = (scopedCatalog as { ok: true; value: unknown }).value as {
-        groups: { id: string; models: { id: string }[] }[]
-        routableProviders: string[]
-      }
-      expect(remoteCatalog.groups.map(group => group.id)).toEqual(['remote-provider'])
-      expect(remoteCatalog.groups[0]?.models.map(model => model.id)).toEqual(['remote-only-model'])
-      expect(remoteCatalog.routableProviders).toEqual(['remote-provider'])
-
-      // 1c) A local Session sees exactly the local catalog.
-      expect(registry.setActiveSession('lsess-1', 2)).toBe(true)
-      const localCatalog = (await mockSessionController.modelCatalog()) as {
-        groups: { id: string; models: { id: string }[] }[]
-      }
-      expect(localCatalog.groups.map(group => group.id)).toEqual(['local-provider'])
-
-      // 1d) An older control-plane request cannot move the scope backwards.
-      expect(registry.setActiveSession(remoteSessionId, 3)).toBe(true)
-      expect(registry.setActiveSession('lsess-1', 2)).toBe(false)
-      expect(registry.activeSessionScope()).toMatchObject({ kind: 'remote', deviceId: devId })
-
-      // 1e) The browser event generation receives remote Sessions that loaded
-      // after its initial `session.list`, otherwise their workspace rows vanish.
-      // The same generation stays open across a Native round-trip, so returning
-      // to Aggregated Mode must replay those summaries again.
-      const eventsAbort = new AbortController()
-      const eventsTimer = setTimeout(() => eventsAbort.abort(), 1_500)
-      const replayStream = await mockGateway.wireStream.open(
-        '$events',
-        {},
-        (async function* () {})(),
-        undefined,
-        eventsAbort.signal,
-      )
-      const replayed: Record<string, unknown>[] = []
-      const replayIterator = replayStream[Symbol.asyncIterator]()
-      const readReplay = async (): Promise<void> => {
-        for (;;) {
-          const next = await replayIterator.next()
-          if (next.done) return
-          const rawFrame = next.value
-          if (typeof rawFrame !== 'object' || rawFrame === null || Array.isArray(rawFrame)) continue
-          const frame = rawFrame as Record<string, unknown>
-          replayed.push(frame)
-          if (frame.type === 'emit' && frame.event === 'api-session/added') return
-        }
-      }
-      try {
-        await readReplay()
-      } catch {
-        // Abort after the expected frame.
-      } finally {
-        clearTimeout(eventsTimer)
-      }
-      expect(replayed.some(frame =>
-        frame.type === 'emit' &&
-        frame.event === 'api-session/added' &&
-        Array.isArray(frame.args) &&
-        (frame.args[0] as { sessionId?: string } | undefined)?.sessionId === remoteSessionId,
-      )).toBe(true)
-
-      // 1b-1) Workspace frames republish the Session summaries they reference.
-      // Regression: a lost `api-session/added` left aggregated Workspaces
-      // expanded-but-empty until an unrelated refresh; every Workspace frame
-      // now asks the live `$events` generations to publish their `sessionIds`
-      // first, and each generation dedups against what it already pushed.
-      {
-        const publishSpy: string[][] = []
-        const originalPublish = registry.requestSessionPublish.bind(registry)
-        registry.requestSessionPublish = ((ids: readonly string[]) => {
-          publishSpy.push([...ids])
-          originalPublish(ids)
-        }) as typeof registry.requestSessionPublish
-
-        const healAbort = new AbortController()
-        const healTimer = setTimeout(() => healAbort.abort(), 2_000)
-        const healStream = await mockGateway.wireStream.open(
-          '$events',
-          {},
-          (async function* () {})(),
-          undefined,
-          healAbort.signal,
-        )
-        const healIterator = healStream[Symbol.asyncIterator]()
-        try {
-          // Consume ready + replay: rsess-1 enters this generation's ledger.
-          for (;;) {
-            const next = await healIterator.next()
-            if (next.done) throw new Error('events stream closed before replay')
-            const frame = next.value as Record<string, unknown>
-            if (
-              frame.type === 'emit' &&
-              frame.event === 'api-session/added' &&
-              Array.isArray(frame.args) &&
-              (frame.args[0] as { sessionId?: string } | undefined)?.sessionId === remoteSessionId
-            ) break
-          }
-
-          // A Workspace baseline names both member Sessions; the frame push
-          // must route them through requestSessionPublish before the client
-          // sees the frame.
-          const publishAbort = new AbortController()
-          const publishFollow = mockWorkspaceController
-            .follow(publishAbort.signal)[Symbol.asyncIterator]()
-          const publishBaseline = await publishFollow.next()
-          expect(publishBaseline.done).toBe(false)
-          expect(publishBaseline.value.type).toBe('baseline')
-          expect(
-            publishSpy.some(ids => ids.includes(remoteSessionId)),
-          ).toBe(true)
-
-          // rsess-1 is already in the generation ledger: no duplicate replay.
-          await new Promise(r => setTimeout(r, 60))
-          const duplicates: unknown[] = []
-          for (;;) {
-            const next = await Promise.race([
-              healIterator.next(),
-              new Promise<{ done: true }>(r => setTimeout(() => r({ done: true }), 60)),
-            ])
-            if (next.done) break
-            const frame = next.value as Record<string, unknown>
-            if (
-              frame.type === 'emit' &&
-              frame.event === 'api-session/added' &&
-              Array.isArray(frame.args) &&
-              (frame.args[0] as { sessionId?: string } | undefined)?.sessionId === remoteSessionId
-            ) duplicates.push(frame)
-          }
-          expect(duplicates).toHaveLength(0)
-
-          // Unknown ids are ignored without failing the generation.
-          registry.requestSessionPublish([encodeRemoteSessionId(devId, 'ghost-session')])
-          await new Promise(r => setTimeout(r, 60))
-        } finally {
-          clearTimeout(healTimer)
-          healAbort.abort()
-        }
-      }
-
-      // 1c) Explicit per-session device selection creates on the chosen device.
-      const created = await registry.createRemoteSession({
-        deviceId: devId,
-        workspaceId: 'rws-1',
-      })
-      expect(created.ok).toBe(true)
-      if (created.ok) {
-        expect(created.sessionId).toBe(encodeRemoteSessionId(devId, 'rsess-created'))
-      }
-
-      // 1d) Remote workspace registration is available without a remote plugin.
-      const remoteWorkspace = await registry.createRemoteWorkspace({
-        deviceId: devId,
-        path: '/home/remoteuser/new-repo',
-      })
-      expect(remoteWorkspace.ok).toBe(true)
-
-      // 2) Routed session.prompt to remote device
-      await mockSessionController.prompt(
-        {
-          requestId: 'req-1',
-          sessionId: encodeRemoteSessionId(devId, 'rsess-1'),
-          mode: 'queue',
-          content: [{ type: 'text', text: 'Hello remote DSH' }],
-        },
-        new AbortController().signal,
-      )
-      expect(remotePrompts).toHaveLength(1)
-      expect((remotePrompts[0] as { sessionId: string }).sessionId).toBe('rsess-1')
-
-      // 3) Remote approval waterfall -> answered via $events/result
-      pushRemoteEvent?.({
-        type: 'waterfall',
-        event: 'approval/request',
-        eventId: 'rem-ev-99',
-        agentId: 'rsess-1',
-        request: { toolName: 'bash', reason: 'Run build' },
-      })
-      await new Promise(r => setTimeout(r, 60))
-
-      const namespacedEvId = encodeRemoteEventId(devId, 'rem-ev-99')
-      const resultRes = await mockGateway.dispatchRpc!(
-        '$events/result',
-        {
-          args: {
-            clientId: 'local-client-1',
-            eventId: namespacedEvId,
-            outcome: { kind: 'result', value: 'allowed-once' },
-          },
-        },
-        new AbortController().signal,
-        undefined,
-      )
-      expect(resultRes.ok).toBe(true)
-      expect(remoteApprovalResults).toHaveLength(1)
-      expect((remoteApprovalResults[0] as { eventId: string }).eventId).toBe('rem-ev-99')
-
-      // The long-lived follow stream below is the important shape: a real
-      // browser keeps this generation open across mode switches. Opening a
-      // fresh stream after the switch (as older tests did) always receives a
-      // baseline and cannot catch a `remove` that tombstoned an id.
-      const liveAbort = new AbortController()
-      const liveFrames = mockWorkspaceController.follow(liveAbort.signal)[Symbol.asyncIterator]()
-      const liveBaseline = await liveFrames.next()
-      expect(liveBaseline.done).toBe(false)
-      expect(liveBaseline.value.type).toBe('baseline')
-
-      // 4) Native Mode makes the local tab strictly local on the Host side.
-      const controlPlane = new MultiDeviceControlPlane(registry)
-      const nativeMode = await controlPlane.dispatch({
-        action: 'setDisplayMode',
-        payload: { displayMode: 'native' },
-      })
-      expect(nativeMode.ok).toBe(true)
-      expect(registry.snapshot().displayMode).toBe('native')
-
-      const nativeReplace = await liveFrames.next()
-      expect(nativeReplace.done).toBe(false)
-      expect(nativeReplace.value.type).toBe('replace')
-      expect((nativeReplace.value.value as { items: { workspaceId: string }[] }).items)
-        .toEqual([expect.objectContaining({ workspaceId: 'lws-1' })])
-
-      const nativeListed = await mockSessionController.list({}, new AbortController().signal)
-      expect(nativeListed.items.map(item => item.sessionId)).toEqual(['lsess-1'])
-
-      const nativeCatalog = (await mockSessionController.modelCatalog()) as {
-        groups: { id: string }[]
-        routableProviders: string[]
-      }
-      expect(nativeCatalog.groups.map(group => group.id)).toEqual(['local-provider'])
-      expect(nativeCatalog.routableProviders).toEqual(['local-provider'])
-
-      const nativeCreate = await mockSessionController.create({
-        sessionId: encodeRemoteSessionId(devId, 'rsess-1'),
-      })
-      expect(nativeCreate.sessionId).toBe('lsess-new')
-
-      const promptsBeforeNative = remotePrompts.length
-      await mockSessionController.prompt(
-        {
-          requestId: 'req-native',
-          sessionId: encodeRemoteSessionId(devId, 'rsess-1'),
-          mode: 'queue',
-          content: [{ type: 'text', text: 'must not leave the machine' }],
-        },
-        new AbortController().signal,
-      )
-      expect(remotePrompts).toHaveLength(promptsBeforeNative)
-
-      const nativeDispatch = await mockGateway.dispatchRpc!(
-        '$events/result',
-        {
-          args: {
-            clientId: 'local-client-1',
-            eventId: encodeRemoteEventId(devId, 'rem-ev-100'),
-            outcome: { kind: 'result', value: 'allowed-once' },
-          },
-        },
-        new AbortController().signal,
-        undefined,
-      )
-      expect(nativeDispatch.ok).toBe(true)
-      expect(remoteApprovalResults).toHaveLength(1)
-
-      const readBaseline = async (
-        stream: AsyncIterable<Record<string, unknown>>,
-      ): Promise<Record<string, unknown>> => {
-        for await (const frame of stream) return frame
-        throw new Error('workspace follow ended without a baseline')
-      }
-
-      const nativeAbort = new AbortController()
-      const nativeBaseline = await readBaseline(mockWorkspaceController.follow(nativeAbort.signal))
-      nativeAbort.abort()
-      expect(nativeBaseline.type).toBe('baseline')
-      expect((nativeBaseline.value as { items: { workspaceId: string }[] }).items)
-        .toEqual([expect.objectContaining({ workspaceId: 'lws-1' })])
-
-      // 5) Returning to Aggregated Mode restores the merged view for the same
-      // connected client; no page reload is required.
-      const aggregatedMode = await controlPlane.dispatch({
-        action: 'setDisplayMode',
-        payload: { displayMode: 'aggregated' },
-      })
-      expect(aggregatedMode.ok).toBe(true)
-
-      const aggregatedReplace = await liveFrames.next()
-      expect(aggregatedReplace.done).toBe(false)
-      expect(aggregatedReplace.value.type).toBe('replace')
-      expect((aggregatedReplace.value.value as { items: { workspaceId: string }[] }).items)
-        .toEqual([expect.objectContaining({ workspaceId: snap.logicalWorkspaces[0]?.logicalWorkspaceId })])
-      liveAbort.abort()
-
-      const restored = await mockSessionController.list({}, new AbortController().signal)
-      expect(restored.items.map(item => item.sessionId)).toEqual([
-        encodeRemoteSessionId(devId, 'rsess-1'),
-        'lsess-1',
-      ])
-
-      // The event generation opened above is still the browser's. Without a
-      // replay here its session store only knows the local blank created while
-      // Native Mode was active, and the remote rows stay invisible.
-      replayed.length = 0
-      const returnTimer = setTimeout(() => eventsAbort.abort(), 1_500)
-      try {
-        await readReplay()
-      } catch {
-        // Abort after the expected frame.
-      } finally {
-        clearTimeout(returnTimer)
-        eventsAbort.abort()
-      }
-      expect(replayed.some(frame =>
-        frame.type === 'emit' &&
-        frame.event === 'api-session/added' &&
-        Array.isArray(frame.args) &&
-        (frame.args[0] as { sessionId?: string } | undefined)?.sessionId === remoteSessionId,
-      )).toBe(true)
-
-      const aggregatedAbort = new AbortController()
-      const aggregatedBaseline = await readBaseline(mockWorkspaceController.follow(aggregatedAbort.signal))
-      aggregatedAbort.abort()
-      expect((aggregatedBaseline.value as { items: { workspaceId: string }[] }).items)
-        .toEqual([expect.objectContaining({ workspaceId: snap.logicalWorkspaces[0]?.logicalWorkspaceId })])
-
-      // Deleting a merged logical Workspace only splits aggregation. The unary
-      // reply removes the old row in the Client immediately, so the Host must
-      // publish the replacement single rows on the same follow stream.
-      const splitAbort = new AbortController()
-      const splitFrames = mockWorkspaceController.follow(splitAbort.signal)[Symbol.asyncIterator]()
-      const splitBaseline = await splitFrames.next()
-      expect(splitBaseline.value.type).toBe('baseline')
-      const logicalId = snap.logicalWorkspaces[0]!.logicalWorkspaceId
-      const deleted = await mockWorkspaceController.delete({ workspaceId: logicalId })
-      expect(deleted.deleted).toBe(true)
-      const splitReplace = await splitFrames.next()
-      expect(splitReplace.value.type).toBe('replace')
-      const splitIds = (splitReplace.value.value as { items: { workspaceId: string }[] }).items
-        .map(item => item.workspaceId)
-      const expectedSplit = registry.snapshot().logicalWorkspaces.map(workspace => workspace.logicalWorkspaceId)
-      expect(expectedSplit).toHaveLength(2)
-      expect(new Set(splitIds)).toEqual(new Set(expectedSplit))
-      splitAbort.abort()
-
-      disposeGateway()
-      registry.dispose()
-    } finally {
-      for (const client of wss.clients) client.terminate()
-      wss.close()
-      remoteServer.closeAllConnections()
-      await new Promise<void>(r => remoteServer.close(() => r()))
-    }
-  })
-
-  it('supports DSH 0.1.x legacy protocol servers, WebSocket native proxy upgrades, self-loop protection, and mode independence', async () => {
-    const dir = makeTempDir('dsh-md-compat-')
-
-    // Simulated DSH 0.1.x server + WebSocket echo for Native Proxy test
-    const wss01 = new WebSocketServer({ noServer: true })
-    let wsUpgradeHeaders: Record<string, unknown> = {}
-    wss01.on('connection', (ws, req) => {
-      wsUpgradeHeaders = req.headers
-      ws.on('message', (data) => {
-        ws.send(`echo:${data.toString()}`)
-      })
-    })
-
-    const server01 = createServer(async (req, res) => {
-      if (req.url?.startsWith('/?token=')) {
-        res.writeHead(303, {
-          'location': './',
-          'set-cookie': `${dshCookieName(req.headers.host ?? '127.0.0.1')}=v1.mockcookie; Path=/; HttpOnly; SameSite=Strict`,
-        })
-        res.end()
-        return
-      }
-
-      const chunks: Buffer[] = []
-      for await (const c of req) chunks.push(c as Buffer)
-      const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as {
-        rpcId?: string
-        method?: string
-        payload?: Record<string, unknown>
-      }
-
-      const reply = (ok: boolean, valueOrErr: unknown): void => {
-        res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(
-          JSON.stringify({
-            type: 'server-response',
-            rpcId: body.rpcId ?? '1',
-            result: ok ? { ok: true, value: valueOrErr } : { ok: false, error: valueOrErr },
-          }),
-        )
-      }
-
-      if (req.url === '/api/session/list') {
-        res.writeHead(404)
-        res.end('not found')
-        return
-      }
-      if (req.url === '/api/host.describe') {
-        reply(true, { version: '0.1.0-rc.6', cwd: '/root/legacy' })
-        return
-      }
-      if (req.url === '/api/session.list') {
-        reply(true, {
-          items: [
-            {
-              sessionId: 'legacy-s1',
-              updatedAt: 3000,
-              running: false,
-              blank: false,
-              cwd: '/root/legacy/app',
-            },
-          ],
-        })
-        return
-      }
-      if (req.url === '/api/workspace.list') {
-        reply(true, {
-          items: [
-            {
-              workspaceId: 'legacy-ws1',
-              path: '/root/legacy/app',
-              title: 'legacy-app',
-              sessionIds: ['legacy-s1'],
-              createdAt: '2026-08-01T00:00:00.000Z',
-              updatedAt: '2026-08-01T00:00:00.000Z',
-            },
-          ],
-          archivedSessionIds: ['legacy-archived-1'],
-        })
-        return
-      }
-      if (req.url === '/api/session.history') {
-        reply(true, {
-          events: [{ type: 'event', event: { type: 'user/message', seq: 0, time: 1000, data: {} } }],
-          hasMore: false,
-        })
-        return
-      }
-      reply(true, {})
-    })
-
-    server01.on('upgrade', (req, socket, head) => {
-      wss01.handleUpgrade(req, socket, head, (ws) => {
-        wss01.emit('connection', ws, req)
-      })
-    })
-
-    await new Promise<void>(r => server01.listen(0, '127.0.0.1', () => r()))
-    const port01 = (server01.address() as { port: number }).port
-    const url01 = `http://127.0.0.1:${port01}`
-
-    try {
-      const registry = new DeviceRegistry(
-        join(dir, 'devices.json'),
-        join(dir, 'secrets.json'),
-        {
-          localPort: () => 4080,
-          localWorkspaces: () => [],
-          localSessionUpdatedAt: () => new Map(),
-        },
-        { allowDirectTransport: true },
-      )
-
-      // 1) Self-loop rejection check
-      const selfLoopRes = await registry.upsertDevice({
-        name: 'self-host',
-        transport: { kind: 'direct', baseUrl: 'http://127.0.0.1:4080' },
-      })
-      expect(selfLoopRes.ok).toBe(false)
-      if (!selfLoopRes.ok) {
-        expect(selfLoopRes.error).toContain('Self-loop')
-      }
-
-      // 2) Add DSH 0.1.x server with launch token URL exchange
-      const added01 = await registry.upsertDevice({
-        id: 'dev-legacy',
-        name: 'legacy-node',
-        transport: { kind: 'direct', baseUrl: url01 },
-        auth: { mode: 'token', credential: `${url01}/?token=secret_launch_tok` },
-      })
-      expect(added01.ok).toBe(true)
-
-      for (let i = 0; i < 40; i++) {
-        const v = registry.client(DeviceId('dev-legacy'))?.toView()
-        if (v?.state === 'connected' && v.workspaceCount > 0) break
-        await new Promise(r => setTimeout(r, 50))
-      }
-
-      const legacyClient = registry.client(DeviceId('dev-legacy'))!
-      expect(legacyClient.toView().protocolVersion).toBe('0.1')
-      expect(legacyClient.toView().remoteDshVersion).toBe('0.1.0-rc.6')
-      expect(legacyClient.sessionSummaries()).toHaveLength(1)
-
-      // 3) Mode Independence: Simulate Aggregated Gateway failure; verify ControlPlane & Native Proxy WS still work!
-      registry.setGatewayStatus(false, 'Simulated schema mismatch')
-      const cp = new MultiDeviceControlPlane(registry, () => true)
-      const cpSnap = await cp.dispatch({ action: 'snapshot' })
-      expect(cpSnap.ok).toBe(true)
-
-      const nativeProxyUrl = legacyClient.toView().nativeProxyUrl!
-      expect(nativeProxyUrl).toBeDefined()
-      const nativeProxyBase = new URL(nativeProxyUrl)
-      const tokenRedirect = await fetch(nativeProxyBase, { redirect: 'manual' })
-      const nativeCookie = tokenRedirect.headers.get('set-cookie')?.split(';')[0]
-      expect(nativeCookie).toMatch(/^dsh-md-native-[a-f0-9]+=/)
-      const wsProxyUrl = new URL('/api/events.mux', nativeProxyBase).href.replace(/^http:/, 'ws:')
-      const wsClient = new WebSocket(wsProxyUrl, { headers: { cookie: nativeCookie! } })
-      const echoed = await new Promise<string>((resolve, reject) => {
-        wsClient.once('open', () => wsClient.send('ping-native'))
-        wsClient.once('message', d => resolve(d.toString()))
-        wsClient.once('error', reject)
-      })
-      expect(echoed).toBe('echo:ping-native')
-      // Verify Native Proxy injected the exchanged cookie and rewrote Host authority on WebSocket upgrade
-      expect(wsUpgradeHeaders.host).toBe(`127.0.0.1:${port01}`)
-      expect(String(wsUpgradeHeaders.cookie ?? '')).toContain('v1.mockcookie')
-      wsClient.close()
-
-      // 4) Persistence reload check
-      registry.dispose()
-      const reloadedRegistry = new DeviceRegistry(
-        join(dir, 'devices.json'),
-        join(dir, 'secrets.json'),
-        {
-          localPort: () => 4080,
-          localWorkspaces: () => [],
-          localSessionUpdatedAt: () => new Map(),
-        },
-        { allowDirectTransport: true },
-      )
-      expect(reloadedRegistry.deviceConfig(DeviceId('dev-legacy'))?.name).toBe('legacy-node')
-      reloadedRegistry.dispose()
-    } finally {
-      for (const client of wss01.clients) client.terminate()
-      wss01.close()
-      server01.closeAllConnections()
-      await new Promise<void>(r => server01.close(() => r()))
-    }
-  })
 })
 
 describe('6. Stability guards', () => {
-  it('keeps a non-default Git port and still drops the default ssh port', () => {
-    expect(normalizeGitRemote('ssh://git@gitlab.example.com:2222/group/repo.git')).toBe(
-      'gitlab.example.com:2222/group/repo',
-    )
-    expect(normalizeGitRemote('https://github.com/org/repo.git')).toBe('github.com/org/repo')
-  })
-
   it('refuses to forward an SSH tunnel anywhere but the remote loopback', () => {
     expect(assertLoopbackForward({ kind: 'ssh', host: 'gpu', remoteBindHost: 'localhost', remotePort: 3080 })).toEqual({
       host: 'localhost',
@@ -2981,40 +1309,11 @@ describe('6b. Native-mode authentication recovery', () => {
 })
 
 describe('7. P2 boundary guards', () => {
-  it('rejects a nested remote event id instead of routing it to another device', () => {
-    const eventId = encodeRemoteEventId(DeviceId('dev-a'), 'event-1')
-    expect(decodeRemoteEventId(eventId)).toEqual({
-      deviceId: DeviceId('dev-a'),
-      remoteEventId: 'event-1',
-    })
-    expect(
-      decodeRemoteEventId(encodeRemoteEventId(DeviceId('dev-a'), 'md-ev~dev-b~event-2')),
-    ).toBeUndefined()
-  })
-
-  it('routes a subagent address only when the child belongs to the same device', () => {
-    const parent = DeviceId('dev-a')
-    expect(isSameDeviceChildSession(parent, encodeRemoteSessionId(parent, 'child-1'))).toBe(true)
-    expect(isSameDeviceChildSession(parent, 'local-child')).toBe(false)
-    expect(
-      isSameDeviceChildSession(parent, encodeRemoteSessionId(DeviceId('dev-b'), 'child-1')),
-    ).toBe(false)
-  })
-
   it('tracks plan-review waterfalls alongside approval and questions', () => {
     expect(pendingInteractionKind('approval/request')).toBe('approval')
     expect(pendingInteractionKind('user-questions/request')).toBe('question')
     expect(pendingInteractionKind('plan-review/request')).toBe('plan-review')
     expect(pendingInteractionKind('other/request')).toBeUndefined()
-  })
-
-  it('returns an empty remote catalog with a failure instead of local models', () => {
-    const catalog = unavailableRemoteCatalog('macos-dev', 'remote device is not connected')
-    expect(catalog.groups).toEqual([])
-    expect(catalog.routableProviders).toEqual([])
-    expect(catalog.failures).toEqual([
-      { id: 'remote:macos-dev', name: 'macos-dev', message: 'remote device is not connected' },
-    ])
   })
 
   it('caps a stalled stream queue instead of growing without bound', () => {
@@ -3266,7 +1565,9 @@ describe('8. Native Settings UI & Streamlined Client State Helpers', () => {
       const settingsHtml = renderToStaticMarkup(
         React.createElement(settingsReg!.component as React.ComponentType<any>, { t: (k: keyof typeof zh) => zh[k] }),
       )
-      expect(settingsHtml).toContain('data-primitive="SegmentedControl"')
+      // No display-mode switch survives: the plugin only has one mode.
+      expect(settingsHtml).not.toContain('data-primitive="SegmentedControl"')
+      expect(settingsHtml).not.toContain('界面模式')
       expect(settingsHtml).toContain('data-primitive="Switch"')
       expect(settingsHtml).toContain('data-primitive="Button"')
       expect(settingsHtml).toContain(zh.devicesHeading)
@@ -3278,22 +1579,13 @@ describe('8. Native Settings UI & Streamlined Client State Helpers', () => {
       expect(bundleReg).toBeDefined()
       expect(bundleReg!.component({ view: 'summary', t: (k: keyof typeof zh) => zh[k] })).toBe(zh.pluginSummary)
 
-      // Overlay renders no device chrome in Aggregated Mode.
+      // The overlay always renders the persistent [本机][device] strip.
       const overlayReg = registeredSlots.get('shell.overlay:multi-device-switcher')
       expect(overlayReg).toBeDefined()
-      const overlayEmptyHtml = renderToStaticMarkup(
-        React.createElement(overlayReg!.component as React.ComponentType<any>, { t: (k: keyof typeof zh) => zh[k] }),
-      )
-      expect(overlayEmptyHtml).not.toContain('dsh-md-overlay-bar')
-      expect(overlayEmptyHtml).not.toContain('dsh-md-native-bar')
-
-      // Native Mode has a persistent [本机][device] strip whose rightmost
-      // action switches back to Aggregated Mode (the Host still owns the mode).
       const baseSnapshot = clientStore.getSnapshot().snapshot
       const nativeSnapshot = {
         ...baseSnapshot,
         revision: baseSnapshot.revision + 10,
-        displayMode: 'native' as const,
         devices: [
           {
             id: DeviceId('dev-a'),
@@ -3310,27 +1602,15 @@ describe('8. Native Settings UI & Streamlined Client State Helpers', () => {
           },
         ],
       }
-      let nextSnapshot: typeof nativeSnapshot = nativeSnapshot
-      const fetchMock = vi.fn(async () => ({
-        json: async () => ({ ok: true, value: { snapshot: nextSnapshot } }),
-      }))
-      vi.stubGlobal('fetch', fetchMock)
-      await clientStore.setDisplayMode('native')
+      ;(clientStore as unknown as { applyIncomingSnapshot: (s: unknown) => void }).applyIncomingSnapshot(nativeSnapshot)
       const nativeHtml = renderToStaticMarkup(
         React.createElement(overlayReg!.component as React.ComponentType<any>, { t: (k: keyof typeof zh) => zh[k] }),
       )
       expect(nativeHtml).toContain('dsh-md-native-bar')
       expect(nativeHtml).toContain(zh.nativeLocalTab)
       expect(nativeHtml).toContain('Dev A')
-      expect(nativeHtml).toContain('dsh-md-native-mode-switch')
-      expect(nativeHtml).toContain(zh.modeAggregated)
-      expect(nativeHtml).toContain(zh.switchToAggregated)
-      nextSnapshot = { ...nativeSnapshot, revision: nativeSnapshot.revision + 1, displayMode: 'aggregated' }
-      // The rightmost button drives the same Host RPC as the Settings switch:
-      // Aggregated Mode clears the selected device tab and restores merger rows.
-      await clientStore.setDisplayMode('aggregated')
-      expect(clientStore.getSnapshot().displayMode).toBe('aggregated')
-      expect(clientStore.getSnapshot().activeNativeDeviceId).toBeUndefined()
+      // No mode switch anywhere in the strip.
+      expect(nativeHtml).not.toContain('dsh-md-native-mode-switch')
 
       // DshSelect renders compliant trigger and options
       const { DshSelect } = await import('../src/client/DshSelect.tsx')
@@ -3347,333 +1627,13 @@ describe('8. Native Settings UI & Streamlined Client State Helpers', () => {
       )
       expect(selectHtml).toContain('dsh-md-select-container')
       expect(selectHtml).toContain('Item 1')
-      expect(zh.targetDeviceSubDesc).toBeDefined()
-      expect(en.targetDeviceSubDesc).toBeDefined()
+      // Locale dictionaries must stay in lockstep after the aggregated keys
+      // were removed.
+      expect(Object.keys(zh).sort()).toEqual(Object.keys(en).sort())
     } finally {
       for (const dispose of disposers) dispose()
       vi.unstubAllGlobals()
       vi.doUnmock('@deepseek-ai/dsh-client-ui-primitives')
-    }
-  })
-})
-
-describe('9. Manual Git match: scan, register, and never run on its own', () => {
-  const sshTransport = { kind: 'ssh' as const, host: 'example.invalid', remotePort: 3080 }
-
-  it('builds a scan script that prunes caches and hidden dirs and reads origin only', () => {
-    const script = buildGitScanScript(['/home/dev', "/home/o'brien"], 4)
-    expect(script).toContain("'/home/dev'")
-    expect(script).toContain("'/home/o'\\''brien'")
-    expect(script).toContain('-maxdepth 5')
-    expect(script).toContain("-name 'node_modules'")
-    expect(script).toContain("-name '.*' ! -name '.git' ! -name '.wt' -prune")
-    expect(script).toContain("-type d -name '.git' -print")
-    expect(script).toContain('remote.origin.url')
-    // No first-remote fallback: a `nas` backup remote must never define identity.
-    expect(script).not.toContain('get-regexp')
-  })
-
-  it('derives scan roots from the home plus registered workspace parents', () => {
-    const roots = deriveScanRoots('/home/u', ['/home/u/dev/组A/repo', '/home/u/dev/repo-two'])
-    expect(roots).toEqual([
-      '/home/u',
-      '/home/u/dev',
-      '/home/u/dev/组A',
-    ])
-  })
-
-  it('parses remote scan output into normalized repositories', () => {
-    const stdout = [
-      '__DSH_REPO__\t/home/u/dev/组A/repo-one\tgit@github.com:ORG/Repo-One.git',
-      '__DSH_REPO__\t/home/u/dev/repo-two\thttps://github.com/org/repo-two',
-      'unstamped noise',
-      '__DSH_REPO__\t\t',
-      '__DSH_REPO__\t/home/u/dev/local-only\tfile:///tmp/not-a-remote',
-    ].join('\n')
-    const repos = parseGitScanOutput(stdout)
-    const byRemote = new Map(repos.map(repo => [repo.gitRemote, repo]))
-    expect(byRemote.get('github.com/org/repo-one')?.path).toBe('/home/u/dev/组A/repo-one')
-    expect(byRemote.get('github.com/org/repo-two')?.path).toBe('/home/u/dev/repo-two')
-    expect(byRemote.size).toBe(2)
-  })
-
-  it('scans grouped repositories and worktrees, but skips hidden state and node_modules', async () => {
-    const root = makeTempDir('dsh-md-scan-')
-    const { execFileSync } = await import('node:child_process')
-    const runGit = (...args: string[]): void => { execFileSync('git', args, { stdio: 'pipe' }) }
-    const writeRepo = (relative: string, origin: string): void => {
-      const repo = join(root, relative)
-      mkdirSync(repo, { recursive: true })
-      runGit('init', '-q', repo)
-      runGit('-C', repo, 'remote', 'add', 'origin', origin)
-    }
-
-    writeRepo('组A/repo-one', 'git@github.com:org/repo-one.git')
-    writeRepo('组B/repo-two', 'https://github.com/org/repo-two')
-    // A nested dependency repository must never be a project.
-    writeRepo('组A/repo-one/node_modules/dep', 'git@github.com:dep/dep.git')
-    const main = join(root, '组A/repo-one'), worktree = join(root, '.wt', 'repo-one-wt')
-    runGit('-C', main, '-c', 'user.name=test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-qm', 'fixture')
-    mkdirSync(join(root, '.wt'), { recursive: true })
-    runGit('-C', main, 'worktree', 'add', '-qb', 'scan-fixture', worktree)
-    writeRepo('.hidden/repo-four', 'git@github.com:org/repo-four.git')
-
-    const repos = scanLocalGitRepos([root], { maxDepth: 4 })
-    expect(repos.map(repo => repo.gitRemote).sort()).toEqual([
-      'github.com/org/repo-one',
-      'github.com/org/repo-one',
-      'github.com/org/repo-two',
-    ])
-    expect(repos.map(repo => repo.path)).toContain(worktree)
-    const broken = makeTempDir('dsh-md-broken-worktree-')
-    writeFileSync(join(broken, '.git'), 'gitdir: missing-metadata')
-    expect(() => scanLocalGitRepos([broken])).toThrow('Unable to read Git origin')
-  })
-
-  it('keeps the shortest path per origin', () => {
-    const repos: ScannedRepository[] = [
-      { path: '/a/dev/deep/repo', rawOrigin: 'git@github.com:org/repo.git', gitRemote: 'github.com/org/repo' },
-      { path: '/a/dev/repo', rawOrigin: 'https://github.com/org/repo.git', gitRemote: 'github.com/org/repo' },
-    ]
-    expect(primaryRepoByOrigin(repos).get('github.com/org/repo')?.path).toBe('/a/dev/repo')
-  })
-
-  it('registers seeds on devices that were missing them and reports the rest', async () => {
-    const created: { deviceId: string; path: string }[] = []
-    const noted: { deviceId: string; path: string; raw: string }[] = []
-    const progress: GitMatchRun[] = []
-    const localRepo = makeTempDir('dsh-md-match-')
-
-    const runner = new GitMatchRunner({
-      devices: () => [
-        {
-          deviceId: LOCAL_DEVICE_ID,
-          deviceName: 'Local',
-          state: 'connected',
-          local: true,
-          home: localRepo,
-          workspacePaths: [],
-        },
-        {
-          deviceId: DeviceId('dev-a'),
-          deviceName: 'ubuntu-dev',
-          state: 'connected',
-          local: false,
-          home: '/home/a',
-          workspacePaths: ['/home/a/dev/proj-one'],
-        },
-        {
-          deviceId: DeviceId('dev-b'),
-          deviceName: 'macos-dev',
-          state: 'connected',
-          local: false,
-          home: '/Users/b',
-          workspacePaths: ['/Users/b/dev/proj-two'],
-        },
-      ],
-      discoverRemoteOrigins: async (deviceId) => new Map(
-        deviceId === 'dev-a'
-          ? [['/home/a/dev/proj-one', 'git@github.com:org/proj-one.git']]
-          : [['/Users/b/dev/proj-two', 'https://github.com/org/proj-two.git']],
-      ),
-      scanRemoteRepos: async (deviceId) => ({
-        ok: true,
-        repos: deviceId === 'dev-a'
-          ? [{ path: '/home/a/dev/proj-two', rawOrigin: 'git@github.com:org/proj-two.git', gitRemote: 'github.com/org/proj-two' }]
-          : [{ path: '/Users/b/dev/proj-one', rawOrigin: 'https://github.com/org/proj-one.git', gitRemote: 'github.com/org/proj-one' }],
-      }),
-      scanLocalRepos: () => [],
-      createLocalWorkspace: async () => ({ ok: true }),
-      createRemoteWorkspace: async (deviceId, path) => {
-        created.push({ deviceId, path })
-        return { ok: true }
-      },
-      noteOrigin: (deviceId, path, raw) => {
-        noted.push({ deviceId, path, raw })
-      },
-      localHome: () => localRepo,
-      onProgress: run => {
-        progress.push(run)
-      },
-    })
-
-    const final = await runner.execute()
-    expect(final.status).toBe('completed')
-    expect(final.createdCount).toBe(2)
-    expect(final.alreadyTrackedCount).toBe(2)
-    expect(final.notFoundCount).toBe(2)
-    expect(final.reports).toHaveLength(3)
-    expect(created).toEqual(expect.arrayContaining([
-      { deviceId: 'dev-a', path: '/home/a/dev/proj-two' },
-      { deviceId: 'dev-b', path: '/Users/b/dev/proj-one' },
-    ]))
-    expect(noted).toEqual(expect.arrayContaining([
-      { deviceId: 'dev-b', path: '/Users/b/dev/proj-one', raw: 'https://github.com/org/proj-one.git' },
-    ]))
-    expect(progress[0]?.status).toBe('running')
-    expect(progress.some(run => run.phase === 'scanning')).toBe(true)
-    expect(progress.at(-1)?.phase).toBe('finished')
-    expect(final.finishedAt).toBeTypeOf('number')
-    expect(runner.running).toBe(false)
-  })
-
-  it('reports an unreachable device instead of pretending the scan succeeded', async () => {
-    const progress: GitMatchRun[] = []
-    const runner = new GitMatchRunner({
-      devices: () => [
-        {
-          deviceId: LOCAL_DEVICE_ID,
-          deviceName: 'Local',
-          state: 'connected',
-          local: true,
-          home: '/home/u',
-          workspacePaths: ['/home/u/dev/repo'],
-        },
-        {
-          deviceId: DeviceId('dev-offline'),
-          deviceName: 'arch-dev',
-          state: 'error',
-          local: false,
-          workspacePaths: [],
-        },
-      ],
-      discoverRemoteOrigins: async () => new Map(),
-      scanRemoteRepos: async () => ({ ok: false, error: 'ssh: connect to host arch-dev: No route to host' }),
-      scanLocalRepos: () => [],
-      createLocalWorkspace: async () => ({ ok: true }),
-      createRemoteWorkspace: async () => ({ ok: true }),
-      noteOrigin: () => {},
-      localHome: () => '/home/u',
-      onProgress: run => {
-        progress.push(run)
-      },
-      now: () => 1_700_000_000_000,
-    })
-
-    const final = await runner.execute()
-    expect(final.status).toBe('completed')
-    expect(final.createdCount).toBe(0)
-    const offline = final.reports.find(report => report.deviceId === 'dev-offline')
-    expect(offline?.error).toContain('Device is not connected')
-    expect(progress.length).toBeGreaterThan(0)
-  })
-
-  it('does not classify unmatched seeds as missing after a truncated scan', async () => {
-    const runner = new GitMatchRunner({
-      devices: () => [
-        { deviceId: DeviceId('dev-a'), deviceName: 'A', state: 'connected', local: false, workspacePaths: ['/home/a/repo'] },
-        { deviceId: DeviceId('dev-b'), deviceName: 'B', state: 'connected', local: false, workspacePaths: [] },
-      ],
-      discoverRemoteOrigins: async deviceId => new Map(deviceId === 'dev-a' ? [['/home/a/repo', 'https://example.com/org/repo.git']] : []),
-      scanRemoteRepos: async deviceId => deviceId === 'dev-b'
-        ? { ok: true, repos: [], truncated: true }
-        : { ok: true, repos: [] },
-      scanLocalRepos: () => [],
-      createLocalWorkspace: async () => ({ ok: true }),
-      createRemoteWorkspace: async () => ({ ok: true }),
-      noteOrigin: () => {}, localHome: () => '/home/u', onProgress: () => {},
-    })
-    const final = await runner.execute()
-    expect(final.notFoundCount).toBe(0)
-    expect(final.reports.find(report => report.deviceId === 'dev-b')?.error).toContain('repository limit')
-  })
-
-  it('aborts an in-flight remote scan when cancelled', async () => {
-    let runner: GitMatchRunner
-    let cancelReturned = false
-    let signalAborted = false
-    runner = new GitMatchRunner({
-      devices: () => [{ deviceId: DeviceId('dev-a'), deviceName: 'A', state: 'connected', local: false, workspacePaths: [] }],
-      discoverRemoteOrigins: async () => new Map(),
-      scanRemoteRepos: async (_deviceId, _roots, signal) => new Promise(resolve => {
-        const finish = () => { signalAborted = signal?.aborted === true; resolve({ ok: false, error: 'cancelled', repos: [] }) }
-        if (signal?.aborted === true) finish()
-        else signal?.addEventListener('abort', finish, { once: true })
-        queueMicrotask(() => { cancelReturned = runner.cancel() })
-      }),
-      scanLocalRepos: () => [],
-      createLocalWorkspace: async () => ({ ok: true }), createRemoteWorkspace: async () => ({ ok: true }),
-      noteOrigin: () => {}, localHome: () => '/home/u', onProgress: () => {},
-    })
-    const final = await runner.execute()
-    expect(cancelReturned).toBe(true)
-    expect(signalAborted).toBe(true)
-    expect(final.status).toBe('cancelled')
-  })
-
-  it('stops between steps when cancelled', async () => {
-    let runner: GitMatchRunner
-    const progress: GitMatchRun[] = []
-    runner = new GitMatchRunner({
-      devices: () => [
-        { deviceId: LOCAL_DEVICE_ID, deviceName: 'Local', state: 'connected', local: true, home: '/home/u', workspacePaths: [] },
-        { deviceId: DeviceId('dev-a'), deviceName: 'ubuntu-dev', state: 'connected', local: false, workspacePaths: [] },
-      ],
-      discoverRemoteOrigins: async () => new Map(),
-      scanRemoteRepos: async () => ({ ok: true, repos: [] }),
-      scanLocalRepos: () => [],
-      createLocalWorkspace: async () => ({ ok: true }),
-      createRemoteWorkspace: async () => ({ ok: true }),
-      noteOrigin: () => {},
-      localHome: () => '/home/u',
-      onProgress: run => {
-        progress.push(run)
-        if (run.phase === 'scanning') runner.cancel()
-      },
-    })
-
-    const final = await runner.execute()
-    expect(final.status).toBe('cancelled')
-    expect(final.phase).toBe('finished')
-    expect(progress.at(-1)?.status).toBe('cancelled')
-  })
-
-  it('starts idle so nothing scans or registers before the user clicks', () => {
-    expect(createIdleGitMatch()).toMatchObject({
-      status: 'idle',
-      createdCount: 0,
-      totalDevices: 0,
-      totalProjects: 0,
-      reports: [],
-    })
-    expect(titleFromPath('/home/u/dev/组A/repo-one')).toBe('repo-one')
-  })
-
-  it('passes the resolved identity to one-shot SSH commands', async () => {
-    const calls: { command: string; args: string[] }[] = []
-    setSshSpawn((command, args) => {
-      calls.push({ command, args: [...args] })
-      const stdout = new EventEmitter()
-      const stderr = new EventEmitter()
-      const proc = new EventEmitter() as EventEmitter & {
-        stdout: EventEmitter
-        stderr: EventEmitter
-        stdin: null
-        kill: () => boolean
-      }
-      proc.stdout = stdout
-      proc.stderr = stderr
-      proc.stdin = null
-      proc.kill = () => true
-      queueMicrotask(() => {
-        stdout.emit('data', Buffer.from('__DSH_GIT_0__\tgit@github.com:org/repo.git\n'))
-        proc.emit('close', 0)
-      })
-      return proc as never
-    })
-    try {
-      const res = await execSshCommand(
-        { ...sshTransport, host: 'macos-dev', privateKeyPath: '~/.ssh/macos-dev' },
-        'git -C /Users/b/dev/repo config --get remote.origin.url',
-        1000,
-      )
-      expect(res.ok).toBe(true)
-      const args = calls[0]?.args ?? []
-      expect(args).toContain('-i')
-      expect(args).toContain('IdentitiesOnly=yes')
-      expect(args.at(-1)).toContain('remote.origin.url')
-    } finally {
-      setSshSpawn(null)
     }
   })
 })
@@ -3689,88 +1649,6 @@ describe('10. Native Pane bridge, injection and view decisions', () => {
     expect(NATIVE_BRIDGE_SCRIPT).toContain('__ModuleLoader__')
     expect(NATIVE_BRIDGE_SCRIPT).toContain('open-session')
     expect(NATIVE_BRIDGE_SCRIPT).toContain('selection')
-  })
-
-  it('decides pane visibility conservatively and never covers a local session', () => {
-    const base = {
-      id: DeviceId('dev-a'),
-      name: 'device A',
-      enabled: true,
-      state: 'connected',
-      transportKind: 'ssh',
-      targetSummary: 'ssh://a',
-      keepNativeAlive: true,
-      protocolVersion: '0.2',
-      realtime: true,
-      reconnectAttempt: 0,
-      sessionCount: 1,
-      runningSessionCount: 0,
-      pendingApprovalCount: 0,
-      workspaceCount: 1,
-    } as DeviceView
-    const target = nativePaneTarget('aggregated', encodeRemoteSessionId(DeviceId('dev-a'), 'rsess-1'))
-    expect(target).toEqual({ deviceId: 'dev-a', rawSessionId: 'rsess-1' })
-    expect(nativePaneTarget('native', encodeRemoteSessionId(DeviceId('dev-a'), 'rsess-1'))).toBeUndefined()
-    expect(nativePaneTarget('aggregated', 'lsess-1')).toBeUndefined()
-
-    const ready = { ...base, nativePaneState: 'ready', nativePaneSessionId: 'rsess-1' } as DeviceView
-    expect(shouldShowNativePane({ enabled: true, target, device: ready, geometryReady: true })).toBe(true)
-    expect(shouldShowNativePane({ enabled: false, target, device: ready, geometryReady: true })).toBe(false)
-    expect(shouldShowNativePane({ enabled: true, target, device: ready, geometryReady: false })).toBe(false)
-    expect(shouldShowNativePane({
-      enabled: true,
-      target,
-      device: { ...ready, nativePaneSessionId: 'other' },
-      geometryReady: true,
-    })).toBe(false)
-    expect(shouldShowNativePane({
-      enabled: true,
-      target,
-      device: { ...ready, state: 'error', nativePaneState: 'failed' },
-      geometryReady: true,
-    })).toBe(true)
-    expect(shouldShowNativePane({
-      enabled: true,
-      target,
-      device: { ...base, state: 'error' },
-      geometryReady: true,
-    })).toBe(true)
-    expect(shouldShowNativePane({
-      enabled: true,
-      target,
-      device: { ...ready, state: 'connected', nativePaneState: 'failed' },
-      geometryReady: true,
-    })).toBe(false)
-    expect(shouldShowNativePane({
-      enabled: true,
-      target,
-      device: { ...ready, authState: 'required', nativePaneState: 'idle' },
-      geometryReady: true,
-    })).toBe(true)
-  })
-
-  it('ends a follow stream normally only after the opening frame', () => {
-    expect(shouldEndFollowStream(new Error('closed'), false, false)).toBe(false)
-    expect(shouldEndFollowStream(new Error('closed'), true, false)).toBe(true)
-    expect(shouldEndFollowStream(
-      Object.assign(new Error('cancelled'), { code: 'gateway/cancelled' }),
-      true,
-      true,
-    )).toBe(true)
-    expect(shouldEndFollowStream(
-      Object.assign(new Error('not found'), { code: 'session/not-found' }),
-      true,
-      true,
-    )).toBe(false)
-  })
-
-  it('reuses a blank only on the device that owns it', () => {
-    const devA = DeviceId('dev-a')
-    const devB = DeviceId('dev-b')
-    expect(reusableSessionIdFor(encodeRemoteSessionId(devA, 'rsess-1'), devA)).toBe('rsess-1')
-    expect(reusableSessionIdFor(encodeRemoteSessionId(devA, 'rsess-1'), devB)).toBeUndefined()
-    expect(reusableSessionIdFor('lsess-1', LOCAL_DEVICE_ID)).toBe('lsess-1')
-    expect(reusableSessionIdFor(undefined, devA)).toBeUndefined()
   })
 
   it('injects HTML through the proxy, serves the bridge script and routes bridge commands', async () => {
@@ -3947,84 +1825,6 @@ describe('10. Native Pane bridge, injection and view decisions', () => {
     }
   })
 
-  it('bounds bridge titles and resolves window chrome for native and pane surfaces', () => {
-    expect(sanitizeBridgeTitle('Fix\nlogin \u0000 — DSH')).toBe('Fix login — DSH')
-    expect(sanitizeBridgeTitle('')).toBeUndefined()
-    expect(sanitizeBridgeTitle({ title: 'x' })).toBeUndefined()
-    expect(sanitizeBridgeTitle('x'.repeat(400))).toHaveLength(300)
-
-    const makeDevice = (
-      id: string,
-      name: string,
-      state: DeviceConnectionState,
-      extra: Partial<DeviceView> = {},
-    ): DeviceView => ({
-      id: DeviceId(id),
-      name,
-      enabled: true,
-      state,
-      transportKind: 'ssh',
-      targetSummary: `ssh://${name}`,
-      keepNativeAlive: true,
-      protocolVersion: '0.2',
-      realtime: true,
-      reconnectAttempt: 0,
-      sessionCount: 1,
-      runningSessionCount: 0,
-      pendingApprovalCount: 0,
-      workspaceCount: 1,
-      ...extra,
-    })
-
-    const device = makeDevice('dev-title', 'ubuntu-dev', 'connected', {
-      nativePaneState: 'ready',
-      nativePaneSessionId: 'rsess-1',
-      nativePaneTitle: 'Fix login — DSH',
-    })
-    expect(resolveWindowTitle({
-      displayMode: 'native',
-      activeNativeDeviceId: device.id,
-      devices: [device],
-      nativePaneEnabled: true,
-    })).toBe('Fix login — DSH')
-    expect(resolveWindowTitle({
-      displayMode: 'native',
-      activeNativeDeviceId: device.id,
-      devices: [{ ...device, nativePaneTitle: undefined }],
-      nativePaneEnabled: true,
-    })).toBe('ubuntu-dev')
-    expect(resolveWindowTitle({
-      displayMode: 'native',
-      devices: [device],
-      nativePaneEnabled: true,
-    })).toBeUndefined()
-
-    expect(resolveWindowTitle({
-      displayMode: 'aggregated',
-      activeSessionId: encodeRemoteSessionId(device.id, 'rsess-1'),
-      devices: [device],
-      nativePaneEnabled: true,
-    })).toBe('Fix login — DSH')
-    expect(resolveWindowTitle({
-      displayMode: 'aggregated',
-      activeSessionId: encodeRemoteSessionId(device.id, 'rsess-2'),
-      devices: [device],
-      nativePaneEnabled: true,
-    })).toBeUndefined()
-    expect(resolveWindowTitle({
-      displayMode: 'aggregated',
-      activeSessionId: 'local-session',
-      devices: [device],
-      nativePaneEnabled: true,
-    })).toBeUndefined()
-    expect(resolveWindowTitle({
-      displayMode: 'aggregated',
-      activeSessionId: encodeRemoteSessionId(device.id, 'rsess-1'),
-      devices: [device],
-      nativePaneEnabled: false,
-    })).toBeUndefined()
-  })
-
   it('overrides document.title and restores the latest DSH-written title', async () => {
     const proto = {}
     Object.defineProperty(proto, 'title', {
@@ -4084,14 +1884,6 @@ describe('10. Native Pane bridge, injection and view decisions', () => {
     }
   })
 
-  it('maps only remote Session ids to their owning device', async () => {
-    const { remoteDeviceForSession } = await import('../src/client/state.ts')
-    const deviceId = DeviceId('dev-mode-context')
-    expect(remoteDeviceForSession(encodeRemoteSessionId(deviceId, 'rsess-1'))).toBe(deviceId)
-    expect(remoteDeviceForSession('local-session')).toBeUndefined()
-    expect(remoteDeviceForSession(undefined)).toBeUndefined()
-  })
-
   it('falls back to another loopback port when the persisted one is occupied', async () => {
     const blocker = createServer((_req, res) => { res.end('occupied') })
     await new Promise<void>(resolve => blocker.listen(0, '127.0.0.1', resolve))
@@ -4123,16 +1915,12 @@ describe('10. Native Pane bridge, injection and view decisions', () => {
     }
   })
 
-  it('wires bridge readiness, selection and open commands into the Host snapshot', async () => {
+  it('wires bridge readiness, selection and group state into the Host snapshot', async () => {
     const dir = makeTempDir('dsh-md-pane-')
     const registry = new DeviceRegistry(
       join(dir, 'devices.json'),
       join(dir, 'secrets.json'),
-      {
-        localPort: () => 3080,
-        localWorkspaces: () => [],
-        localSessionUpdatedAt: () => new Map(),
-      },
+      { localPort: () => 3080 },
       { allowDirectTransport: true },
     )
     const deviceId = DeviceId('dev-pane')
@@ -4166,14 +1954,6 @@ describe('10. Native Pane bridge, injection and view decisions', () => {
         () => registry.snapshot().devices.find(device => device.id === deviceId)?.nativePaneState === 'ready',
       )
 
-      const namespaced = encodeRemoteSessionId(deviceId, 'rsess-1')
-      registry.setActiveSession(namespaced, 1)
-      await waitForCondition(
-        () => messages.some(message => message.type === 'open-session' && message.sessionId === 'rsess-1'),
-      )
-      await waitForCondition(
-        () => messages.some(message => message.type === 'set-embedded' && message.enabled === true),
-      )
       ws.send(JSON.stringify({ type: 'selection', sessionId: 'rsess-1' }))
       await waitForCondition(
         () => registry.snapshot().devices.find(device => device.id === deviceId)?.nativePaneSessionId === 'rsess-1',
@@ -4183,13 +1963,6 @@ describe('10. Native Pane bridge, injection and view decisions', () => {
         () => messages.some(message => message.type === 'group-expansion' && message.groups?.['ws-1'] === true),
       )
 
-      // Entering Native Mode must carry the aggregated remote Session into the
-      // device tab rather than landing on 本机.
-      const openCount = (): number =>
-        messages.filter(message => message.type === 'open-session' && message.sessionId === 'rsess-1').length
-      const beforeNative = openCount()
-      registry.setDisplayMode('native')
-      await waitForCondition(() => openCount() > beforeNative)
     } finally {
       ws?.close()
       registry.dispose()
@@ -4200,46 +1973,6 @@ describe('10. Native Pane bridge, injection and view decisions', () => {
     expect(saved.nativeGroups?.['dev-pane']).toEqual({ 'ws-1': true, 'ws-2': false })
   })
 
-  it('persists the nativePane preference with a true default', async () => {
-    const dir = makeTempDir('dsh-md-pane-pref-')
-    const dataFile = join(dir, 'devices.json')
-    const first = new DeviceRegistry(
-      dataFile,
-      join(dir, 'secrets.json'),
-      {
-        localPort: () => 3080,
-        localWorkspaces: () => [],
-        localSessionUpdatedAt: () => new Map(),
-      },
-      { allowDirectTransport: true },
-    )
-    expect(first.ui().nativePane).toBe(true)
-    const plane = new MultiDeviceControlPlane(first)
-    const toggled = await plane.dispatch({
-      action: 'setUiPreferences',
-      payload: { nativePane: false },
-    })
-    expect(toggled.ok).toBe(true)
-    expect((toggled as { value: MultiDeviceSnapshot }).value.ui?.nativePane).toBe(true)
-    expect(first.ui().nativePane).toBe(false) // Legacy preference retained; independent catalog requires native content.
-    first.dispose()
-
-    const second = new DeviceRegistry(
-      dataFile,
-      join(dir, 'secrets.json'),
-      {
-        localPort: () => 3080,
-        localWorkspaces: () => [],
-        localSessionUpdatedAt: () => new Map(),
-      },
-      { allowDirectTransport: true },
-    )
-    try {
-      expect(second.ui().nativePane).toBe(false)
-    } finally {
-      second.dispose()
-    }
-  })
 })
 
 /** Capture parsed bridge commands on a test WebSocket. */
@@ -4645,28 +2378,6 @@ describe('11. Bridge runtime loader capture', () => {
 })
 
 describe('12. Audit regressions: multi-device loop prevention, userQuestions routing, loopback proxy, and state integrity', () => {
-  it('prevents double-namespacing and rejects already-namespaced session/workspace/event IDs', () => {
-    const devA = DeviceId('dev-a')
-    const devB = DeviceId('dev-b')
-    const onceSession = encodeRemoteSessionId(devA, 'sess-1')
-    expect(isNamespacedSessionId(onceSession)).toBe(true)
-    expect(isNamespacedSessionId('sess-1')).toBe(false)
-    // Encoding an already-namespaced session ID is a no-op (never creates md~dev-b~md~dev-a~sess-1)
-    expect(encodeRemoteSessionId(devB, onceSession)).toBe(onceSession)
-    // Double-prefixed session IDs are rejected by decodeSessionId
-    expect(decodeSessionId(`md~dev-b~${onceSession}`).isRemote).toBe(false)
-
-    const onceWs = encodeRemoteWorkspaceId(devA, 'ws-1')
-    const logicalWs = encodeLogicalWorkspaceId('git', 'github.com/org/repo')
-    expect(isNamespacedWorkspaceId(onceWs)).toBe(true)
-    expect(isNamespacedWorkspaceId(logicalWs)).toBe(true)
-    expect(encodeRemoteWorkspaceId(devB, onceWs)).toBe(onceWs)
-    expect(decodeRemoteWorkspaceId(`md-ws~dev-b~${onceWs}`).isRemote).toBe(false)
-
-    const onceEv = encodeRemoteEventId(devA, 'ev-1')
-    expect(isNamespacedEventId(onceEv)).toBe(true)
-  })
-
   it('classifies plan-review intent inside user-questions/request waterfalls', () => {
     expect(
       pendingInteractionKind('user-questions/request', {
@@ -4685,21 +2396,6 @@ describe('12. Audit regressions: multi-device loop prevention, userQuestions rou
         questions: [{ id: 'q1', question: 'Which port?' }],
       }),
     ).toBe('question')
-  })
-
-  it('aligns loopback proxy URLs to the current page hostname (localhost vs 127.0.0.1)', () => {
-    vi.stubGlobal('window', { location: { hostname: 'localhost' } })
-    try {
-      expect(resolveSameSiteProxyUrl('http://127.0.0.1:41234/?md_token=abc')).toBe(
-        'http://localhost:41234/?md_token=abc',
-      )
-      vi.stubGlobal('window', { location: { hostname: '127.0.0.1' } })
-      expect(resolveSameSiteProxyUrl('http://localhost:41234/?md_token=abc')).toBe(
-        'http://127.0.0.1:41234/?md_token=abc',
-      )
-    } finally {
-      vi.unstubAllGlobals()
-    }
   })
 
   it('retains local session unread entries across a DeviceRegistry restart', () => {
@@ -4755,13 +2451,6 @@ describe('12. Audit regressions: multi-device loop prevention, userQuestions rou
     }
   })
 
-  it('normalizes remote POSIX scan roots without corrupting them on Windows-style path inputs', () => {
-    const roots = deriveScanRoots('/home/dev', ['/home/dev/work/proj-a', '/home/dev/work/proj-b'])
-    expect(roots).toEqual(['/home/dev', '/home/dev/work'])
-    const winRoots = deriveScanRoots('C:\\Users\\dev', ['C:\\Users\\dev\\work\\proj-a'])
-    expect(winRoots).toEqual(['C:\\Users\\dev', 'C:\\Users\\dev\\work'])
-  })
-
   it('namespaces subagentCatalog entries in session summaries and projections', () => {
     const devId = DeviceId('dev-sub')
     const client = new RemoteDeviceClient(
@@ -4804,221 +2493,10 @@ describe('12. Audit regressions: multi-device loop prevention, userQuestions rou
     expect(catalog[0]?.parentSessionId).toBe(encodeRemoteSessionId(devId, 'parent-1'))
   })
 
-  it('routes userQuestions/attachWait and userQuestions/answer and downgrades local session/not-found waterfall errors to next', async () => {
-    const dir = makeTempDir('dsh-md-uq-')
-    const reg = new DeviceRegistry(
-      join(dir, 'reg.json'),
-      join(dir, 'sec.json'),
-      {
-        localPort: () => 3080,
-        localWorkspaces: () => [],
-        localSessionUpdatedAt: () => new Map(),
-      },
-      { enableTunnels: false, enableNativeProxy: false },
-    )
-    const devId = DeviceId('dev-q')
-    const fakeClient = {
-      id: devId,
-      deviceConfig: { id: devId, name: 'QHost', enabled: true, transport: { kind: 'ssh', host: 'q' }, auth: { mode: 'auto' } },
-      isConnected: () => true,
-      toView: () => ({ id: devId, name: 'QHost', state: 'connected', reconnectAttempt: 0 }),
-      sessionSummaries: () => [],
-      workspaceItems: () => [],
-      archivedIds: () => [],
-      pinnedIds: () => [],
-      controlProjections: () => new Map(),
-      pendingInteractionList: () => [],
-      openStream: async function* (endpoint: string, args: Record<string, unknown>) {
-        yield { endpoint, args, remainingMs: 120_000 }
-      },
-      invokeUnary: async (ns: string, method: string, args: Record<string, unknown>) => ({
-        ns,
-        method,
-        args,
-        accepted: true,
-      }),
-      respondWaterfall: vi.fn(async () => ({ ok: true })),
-      catalogSnapshot: () => ({
-        deviceId: devId,
-        syncedAt: 0,
-        protocolVersion: '0.2',
-        sessions: [],
-        workspaces: [],
-        archivedSessionIds: [],
-        pinnedSessionIds: [],
-      }),
-      stop: () => {},
-    }
-    ;(reg as unknown as { clients: Map<DeviceId, unknown> }).clients.set(devId, fakeClient)
-
-    const sessionCtrl: SessionControllerLike = {
-      list: async () => ({ items: [] }),
-      search: async () => ({ items: [], hasMore: false }),
-      create: async () => ({ sessionId: 'l-1' }),
-      selectModel: async () => ({ selected: {} }),
-      modelCatalog: async () => ({}),
-      rename: async () => ({ title: 't', seq: 1 }),
-      fork: async () => ({ sessionId: 'l-2' }),
-      prompt: async () => ({ accepted: true }),
-      attachment: async () => ({}),
-      updateQueue: async () => ({ accepted: true }),
-      cancel: () => ({ accepted: true }),
-      page: async () => ({ records: [], hasMore: false }),
-      follow: async function* () {},
-      projections: async () => null,
-      control: async function* () {},
-    }
-    const wsCtrl: WorkspaceControllerLike = {
-      create: async () => ({ workspace: {}, created: true }),
-      rename: async () => ({ workspace: {} }),
-      delete: async () => ({ deleted: true }),
-      insertBefore: async () => ({ workspaceIds: [] }),
-      insertSessionBefore: async () => ({ workspace: {} }),
-      archiveSession: async () => ({ archivedSessionIds: [] }),
-      unarchiveSession: async () => ({ archivedSessionIds: [] }),
-      pinSession: async () => ({ pinnedSessionIds: [] }),
-      unpinSession: async () => ({ pinnedSessionIds: [] }),
-      follow: async function* () {},
-    }
-    const gw: TypertGatewayLike = {
-      wireStream: {
-        open: async () => (async function* () {})(),
-        failure: () => ({ code: 'err', message: 'err', details: {} }),
-      },
-      dispatchRpc: async () => ({ ok: true, value: 'local' }),
-    }
-
-    const dispose = installAggregatedGateway02(reg, sessionCtrl, wsCtrl, gw)
-    try {
-      const waitStream = await gw.wireStream.open(
-        'userQuestions/attachWait',
-        { args: { agent: encodeRemoteSessionId(devId, 'raw-sess-9'), callId: 'call-1' } },
-        (async function* () {})(),
-        undefined,
-        new AbortController().signal,
-      )
-      const waitFrames: unknown[] = []
-      for await (const f of waitStream) waitFrames.push(f)
-      expect(waitFrames).toEqual([
-        {
-          endpoint: 'userQuestions/attachWait',
-          args: { agent: 'raw-sess-9', callId: 'call-1' },
-          remainingMs: 120_000,
-        },
-      ])
-
-      const ansRes = await gw.dispatchRpc!(
-        'userQuestions/answer',
-        { args: { agent: encodeRemoteSessionId(devId, 'raw-sess-9'), callId: 'call-1', answers: [] } },
-        new AbortController().signal,
-        undefined,
-      )
-      expect(ansRes.ok).toBe(true)
-      expect(ansRes.value).toMatchObject({
-        ns: 'userQuestions',
-        method: 'answer',
-        args: { agent: 'raw-sess-9', callId: 'call-1', answers: [] },
-      })
-
-      // Local mirror `session/not-found` rejection must be downgraded to `{ kind: 'next' }`
-      const wfRes = await gw.dispatchRpc!(
-        '$events/result',
-        {
-          args: {
-            clientId: 'c1',
-            eventId: encodeRemoteEventId(devId, 'ev-77'),
-            outcome: {
-              kind: 'rejected',
-              error: { name: 'RemoteError', code: 'session/not-found', message: 'not found' },
-            },
-          },
-        },
-        new AbortController().signal,
-        undefined,
-      )
-      expect(wfRes.ok).toBe(true)
-      expect(fakeClient.respondWaterfall).toHaveBeenCalledWith(
-        'ev-77',
-        { kind: 'next' },
-        expect.anything(),
-      )
-    } finally {
-      dispose()
-      reg.dispose()
-    }
-  })
-
-  it('notifies workspace listeners on setPreferredDevice, setMemberExcluded, setCustomTitle, and manual rules', async () => {
-    const dir = makeTempDir('dsh-md-cp-wake-')
-    const reg = new DeviceRegistry(
-      join(dir, 'reg.json'),
-      join(dir, 'sec.json'),
-      {
-        localPort: () => 3080,
-        localWorkspaces: () => [],
-        localSessionUpdatedAt: () => new Map(),
-      },
-      { enableTunnels: false, enableNativeProxy: false },
-    )
-    let workspaceWakes = 0
-    reg.onWorkspacesChanged(() => { workspaceWakes += 1 })
-    const cp = new MultiDeviceControlPlane(reg)
-    try {
-      await cp.dispatch({
-        action: 'setPreferredDevice',
-        payload: { logicalWorkspaceId: 'md-lws~git~github.com/org/repo', deviceId: 'dev-1' },
-      })
-      expect(workspaceWakes).toBe(1)
-      await cp.dispatch({
-        action: 'setMemberExcluded',
-        payload: { memberKey: 'dev-1:/repo', excluded: true },
-      })
-      expect(workspaceWakes).toBe(2)
-      await cp.dispatch({
-        action: 'setCustomTitle',
-        payload: { logicalWorkspaceId: 'md-lws~git~github.com/org/repo', title: 'Custom' },
-      })
-      expect(workspaceWakes).toBe(3)
-      await cp.dispatch({
-        action: 'upsertManualRule',
-        payload: { id: 'r1', title: 'Rule 1', memberKeys: ['dev-1:/repo'] },
-      })
-      expect(workspaceWakes).toBe(4)
-      await cp.dispatch({
-        action: 'removeManualRule',
-        payload: { ruleId: 'r1' },
-      })
-      expect(workspaceWakes).toBe(5)
-    } finally {
-      reg.dispose()
-    }
-  })
 })
 
 
-describe('0d. Unread counters for Native tabs and Aggregated rows', () => {
-  /** Minimal logical workspace fixture; nesting only depends on path + sessionIds. */
-  function logicalWorkspace(
-    id: string,
-    path: string,
-    sessionIds: readonly string[],
-  ): LogicalWorkspaceView {
-    return {
-      logicalWorkspaceId: id,
-      title: id,
-      kind: 'single',
-      targetDeviceId: DeviceId('dev-a'),
-      targetPath: path,
-      effectiveTargetDeviceId: DeviceId('dev-a'),
-      effectiveTargetPath: path,
-      effectiveTargetOnline: true,
-      members: [],
-      sessionIds,
-      createdAt: '2026-01-01T00:00:00.000Z',
-      updatedAt: '2026-01-01T00:00:00.000Z',
-    }
-  }
-
+describe('0d. Unread counters for the device tab strip', () => {
   it('drops archived and subagent completions from the countable unread set', () => {
     const remoteArchived = encodeRemoteSessionId(DeviceId('dev-a'), 's-archived')
     const remoteSubagent = encodeRemoteSessionId(DeviceId('dev-a'), 's-sub')
@@ -5055,48 +2533,6 @@ describe('0d. Unread counters for Native tabs and Aggregated rows', () => {
     expect(grouped.has(DeviceId('dev-b'))).toBe(false)
   })
 
-  it('counts only Session IDs that belong to a workspace', () => {
-    const unread = new Set(['s-1', 's-2', 's-9'])
-    expect(unreadCountInSessions(unread, ['s-1', 's-3'])).toBe(1)
-    expect(unreadCountInSessions(unread, [])).toBe(0)
-    expect(unreadCountInSessions(new Set(), ['s-1'])).toBe(0)
-  })
-
-  it('rolls unread counts up through nested workspaces', () => {
-    const workspaces = [
-      logicalWorkspace('ws-parent', '/srv/repo', ['s-parent']),
-      logicalWorkspace('ws-child', '/srv/repo/packages/app', ['s-child']),
-      logicalWorkspace('ws-grandchild', '/srv/repo/packages/app/tests', ['s-grandchild']),
-      logicalWorkspace('ws-lookalike', '/srv/repo-2', ['s-lookalike']),
-    ]
-    const unread = new Set(['s-child', 's-grandchild', 's-lookalike'])
-    const counts = workspaceUnreadCounts(workspaces, unread)
-    expect(counts.get('ws-parent')).toBe(2)
-    expect(counts.get('ws-child')).toBe(2)
-    expect(counts.get('ws-grandchild')).toBe(1)
-    // `/srv/repo-2` is a sibling directory, not a descendant of `/srv/repo`.
-    expect(counts.get('ws-lookalike')).toBe(1)
-  })
-
-  it('matches DSH folder semantics for trailing separators and Windows paths', () => {
-    const workspaces = [
-      logicalWorkspace('ws-root', 'C:\\work\\repo\\', ['s-root']),
-      logicalWorkspace('ws-app', 'C:/work/repo/app', ['s-app']),
-      logicalWorkspace('ws-posix', '/home/dev/repo/', ['s-posix']),
-      logicalWorkspace('ws-posix-app', '/home/dev/repo/app', ['s-posix-app']),
-    ]
-    const counts = workspaceUnreadCounts(workspaces, new Set(['s-app', 's-posix', 's-posix-app']))
-    expect(counts.get('ws-root')).toBe(1)
-    expect(counts.get('ws-app')).toBe(1)
-    expect(counts.get('ws-posix')).toBe(2)
-    expect(counts.get('ws-posix-app')).toBe(1)
-  })
-
-  it('returns an empty rollup when nothing is unread', () => {
-    const workspaces = [logicalWorkspace('ws-1', '/srv/repo', ['s-1'])]
-    expect(workspaceUnreadCounts(workspaces, new Set()).size).toBe(0)
-    expect(workspaceUnreadCounts([], new Set(['s-1'])).size).toBe(0)
-  })
 })
 
 describe('0e. Snapshot visibility inputs for unread counters', () => {
@@ -5141,7 +2577,7 @@ describe('0e. Snapshot visibility inputs for unread counters', () => {
         localArchivedSessionIds: () => ['local-archived'],
         localSubagentSessionIds: () => ['local-sub'],
       },
-      { allowDirectTransport: true, enableNativeProxy: false },
+      { allowDirectTransport: true },
     )
     registry.startAll()
     try {
@@ -5171,7 +2607,7 @@ describe('0e. Snapshot visibility inputs for unread counters', () => {
         localArchivedSessionIds: () => { throw new Error('archived unavailable') },
         localSubagentSessionIds: () => { throw new Error('sessions unavailable') },
       },
-      { allowDirectTransport: true, enableNativeProxy: false },
+      { allowDirectTransport: true },
     )
     try {
       expect(registry.snapshot().archivedSessionIds).toEqual([])
@@ -5282,7 +2718,7 @@ describe('0c. Native bar geometry & diagnostics', () => {
     })
   })
 
-  it('reports the authoritative mode and per-device staging', () => {
+  it('reports per-device staging', () => {
     const devices = [
       {
         id: DeviceId('dev-a'),
@@ -5327,15 +2763,7 @@ describe('0c. Native bar geometry & diagnostics', () => {
     const snapshot = {
       revision: 7,
       hostId: 'host-1',
-      displayMode: 'native',
-      hostStatus: {
-        aggregatedGatewayActive: false,
-        aggregatedGatewayError: 'api-workspace-controller missing',
-        nativeProxyActive: true,
-      },
       devices,
-      logicalWorkspaces: [{}, {}],
-      allPhysicalWorkspaces: [{}, {}, {}],
     } as unknown as MultiDeviceSnapshot
     const diagnostics = buildDiagnostics(
       snapshot,
@@ -5344,14 +2772,10 @@ describe('0c. Native bar geometry & diagnostics', () => {
     )
     expect(diagnostics.kind).toBe('dsh-multi-device/diagnostics')
     expect(diagnostics.generatedAt).toBe(42)
-    expect(diagnostics.displayMode).toBe('native')
-    expect(diagnostics.hostStatus.aggregatedGatewayActive).toBe(false)
     expect(diagnostics.counts).toEqual({
       devices: 2,
       connectedDevices: 1,
       staleDevices: 1,
-      logicalWorkspaces: 2,
-      physicalWorkspaces: 3,
       runningSessions: 3,
       allRunningSessions: 5,
     })
@@ -5369,12 +2793,10 @@ describe('0c. Native bar geometry & diagnostics', () => {
       join(dir, 'secrets.json'),
       {
         localPort: () => 3080,
-        localWorkspaces: () => [],
-        localSessionUpdatedAt: () => new Map(),
         localArchivedSessionIds: () => [],
         localSubagentSessionIds: () => [],
       },
-      { allowDirectTransport: true, enableNativeProxy: false },
+      { allowDirectTransport: true },
     )
     try {
       const plane = new MultiDeviceControlPlane(registry)

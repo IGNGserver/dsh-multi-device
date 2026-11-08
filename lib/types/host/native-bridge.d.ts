@@ -1,13 +1,12 @@
 /**
- * Native Pane bridge: the tiny script the local reverse proxy injects into the
+ * Device-page bridge: the tiny script the local reverse proxy injects into the
  * framed remote DSH page, plus the HTML injection helper.
  *
- * Why a bridge at all: DSH Web has no URL router. `uiWorkspace.openSession()`
- * lives in the remote page's in-memory client store, so the only way the local
- * aggregated sidebar can drive the framed page to a Session is to execute a
- * script inside that page. The script runs before the DSH client modules
- * materialize, wraps the module table, and captures the client Context that
- * owns `uiWorkspace`.
+ * Why a bridge at all: DSH Web has no URL router, and the remote page's own
+ * client state (selected Session, unread set, title, workspace fold state) is
+ * only reachable from inside that page. The script runs before the DSH client
+ * modules materialize, wraps the module table, and captures the client Context
+ * that owns `uiWorkspace` so the Host can mirror what the page is showing.
  *
  * The bridge talks to the proxy over a same-origin WebSocket
  * (`/__md/bridge`), not `postMessage`: the proxy is the one local origin that

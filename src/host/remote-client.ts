@@ -33,9 +33,7 @@ import {
   type RemoteProtocolVersion,
 } from '../contract.ts'
 import { DeviceCatalog } from './device-catalog.ts'
-import { catalogTitle } from './aggregated-catalog.ts'
 import { DeviceAuthManager } from './auth.ts'
-import { discoverRemoteGitRemotesViaSsh } from './git-aggregator.ts'
 import { headerValue, requestRemote, responseAsFetchResponse } from './http-request.ts'
 import { BoundedStreamQueue } from './stream-queue.ts'
 import { SshTunnel } from './tunnel.ts'
@@ -153,9 +151,6 @@ export interface RemoteDeviceCallbacks {
     frame: { sessionId: string; key: string; value: unknown; seq: number },
   ) => void
   readonly onWorkspacesChanged: (deviceId: DeviceId) => void
-  readonly onGitRemotesDiscovered: (deviceId: DeviceId, remotesByPath: ReadonlyMap<string, string>) => void
-  /** The device's model list changed (or it just connected); refresh the picker. */
-  readonly onModelCatalogChanged: (deviceId: DeviceId) => void
   /** Optional auth-state callback so 401/403 on control/RPC surfaces in the UI. */
   readonly onAuthState?: (deviceId: DeviceId, state: DeviceAuthState, error?: string) => void
 }
@@ -203,10 +198,7 @@ export class RemoteDeviceClient {
   }
   private baselineFlight: { epoch: number; promise: Promise<void> } | undefined
   private authRecovery: { epoch: number; promise: Promise<boolean> } | undefined
-  private gitDiscoveryError: string | undefined
   private readonly pendingInteractions = new Map<string, RemotePendingInteraction>()
-  private readonly discoveredGitPaths = new Map<string, number>()
-  private readonly gitProbeAttemptedAt = new Map<string, number>()
 
   private remoteEventsClientId: string | undefined
   private muxSocket: WebSocket | undefined
@@ -306,8 +298,7 @@ export class RemoteDeviceClient {
       ...(this.remoteHome !== undefined ? { remoteHome: this.remoteHome } : {}),
       ...(this.latencyMs !== undefined ? { latencyMs: this.latencyMs } : {}),
       ...(this.connectedAt !== undefined ? { connectedAt: this.connectedAt } : {}),
-      ...(this.lastError !== undefined || this.gitDiscoveryError !== undefined
-        ? { lastError: this.lastError ?? this.gitDiscoveryError } : {}),
+      ...(this.lastError !== undefined ? { lastError: this.lastError } : {}),
       reconnectAttempt: this.reconnectAttempt,
       sessionCount: counts.sessionCount,
       runningSessionCount: counts.runningSessionCount,
@@ -358,7 +349,6 @@ export class RemoteDeviceClient {
       protocolVersion: this.protocolVersion,
       sessions: this.summaries.map(session => ({
         sessionId: session.sessionId,
-        ...(session.projections !== undefined ? { title: catalogTitle(session) } : {}),
         updatedAt: session.updatedAt,
         agentAvailable: session.agentAvailable,
         running: session.running,
@@ -462,7 +452,6 @@ export class RemoteDeviceClient {
       this.refreshHealthy = true
       this.reconcileSessionSummaries(previous)
       this.callbacks.onStateChanged(this.id)
-      void this.refreshRegisteredWorkspaceOrigins(epoch)
     }).catch(error => {
       if (signal.aborted || !this.catalog.isCurrent(epoch)) return
       this.setRefreshHealthy(false)
@@ -557,9 +546,6 @@ export class RemoteDeviceClient {
   updateConfig(next: DeviceConfig): void {
     this.stop()
     this.config = next
-    this.discoveredGitPaths.clear()
-    this.gitProbeAttemptedAt.clear()
-    this.gitDiscoveryError = undefined
     if (next.enabled) {
       this.start()
     } else {
@@ -576,7 +562,7 @@ export class RemoteDeviceClient {
   }
 
   // ==========================================================================
-  // Public Remote RPC & Stream Operations (called by AggregatedGateway)
+  // Public Remote RPC & Stream Operations
   // ==========================================================================
 
   /**
@@ -764,8 +750,6 @@ export class RemoteDeviceClient {
       this.iterationAbort = iterAbort
       const signal = AbortSignal.any([outerSignal, iterAbort.signal, this.generationAbort.signal])
       const epoch = this.catalog.epoch
-      this.discoveredGitPaths.clear()
-      this.gitProbeAttemptedAt.clear()
       try {
         this.state = this.reconnectAttempt === 0 ? 'connecting' : 'reconnecting'
         this.callbacks.onStateChanged(this.id)
@@ -1133,9 +1117,9 @@ export class RemoteDeviceClient {
       case 'settings/document-updated':
       case 'credentials/record-updated':
       case 'credentials/reference-updated': {
-        // The remote Agent's model catalog is part of its own settings. The
-        // aggregate picker must invalidate instead of keeping a stale list.
-        this.callbacks.onModelCatalogChanged(this.id)
+        // The remote page owns its own settings surfaces; only the device
+        // summary (protocol, version, errors) needs a republish.
+        this.callbacks.onStateChanged(this.id)
         break
       }
       default:
@@ -1149,7 +1133,6 @@ export class RemoteDeviceClient {
       if (!this.catalog.applyWorkspaceFrame(epoch, frame)) continue
       this.callbacks.onStateChanged(this.id)
       this.callbacks.onWorkspacesChanged(this.id)
-      void this.refreshRegisteredWorkspaceOrigins(epoch)
       onReady()
     }
     if (!signal.aborted) throw new Error('Remote workspace/follow stream ended')
@@ -1172,40 +1155,6 @@ export class RemoteDeviceClient {
       onReady()
     }
 
-  }
-
-  /**
-   * Read `remote.origin.url` for workspaces that are already registered on this
-   * device, so devices that both registered the same repository keep grouping.
-   *
-   * This is deliberately not a filesystem scan and it never registers anything:
-   * only the paths DSH already lists are read. Discovering projects that exist
-   * on disk but are not registered happens solely in the manual Git match.
-   */
-  private async refreshRegisteredWorkspaceOrigins(epoch = this.catalog.epoch): Promise<void> {
-    if (this.config.transport.kind !== 'ssh' || !this.catalog.isCurrent(epoch)) return
-    const now = Date.now()
-    const pendingPaths = [...new Set(this.workspaces.map(w => w.path))]
-      .filter(p => p && now - (this.discoveredGitPaths.get(p) ?? -Infinity) >= 300_000)
-      .filter(p => now - (this.gitProbeAttemptedAt.get(p) ?? -Infinity) >= 60_000)
-    if (pendingPaths.length === 0) return
-    for (const p of pendingPaths) this.gitProbeAttemptedAt.set(p, now)
-    try {
-      const discovered = await discoverRemoteGitRemotesViaSsh(this.config.transport, pendingPaths)
-      if (!this.catalog.isCurrent(epoch)) return
-      for (const path of discovered.keys()) this.discoveredGitPaths.set(path, Date.now())
-      this.gitDiscoveryError = undefined
-      // Include explicit empty origins for successfully probed paths without a repository.
-      // The registry/aggregator can invalidate a previous origin rather than retaining it forever.
-      const origins = new Map(pendingPaths.map(path => [path, discovered.get(path) ?? '']))
-      this.callbacks.onGitRemotesDiscovered(this.id, origins)
-      this.callbacks.onWorkspacesChanged(this.id)
-      this.callbacks.onStateChanged(this.id)
-    } catch (error) {
-      if (!this.catalog.isCurrent(epoch)) return
-      this.gitDiscoveryError = `Git discovery: ${error instanceof Error ? error.message : String(error)}`
-      this.callbacks.onStateChanged(this.id)
-    }
   }
 
   // ==========================================================================
@@ -1235,7 +1184,6 @@ export class RemoteDeviceClient {
       this.reconcileSessionSummaries(previous)
     }
     this.callbacks.onWorkspacesChanged(this.id)
-    void this.refreshRegisteredWorkspaceOrigins(epoch)
   }
 
   private async runProtocol01Polling(_baseUrl: string, signal: AbortSignal): Promise<void> {

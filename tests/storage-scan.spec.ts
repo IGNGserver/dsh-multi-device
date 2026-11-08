@@ -4,7 +4,6 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir, hostname } from 'node:os'
 import { dirname, join } from 'node:path'
 import { JsonSnapshotFile, resolvePluginStorage } from '../src/host/storage.ts'
-import { buildGitScanScript, parseGitScanOutput, parseGitScanProjection } from '../src/host/git-scan.ts'
 import { buildReadSharedStateCommand, buildWriteSharedStateCommand, parseSharedReadDocument } from '../src/host/shared-state.ts'
 import { DeviceRegistry } from '../src/host/registry.ts'
 import { DeviceId } from '../src/contract.ts'
@@ -133,76 +132,14 @@ describe('durable profile-local snapshots', () => {
     expect(w.read<any>().displayMode).toBe('native')
     expect(existsSync(join(legacy, 'dsh-multi-device.json'))).toBe(true)
   })
-
-  it('marks only genuinely truncated catalog arrays', () => {
-    const dir = temp(); const registry = new DeviceRegistry(join(dir, 'data.json'), join(dir, 'secrets.json'),
-      { localPort: () => 3080, localWorkspaces: () => [], localSessionUpdatedAt: () => new Map() }, { enableNativeProxy: false })
-    const base = { deviceId: DeviceId('dev-a'), syncedAt: 1, sessions: [], workspaces: [], archivedSessionIds: [], pinnedSessionIds: [] }
-    try {
-      registry.setDeviceCatalog(base)
-      expect(registry.deviceCatalog(base.deviceId)?.catalogTruncated).toBe(false)
-      registry.setDeviceCatalog({ ...base, pinnedSessionIds: Array.from({ length: 5000 }, (_, i) => `${i}`) })
-      expect(registry.deviceCatalog(base.deviceId)?.catalogTruncated).toBe(false)
-      registry.setDeviceCatalog({ ...base, pinnedSessionIds: Array.from({ length: 5001 }, (_, i) => `${i}`) })
-      expect(registry.deviceCatalog(base.deviceId)?.catalogTruncated).toBe(true)
-    } finally { registry.dispose() }
-  })
 })
 
-describe.skipIf(process.platform === 'win32')('real POSIX scanning and shared-state writes', () => {
-  it('executes one complete find expression, including worktrees but excluding caches and hidden state', () => {
-    const dir = temp()
-    for (const name of ['visible repo', 'node_modules/pkg', '.hidden/repo']) {
-      const repo = join(dir, name)
-      mkdirSync(repo, { recursive: true })
-      execFileSync('git', ['init', '-q', repo])
-      execFileSync('git', ['-C', repo, 'remote', 'add', 'origin', 'https://github.com/example/repo.git'])
-    }
-    const main = join(dir, 'visible repo'), worktree = join(dir, '.wt', 'worktree')
-    execFileSync('git', ['-C', main, '-c', 'user.name=test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-qm', 'fixture'])
-    mkdirSync(join(dir, '.wt'), { recursive: true })
-    execFileSync('git', ['-C', main, 'worktree', 'add', '-qb', 'scan-fixture', worktree])
-    const output = execFileSync('sh', ['-c', buildGitScanScript([dir])], { encoding: 'utf8' })
-    expect(parseGitScanOutput(output).map(repo => repo.path).sort()).toEqual([main, worktree].sort())
-  })
-
-  it('parses framed origins containing delimiters and reports truncation explicitly', () => {
-    const output = ['__DSH_REPO_V2__', '/tmp/repo\twith delimiters', 'https://example.com/org/repo.git\n', '__DSH_SCAN_TRUNCATED_V2__', '__DSH_SCAN_DONE_V2__', ''].join('\0')
-    const parsed = parseGitScanProjection(output)
-    expect(parsed.complete).toBe(true)
-    expect(parsed.truncated).toBe(true)
-    expect(parsed.repos).toEqual([{ path: '/tmp/repo\twith delimiters', rawOrigin: 'https://example.com/org/repo.git', gitRemote: 'example.com/org/repo' }])
-  })
-
-  it('caps candidate processing without mistaking a partial scan for completion', () => {
-    const dir = temp()
-    for (const name of ['one', 'two']) {
-      const repo = join(dir, name)
-      mkdirSync(repo, { recursive: true })
-      execFileSync('git', ['init', '-q', repo])
-      execFileSync('git', ['-C', repo, 'remote', 'add', 'origin', `https://example.com/org/${name}.git`])
-    }
-    const parsed = parseGitScanProjection(execFileSync('sh', ['-c', buildGitScanScript([dir], 4, 1)], { encoding: 'utf8' }))
-    expect(parsed.complete).toBe(true)
-    expect(parsed.truncated).toBe(true)
-    expect(parsed.repos).toHaveLength(1)
-  })
-
-  it('reports broken worktree metadata instead of a successful empty scan', () => {
-    const root = temp()
-    writeFileSync(join(root, '.git'), 'gitdir: missing-worktree-metadata')
-    expect(() => execFileSync('sh', ['-c', buildGitScanScript([root])], { stdio: 'pipe' })).toThrow()
-  })
-
+describe.skipIf(process.platform === 'win32')('shared-state writes', () => {
   it('bounds the merged Host count even when many shard files are present', () => {
     const frames = Array.from({ length: 25 }, (_, index) => JSON.stringify({ version: 1, hosts: {
       [`host-${index}`]: { updatedAt: index, sessions: {} },
     } })).join('\u001e')
     expect(Object.keys(parseSharedReadDocument(frames)?.hosts ?? {})).toHaveLength(20)
-  })
-
-  it('propagates find failure instead of reporting an empty successful scan', () => {
-    expect(() => execFileSync('sh', ['-c', `find() { return 19; }; ${buildGitScanScript([temp()])}`], { stdio: 'pipe' })).toThrow()
   })
 
   it('preserves a pretty-printed legacy document alongside new Host shards', () => {

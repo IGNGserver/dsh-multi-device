@@ -84,8 +84,8 @@
 ### Git、搜索与前端复杂度
 
 - [x] Git v2 NUL frame、分片、partial/truncated 显式状态、deadline/AbortSignal；本地扫描异步化。partial/truncated 结果不能声称完整，也不能把未命中 seed 归类为 missing。
-- [x] unread ID 一次解码分组；Workspace 父路径索引与 slash boundary；Session cwd/raw parent Map 查找；聚合侧栏 model/Set/device choices 引用级 memoize。
-- [x] 固定高度虚拟行使用 prefix offsets + binary search、上下 spacer 与 overscan；一个 tree ResizeObserver 和一个 latest-value scroll rAF；离屏键盘焦点按 index 恢复，不回到无界 DOM。
+- [x] unread ID 一次解码分组；Session cwd/raw parent Map 查找；按设备分组的未读集合引用级 memoize。
+- [x] 顶部标签栏宽度测量使用 rAF 合并的 ResizeObserver，裁剪宽度在窄视口下保证设置入口可见，不回到无界 DOM 写入。
 
 ### CI、Release 与烟测门禁
 
@@ -100,4 +100,4 @@
 - 最终 Chromium E2E 使用两个隔离官方 Web 实例，统一侧栏、本地/双远端非空历史、Native 切换、刷新、重连、双标签独立选择和无插件官方 UI 对照全部通过；记录 2 条精确匹配的官方上游取消日志，不能称为 console 零错误。报告与截图位于本机 scratch，不上传秘密或发布资产。
 - 两个 smoke 的真实 SIGTERM 测试最初均暴露 `main().catch` 把 130/143 覆盖为 1 的问题；修复后预期中断保留退出码、写 interrupted 状态并清理，清理异常仍退出 1。复测两入口均为 143，含凭据 runtime 无残留，最终成功路径也已重新通过。
 - 保留限制：POSIX 中间 line-based Git 扫描仍不支持任意换行路径，PowerShell 批次可能受平台命令长度限制；最终 NUL wire protocol 不消除这两个上游边界。
-- Windows/macOS Desktop、真实 Electron WebView/iframe 视觉与长时保活、IPv6 parent、HTTPS mixed-content、自签名 Direct 与真实 SSH/known_hosts/Keychain 仍需对应环境验收。协议模拟、Linux Web smoke 和单元测试不能替代；不支持的 Native parent 继续显式退回聚合镜像，不扩大监听或关闭 TLS/CSP。
+- Windows/macOS Desktop、真实 Electron WebView/iframe 视觉与长时保活、IPv6 parent、HTTPS mixed-content、自签名 Direct 与真实 SSH/known_hosts/Keychain 仍需对应环境验收。协议模拟、Linux Web smoke 和单元测试不能替代；不支持的 Native parent 显式给出原因，不扩大监听或关闭 TLS/CSP。

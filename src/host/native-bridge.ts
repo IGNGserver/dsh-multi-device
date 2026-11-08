@@ -1,13 +1,12 @@
 /**
- * Native Pane bridge: the tiny script the local reverse proxy injects into the
+ * Device-page bridge: the tiny script the local reverse proxy injects into the
  * framed remote DSH page, plus the HTML injection helper.
  *
- * Why a bridge at all: DSH Web has no URL router. `uiWorkspace.openSession()`
- * lives in the remote page's in-memory client store, so the only way the local
- * aggregated sidebar can drive the framed page to a Session is to execute a
- * script inside that page. The script runs before the DSH client modules
- * materialize, wraps the module table, and captures the client Context that
- * owns `uiWorkspace`.
+ * Why a bridge at all: DSH Web has no URL router, and the remote page's own
+ * client state (selected Session, unread set, title, workspace fold state) is
+ * only reachable from inside that page. The script runs before the DSH client
+ * modules materialize, wraps the module table, and captures the client Context
+ * that owns `uiWorkspace` so the Host can mirror what the page is showing.
  *
  * The bridge talks to the proxy over a same-origin WebSocket
  * (`/__md/bridge`), not `postMessage`: the proxy is the one local origin that
@@ -90,8 +89,8 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
   var groupSendTimer = null;
   var groupEchoGuard = false;
 
-  // Session completion reminders are owned by the local Host too. Native and
-  // aggregated surfaces both overlay this set instead of DSH's in-memory one.
+  // Session completion reminders are owned by the local Host too; the tab strip
+  // overlays that set instead of DSH's in-memory one.
   var unread = Object.create(null);
   var hostUnread = Object.create(null);
   var readCompletions = normalizeReadCompletions(initialReadCompletions);
@@ -807,9 +806,9 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
     flushReads();
   }
 
-  // Pane embedding hides the remote left sidebar. Native/full mode must get it
-  // back: the Host sends set-embedded whenever the same framed page changes
-  // between the aggregated pane and the full native tab.
+  // Embedding hides the remote left sidebar when the Host frames only the
+  // conversation column. The Host sends set-embedded to switch a live page
+  // between the two layouts without reloading it.
   var embedded = false;
   var originalColumns = null;
   var originalSidebarVisibility = null;

@@ -7,11 +7,9 @@
  * Built 100% with `@deepseek-ai/dsh-client-ui-primitives` following the layout and
  * interaction conventions of `@deepseek-ai/dsh-client-ui-settings-general` and
  * `@deepseek-ai/dsh-client-ui-settings-models`:
- * 1. Global preferences: Display Mode (`SegmentedControl`) & Auto Git Repository
- *    Aggregation (`Switch`, plus default target device selector only when multi-device
- *    repositories actually exist).
- * 2. Remote Devices list: Clean row cards with `StateDot`, `Tag`, 1-click Native UI
- *    entry, reconnect, inline edit, and `Modal`-confirmed removal.
+ * 1. Preferences that only serve the device tab strip: cross-Host read state.
+ * 2. Remote Devices list: row cards with `StateDot`, `Tag`, open-device action,
+ *    reconnect, inline edit, per-device attention detail and `Modal`-confirmed removal.
  * 3. Streamlined Add/Edit form: Only 3 core inputs visible by default (SSH Host,
  *    optional Display Name, optional Launch URL / Token), with `~/.ssh/config` quick
  *    fill and a collapsed `DisclosureRow` for non-default ports, keys, or ProxyJump.
@@ -27,10 +25,8 @@ import {
   IconRefreshOutlineRegular,
   IconRightUpOutlineRegular,
   IconTrashOutlineRegular,
-  IconWarningOutlineRegular,
   Input,
   Modal,
-  SegmentedControl,
   StateDot,
   Switch,
   Tag,
@@ -43,9 +39,6 @@ import { DshSelect } from './DshSelect.tsx'
 import {
   type DeviceId,
   type DeviceView,
-  type DisplayMode,
-  type GitMatchRun,
-  LOCAL_DEVICE_ID,
   type SshConfigHostEntry,
   type SshKeyEntry,
   type UpsertDeviceInput,
@@ -54,12 +47,10 @@ import type { MultiDeviceLocaleKey } from './locales.ts'
 import type { MultiDeviceDiagnostics } from '../runtime.ts'
 import { attentionUnreadIds } from '../attention.ts'
 import { AttentionDetails } from './AttentionDetails.tsx'
-import { memberTargetsForWorkspace } from './sessionDevice.ts'
 import { countableUnreadIds, EMPTY_UNREAD_SESSION_IDS, groupUnreadSessionIds } from './unreadCounts.ts'
 import {
   clientStore,
   deviceStateToDotState,
-  type HubTabId,
   parseSshHostInput,
   useMultiDeviceState,
 } from './state.ts'
@@ -155,70 +146,6 @@ function SecretCredentialInput({
             <path d={revealed ? EYE_OFF_PATH : EYE_PATH} />
           </svg>
         </Button>
-      )}
-    </div>
-  )
-}
-
-/** Persisted outcome of the previous manual Git match run. */
-function GitMatchLastResult({
-  run,
-  t,
-}: {
-  run: GitMatchRun
-  t: (key: MultiDeviceLocaleKey) => string
-}): React.ReactElement {
-  const finished = run.finishedAt !== undefined ? new Date(run.finishedAt) : undefined
-  const created = run.reports.flatMap(report => report.created)
-  const errors = run.reports.filter(report => report.error !== undefined)
-  const tone =
-    run.status === 'failed' ? 'dsh-md-gitmatch-status-error' : 'dsh-md-gitmatch-status-ok'
-
-  return (
-    <div className="dsh-md-gitmatch-result">
-      <div className="dsh-md-gitmatch-line">
-        <span className={tone}>
-          {t(
-            run.status === 'completed'
-              ? 'gitMatchStatusCompleted'
-              : run.status === 'cancelled'
-                ? 'gitMatchStatusCancelled'
-                : 'gitMatchStatusFailed',
-          )}
-        </span>
-        {finished !== undefined && (
-          <span className="dsh-md-gitmatch-detail">
-            {t('gitMatchFinishedAt').replace('{time}', finished.toLocaleString())}
-          </span>
-        )}
-      </div>
-      <div className="dsh-md-gitmatch-line">
-        <span>{t('gitMatchCreatedCount').replace('{count}', String(run.createdCount))}</span>
-        <span>{t('gitMatchNotFoundCount').replace('{count}', String(run.notFoundCount))}</span>
-        <span>{t('gitMatchAlreadyCount').replace('{count}', String(run.alreadyTrackedCount))}</span>
-      </div>
-      {run.error !== undefined && <div className="dsh-md-gitmatch-detail">{run.error}</div>}
-      {created.length > 0 && (
-        <ul className="dsh-md-gitmatch-created">
-          {created.map(item => (
-            <li key={`${item.gitRemote}:${item.path}`} className="dsh-md-gitmatch-detail">
-              <span className="dsh-md-ellipsis" title={`${item.gitRemote} → ${item.path}`}>
-                {item.gitRemote}
-              </span>
-              <span className="dsh-md-gitmatch-path" title={item.path}>{item.path}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-      {errors.length > 0 && (
-        <ul className="dsh-md-gitmatch-created">
-          {errors.map(report => (
-            <li key={report.deviceId} className="dsh-md-gitmatch-detail">
-              <span>{report.deviceName}</span>
-              <span className="dsh-md-gitmatch-path">{report.error}</span>
-            </li>
-          ))}
-        </ul>
       )}
     </div>
   )
@@ -640,29 +567,25 @@ export function MultiDeviceHubPanel({
   hideHeader = false,
 }: {
   t: (key: MultiDeviceLocaleKey) => string
-  defaultTab?: HubTabId
   onCloseSettings?: () => void
   hideHeader?: boolean
 }): React.ReactElement {
   const state = useMultiDeviceState()
   const { snapshot } = state
-  // Same visibility rules as the sidebar: archived rows and subagent children
-  // have no standalone row, and a remote ID missing from every catalog is a
-  // deleted Session, so none of them may inflate a device's reminder count.
-  const unread = snapshot.attentionByDevice !== undefined ? attentionUnreadIds(snapshot.attentionByDevice) : countableUnreadIds(
-    snapshot.unreadSessionIds,
-    snapshot.archivedSessionIds,
-    snapshot.subagentSessionIds,
-    sessionId => snapshot.sessionOrigins[sessionId] !== undefined,
-  )
+  // Same visibility rules as the tab strip: archived and subagent Sessions
+  // have no standalone row, so none of them may inflate a device's reminder count.
+  const unread = snapshot.attentionByDevice !== undefined
+    ? attentionUnreadIds(snapshot.attentionByDevice)
+    : countableUnreadIds(
+        snapshot.unreadSessionIds,
+        snapshot.archivedSessionIds,
+        snapshot.subagentSessionIds,
+      )
   const unreadByDevice = groupUnreadSessionIds(unread)
-  const modeSegId = useId()
 
   const [addingNew, setAddingNew] = useState(false)
   const [editingDeviceId, setEditingDeviceId] = useState<DeviceId | null>(null)
   const [sshKeys, setSshKeys] = useState<readonly SshKeyEntry[]>([])
-  const [aggBusy, setAggBusy] = useState(false)
-  const [modeBusy, setModeBusy] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<DeviceView | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
@@ -689,24 +612,7 @@ export function MultiDeviceHubPanel({
     }
   }, [addingNew, editingDeviceId])
 
-  const mergedWorkspaces = snapshot.logicalWorkspaces.filter(w => w.members.length > 1)
   const hasDevices = snapshot.devices.length > 0
-  const gitMatch = snapshot.gitMatch
-  const gitMatchRunning = gitMatch.status === 'running'
-  const [gitMatchBusy, setGitMatchBusy] = useState(false)
-
-  const startGitMatch = (): void => {
-    if (gitMatchBusy || gitMatchRunning) return
-    setGitMatchBusy(true)
-    void clientStore
-      .startGitMatch()
-      .then((res) => {
-        if (!res.ok) pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
-      })
-      .finally(() => {
-        setGitMatchBusy(false)
-      })
-  }
 
   const handleConfirmDelete = async (): Promise<void> => {
     if (deleteTarget === null || deleting) return
@@ -772,104 +678,8 @@ export function MultiDeviceHubPanel({
         </div>
       )}
 
-      {!snapshot.hostStatus.aggregatedGatewayActive &&
-        snapshot.hostStatus.aggregatedGatewayError !== undefined && (
-          <p className="dsh-md-notice-warn" role="status">
-            <IconWarningOutlineRegular size={14} />
-            <span>
-              {t('gatewayDegradedNotice')} ({snapshot.hostStatus.aggregatedGatewayError})
-            </span>
-          </p>
-        )}
-
       {/* Global Preferences (aligned with DSH General Settings rows) */}
       <div className="dsh-md-pref-list">
-        <div className="dsh-md-pref-row">
-          <div>
-            <div className="dsh-md-pref-title">{t('modeRowTitle')}</div>
-            <div className="dsh-md-pref-desc">{t('modeRowDesc')}</div>
-          </div>
-          <SegmentedControl<DisplayMode>
-            id={modeSegId}
-            label={t('modeRowTitle')}
-            value={state.displayMode}
-            disabled={modeBusy}
-            options={[
-              { value: 'aggregated', label: t('modeAggregated') },
-              { value: 'native', label: t('modeNative') },
-            ]}
-            onChange={(next) => {
-              if (modeBusy || next === state.displayMode) return
-              setModeBusy(true)
-              void clientStore.setDisplayMode(next).then((res) => {
-                setModeBusy(false)
-                if (!res.ok) {
-                  pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
-                  return
-                }
-                if (next === 'native') onCloseSettings?.()
-              })
-            }}
-          />
-        </div>
-
-        <div className="dsh-md-pref-row">
-          <div>
-            <div className="dsh-md-pref-title">{t('gitAutoTitle')}</div>
-            <div className="dsh-md-pref-desc">{t('gitAutoDesc')}</div>
-          </div>
-          <Switch
-            checked={snapshot.aggregationConfig.autoGitAggregate}
-            label={t('gitAutoTitle')}
-            disabled={aggBusy}
-            onChange={(enabled) => {
-              setAggBusy(true)
-              void clientStore
-                .updateAggregationConfig({ autoGitAggregate: enabled })
-                .then((res) => {
-                  if (!res.ok) {
-                    pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
-                  }
-                })
-                .finally(() => {
-                  setAggBusy(false)
-                })
-            }}
-          />
-        </div>
-
-        {snapshot.catalog === undefined && <div className="dsh-md-pref-row">
-          <div>
-            <div className="dsh-md-pref-title">{t('nativePaneTitle')}</div>
-            <div className="dsh-md-pref-desc">{t('nativePaneDesc')}</div>
-          </div>
-          <Switch
-            checked={snapshot.ui?.nativePane !== false}
-            label={t('nativePaneTitle')}
-            onChange={(enabled) => {
-              void clientStore.setUiPreferences({ nativePane: enabled }).then((res) => {
-                if (!res.ok) pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
-              })
-            }}
-          />
-        </div>}
-
-        <div className="dsh-md-pref-row">
-          <div>
-            <div className="dsh-md-pref-title">{t('rowDeviceDotTitle')}</div>
-            <div className="dsh-md-pref-desc">{t('rowDeviceDotDesc')}</div>
-          </div>
-          <Switch
-            checked={snapshot.ui?.sessionRowDeviceDot === true}
-            label={t('rowDeviceDotTitle')}
-            onChange={(enabled) => {
-              void clientStore.setUiPreferences({ sessionRowDeviceDot: enabled }).then((res) => {
-                if (!res.ok) pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
-              })
-            }}
-          />
-        </div>
-
         <div className="dsh-md-pref-row">
           <div>
             <div className="dsh-md-pref-title">{t('crossHostReadStateTitle')}</div>
@@ -885,185 +695,6 @@ export function MultiDeviceHubPanel({
             }}
           />
         </div>
-
-        <div className="dsh-md-gitmatch">
-          <div className="dsh-md-gitmatch-head">
-            <div>
-              <div className="dsh-md-pref-title">{t('gitMatchTitle')}</div>
-              <div className="dsh-md-pref-desc">{t('gitMatchDesc')}</div>
-            </div>
-            <div className="dsh-md-gitmatch-actions">
-              {gitMatchRunning ? (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    void clientStore.cancelGitMatch()
-                  }}
-                >
-                  {t('gitMatchCancel')}
-                </Button>
-              ) : (
-                <Button
-                  variant="primary"
-                  size="sm"
-                  disabled={gitMatchBusy}
-                  icon={<IconRefreshOutlineRegular size={13} />}
-                  onClick={startGitMatch}
-                >
-                  {gitMatchBusy ? t('gitMatchStarting') : t('gitMatchStart')}
-                </Button>
-              )}
-            </div>
-          </div>
-
-          {gitMatchRunning && (
-            <div className="dsh-md-gitmatch-progress" role="status">
-              <div className="dsh-md-gitmatch-line">
-                <span className="dsh-md-gitmatch-phase">
-                  {t(
-                    gitMatch.phase === 'discovering'
-                      ? 'gitMatchPhaseDiscovering'
-                      : gitMatch.phase === 'creating'
-                        ? 'gitMatchPhaseCreating'
-                        : 'gitMatchPhaseScanning',
-                  )}
-                </span>
-                {gitMatch.currentDeviceName !== undefined && (
-                  <span className="dsh-md-gitmatch-detail">{gitMatch.currentDeviceName}</span>
-                )}
-                {gitMatch.currentProject !== undefined && (
-                  <span className="dsh-md-gitmatch-detail dsh-md-ellipsis">
-                    {gitMatch.currentProject}
-                  </span>
-                )}
-              </div>
-              <div className="dsh-md-gitmatch-line">
-                <span>{t('gitMatchDeviceProgress')
-                  .replace('{done}', String(gitMatch.processedDevices))
-                  .replace('{total}', String(gitMatch.totalDevices))}</span>
-                <span>{t('gitMatchProjectProgress')
-                  .replace('{done}', String(gitMatch.processedProjects))
-                  .replace('{total}', String(gitMatch.totalProjects))}</span>
-                <span>{t('gitMatchCreatedCount').replace('{count}', String(gitMatch.createdCount))}</span>
-              </div>
-            </div>
-          )}
-
-          {!gitMatchRunning && gitMatch.status !== 'idle' && (
-            <GitMatchLastResult run={gitMatch} t={t} />
-          )}
-        </div>
-
-        {snapshot.aggregationConfig.autoGitAggregate && mergedWorkspaces.length > 0 && (
-          <div className="dsh-md-subpanel">
-            <div className="dsh-md-subpanel-header">
-              <div className="dsh-md-subpanel-title-wrap">
-                <svg
-                  width={14}
-                  height={14}
-                  viewBox="0 0 16 16"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth={1.3}
-                  aria-hidden="true"
-                  className="dsh-md-subpanel-icon"
-                >
-                  <circle cx="4" cy="4" r="2" />
-                  <circle cx="4" cy="12" r="2" />
-                  <circle cx="12" cy="7" r="2" />
-                  <path d="M4 6v4M4 8c2.5 0 4.5-1 6-1" strokeLinecap="round" />
-                </svg>
-                <span className="dsh-md-subpanel-title">{t('targetDeviceHeading')}</span>
-              </div>
-              <span className="dsh-md-subpanel-desc">{t('targetDeviceSubDesc')}</span>
-            </div>
-            <div className="dsh-md-merged-repos-list">
-              {mergedWorkspaces.map((lws) => {
-                const targets = memberTargetsForWorkspace(snapshot, lws, t('nativeLocalTab'))
-                const selectOptions = targets.map((target) => ({
-                  value: target.deviceId,
-                  label: target.name,
-                  description: target.online ? target.path : `${target.path} · ${t('deviceOfflineShort')}`,
-                  dotState: deviceStateToDotState(target.state),
-                  disabled: !target.online,
-                }))
-                const effective = targets.find(
-                  target => target.deviceId === lws.effectiveTargetDeviceId,
-                )
-                const fallbackHint =
-                  lws.effectiveTargetDeviceId !== lws.targetDeviceId && effective !== undefined
-                    ? t('targetFallbackHint').replace('{device}', effective.name)
-                    : lws.effectiveTargetOnline
-                      ? undefined
-                      : t('targetAllOfflineHint')
-
-                return (
-                  <div key={lws.logicalWorkspaceId} className="dsh-md-merged-repo-card">
-                    <div className="dsh-md-merged-repo-info">
-                      <span className="dsh-md-merged-repo-name" title={lws.title}>
-                        {lws.title}
-                      </span>
-                      {lws.gitRemote && (
-                        <span className="dsh-md-merged-repo-remote" title={lws.gitRemote}>
-                          {lws.gitRemote}
-                        </span>
-                      )}
-                      {fallbackHint !== undefined && (
-                        <span className="dsh-md-merged-repo-hint" role="status">
-                          {fallbackHint}
-                        </span>
-                      )}
-                    </div>
-                    <DshSelect
-                      compact
-                      value={lws.targetDeviceId}
-                      placeholder={t('selectDevicePlaceholder')}
-                      ariaLabel={`${lws.title} - ${t('targetDeviceHeading')}`}
-                      options={selectOptions}
-                      onChange={(next) => {
-                        void clientStore.setPreferredDevice(
-                          lws.logicalWorkspaceId,
-                          next as DeviceId,
-                        )
-                      }}
-                    />
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        )}
-        {snapshot.aggregationConfig.excludedMemberKeys.length > 0 && (
-          <div className="dsh-md-subpanel">
-            <div className="dsh-md-subpanel-header">
-              <div className="dsh-md-subpanel-title-wrap">
-                <span className="dsh-md-subpanel-title">{t('excludedWorkspacesHeading')}</span>
-              </div>
-              <span className="dsh-md-subpanel-desc">{t('excludedWorkspacesDesc')}</span>
-            </div>
-            <div className="dsh-md-merged-repos-list">
-              {snapshot.aggregationConfig.excludedMemberKeys.map((memberKey) => (
-                <div key={memberKey} className="dsh-md-merged-repo-card">
-                  <div className="dsh-md-merged-repo-info">
-                    <span className="dsh-md-merged-repo-remote" title={memberKey}>
-                      {memberKey}
-                    </span>
-                  </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => {
-                      void clientStore.setMemberExcluded(memberKey, false)
-                    }}
-                  >
-                    {t('restoreAggregation')}
-                  </Button>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
       </div>
       <div className="dsh-md-devices-block">
         <div className="dsh-md-devices-header">
@@ -1146,13 +777,9 @@ export function MultiDeviceHubPanel({
                       <Button
                         variant="outline"
                         size="sm"
-                        disabled={modeBusy}
                         icon={<IconRightUpOutlineRegular size={13} />}
                         onClick={() => {
-                          if (modeBusy) return
-                          setModeBusy(true)
                           void clientStore.selectNativeDevice(dev.id).then((res) => {
-                            setModeBusy(false)
                             if (!res.ok) {
                               pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
                               return
@@ -1161,7 +788,7 @@ export function MultiDeviceHubPanel({
                           })
                         }}
                       >
-                        {t('openNative')}
+                        {t('openDevice')}
                       </Button>
 
                       <div className="dsh-md-icon-actions-group">
@@ -1290,11 +917,9 @@ export function MultiDeviceHubPanel({
           </div>
         </div>
         <p className="dsh-md-diagnostics-mode">
-          {t('diagnosticsModeLine')
-            .replace('{mode}', t(state.displayMode === 'native' ? 'modeNative' : 'modeAggregated'))
+          {t('diagnosticsSummaryLine')
             .replace('{devices}', String(snapshot.devices.length))
-            .replace('{connected}', String(snapshot.devices.filter(device => device.state === 'connected').length))
-            .replace('{workspaces}', String(snapshot.logicalWorkspaces.length))}
+            .replace('{connected}', String(snapshot.devices.filter(device => device.state === 'connected').length))}
         </p>
         {diagnostics !== null && (
           <pre className="dsh-md-diagnostics-output">{JSON.stringify(diagnostics, null, 2)}</pre>

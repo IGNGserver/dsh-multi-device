@@ -1,28 +1,24 @@
 /**
- * Window/taskbar title for the aggregated and native surfaces.
+ * Window/taskbar title while a remote device tab is active.
  *
  * DSH's layout owns `document.title` and derives it from the *local* Session
- * list. A remote page lives in a cross-origin iframe, so its title never reaches
+ * list. A remote page lives in a cross-origin frame, so its title never reaches
  * the parent document. The bridge reports that title through the Host snapshot;
- * this module applies it while a remote device is the visible conversation and
- * restores DSH's own title when the 本机 surface is active again.
+ * this module applies it while a remote device tab is visible and restores
+ * DSH's own title when the 本机 tab is active again.
  *
  * @module dsh-multi-device/client/windowTitle
  */
-import type { DeviceId, DeviceView, DisplayMode } from '../contract.ts';
+import type { DeviceId, DeviceView } from '../contract.ts';
 /** Inputs the title depends on; kept as a narrow shape so it is easy to test. */
 export interface WindowTitleInput {
-    readonly displayMode: DisplayMode;
     readonly activeNativeDeviceId?: DeviceId;
-    readonly activeSessionId?: string;
     readonly devices: readonly DeviceView[];
-    readonly nativePaneEnabled: boolean;
 }
 /**
  * Pick the title the local window should show, or `undefined` to leave DSH in
- * charge. In Native Mode a missing bridge title falls back to the device name;
- * in the aggregated pane a missing title is left to the local aggregated
- * Session row so no stale remote title can appear.
+ * charge. A missing bridge title falls back to the device name so the window
+ * never shows the local conversation's title while a remote tab is active.
  */
 export declare function resolveWindowTitle(input: WindowTitleInput): string | undefined;
 /**

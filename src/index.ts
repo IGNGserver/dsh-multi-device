@@ -2,14 +2,12 @@
  * `dsh-multi-device` Host Plugin Entry.
  *
  * Mounts:
- * 1. `DeviceRegistry`: persistent device & Git workspace aggregation registry,
- *    SSH tunnel supervisor, and independent Native Mode reverse-proxy manager.
+ * 1. `DeviceRegistry`: persistent device registry, SSH tunnel supervisor, and
+ *    the independent Native Mode reverse-proxy manager.
  * 2. `MultiDeviceControlPlane`: `/multi-device/api` and `/multi-device/events` SSE routes
- *    so the Client UI can manage devices, import `~/.ssh/config`, configure Git aggregation,
- *    and use Native Mode independently of Aggregated Mode.
- * 3. `AggregatedGateway`: attaches reversibly to `sessionController`, `workspaceController`,
- *    and `typertGateway` (with isolated failure containment so any incompatibility never
- *    impairs Native Mode or the host DSH instance).
+ *    so the Client UI can manage devices, import `~/.ssh/config`, and drive the
+ *    device tab strip. Nothing is injected into the local Session Controller:
+ *    remote Sessions are only ever rendered by their own device's DSH page.
  *
  * @module dsh-multi-device
  */
@@ -18,12 +16,6 @@ import z from '@deepseek-ai/schemastery'
 import { appendFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import {
-  readLocalPhysicalWorkspaces,
-  type SessionControllerLike,
-  type WorkspaceControllerLike,
-  type WorkspaceRegistryLike,
-} from './host/gateway.ts'
 import { readLocalAttentionCatalog } from './host/local-attention.ts'
 import { DeviceRegistry } from './host/registry.ts'
 import { resolvePluginStorage } from './host/storage.ts'
@@ -38,25 +30,19 @@ export const name = 'dsh-multi-device'
 
 /**
  * Only require `webServer` as a hard Cordis injection so the plugin still loads
- * and provides Native Mode even if higher-level controller services change in
- * future DSH releases.
+ * and provides the device tab strip even if higher-level controller services
+ * change in future DSH releases.
  */
 export const inject = ['webServer']
 
 export interface Config {
-  /** Custom path to persist device & aggregation config; defaults to the current Profile plugin storage. */
+  /** Custom path to persist device config; defaults to the current Profile plugin storage. */
   readonly dataFile?: string
   /** Custom path to persist device auth secrets; defaults to the current Profile plugin storage. */
   readonly secretsFile?: string
   readonly features?: {
-    /** Enable Aggregated Mode (unified sidebar workspaces & sessions). Default: true. */
-    readonly aggregatedMode?: boolean
-    /** Enable Native Mode local reverse-proxy & keep-alive viewport. Default: true. */
-    readonly nativeMode?: boolean
     /** Enable automatic SSH tunnel management. Default: true. */
     readonly sshTunnel?: boolean
-    /** Enable automatic Git remote workspace aggregation by default. Default: true. */
-    readonly autoGitAggregate?: boolean
     /**
      * Expose the legacy HTTP(S) direct transport. SSH is the supported user
      * flow; direct exists only for advanced compatibility and tests.
@@ -71,10 +57,7 @@ export const Config = z.object({
   secretsFile: z.string(),
   features: z
     .object({
-      aggregatedMode: z.boolean().default(true),
-      nativeMode: z.boolean().default(true),
       sshTunnel: z.boolean().default(true),
-      autoGitAggregate: z.boolean().default(true),
       directTransport: z.boolean().default(false),
     })
     .default({}),
@@ -118,6 +101,11 @@ export function apply(ctx: Context, config?: Config): void {
   }
 }
 
+/** The slice of DSH's `workspaceRegistry` this plugin reads. */
+interface WorkspaceRegistryLike {
+  readonly archivedSessionIds: readonly string[]
+}
+
 function applyHost(
   ctx: Context,
   resolved: Config,
@@ -126,8 +114,6 @@ function applyHost(
   secretsFile: string,
 ): void {
   const features = resolved.features ?? {}
-  const enableAggregated = features.aggregatedMode !== false
-  const enableNative = features.nativeMode !== false
   const enableTunnels = features.sshTunnel !== false
 
   const webServer = (ctx as unknown as {
@@ -177,23 +163,6 @@ function applyHost(
     }
   }
 
-  // Local Session activity arrives as `api-session/activity`; keeping the
-  // latest timestamp avoids sorting local Sessions by creation time.
-  const localSessionActivity = new Map<string, number>()
-  ctx.effect(() => {
-    const on = (ctx as unknown as {
-      on?: (event: string, listener: (sessionId: string, updatedAt: number) => void) => (() => void) | void
-    }).on
-    if (typeof on !== 'function') return () => {}
-    const dispose = on.call(ctx, 'api-session/activity', (sessionId, updatedAt) => {
-      if (typeof sessionId === 'string' && typeof updatedAt === 'number') {
-        localSessionActivity.set(sessionId, updatedAt)
-      }
-    })
-    return typeof dispose === 'function' ? dispose : () => {}
-  }, 'dsh-multi-device: local session activity')
-
-  let localCatalogRows: readonly import('./host/aggregated-catalog.ts').CatalogSummaryInput[] = []
   const registry = new DeviceRegistry(
     dataFile,
     secretsFile,
@@ -202,38 +171,6 @@ function applyHost(
       localSessionCatalog: signal => readLocalAttentionCatalog(
         key => (ctx as unknown as { get?: (key: string) => unknown }).get?.(key), signal,
       ),
-      localWorkspaces: () => {
-        const runningIds = new Set<string>()
-        try {
-          for (const agent of getLocalAgents()?.list?.() ?? []) {
-            if (agent.status === 'running') runningIds.add(String(agent.id))
-          }
-        } catch {
-          // Ignore
-        }
-        return readLocalPhysicalWorkspaces(getWorkspaceRegistry(), runningIds)
-      },
-      localSessionUpdatedAt: () => {
-        const map = new Map<string, number>(localSessionActivity)
-        try {
-          const live = new Set<string>()
-          for (const s of getLocalSessions()?.list?.() ?? []) {
-            const id = String(s.id)
-            live.add(id)
-            if (!map.has(id)) map.set(id, s.header?.createdAt ?? 0)
-          }
-          // The activity map only ever grows; a deleted Session would
-          // otherwise keep contributing a stale recency forever.
-          for (const id of localSessionActivity.keys()) {
-            if (!live.has(id)) localSessionActivity.delete(id)
-          }
-        } catch {
-          // Ignore
-        }
-        return map
-      },
-      localPinnedSessionIds: () => getWorkspaceRegistry()?.pinnedSessionIds ?? [],
-      localSessionSummaries: () => localCatalogRows,
       // Archived Sessions have no default sidebar row, so the unread counters
       // must know about them to avoid reporting reminders that cannot be seen.
       localArchivedSessionIds: () => {
@@ -256,7 +193,6 @@ function applyHost(
     },
     {
       enableTunnels,
-      enableNativeProxy: enableNative,
       localOrigin: () => {
         try {
           if (typeof webServer?.getOrigin === 'function') return webServer.getOrigin()
@@ -354,24 +290,7 @@ function applyHost(
     return () => clearInterval(timer)
   }, 'dsh-multi-device: local pending compatibility')
 
-  if (features.autoGitAggregate === false) {
-    registry.aggregator.setConfig({ autoGitAggregate: false })
-  }
-
-  // The browser model picker caches one catalog per Host generation. Re-emit
-  // DSH's own model-change event whenever the active Session changes device or
-  // a remote device's catalog changes, so that picker refetches instead of
-  // offering stale/foreign groups.
-  registry.onModelCatalogChanged(() => {
-    try {
-      const emit = (ctx as unknown as { emit?: (event: string) => void }).emit
-      emit?.call(ctx, 'llm/adapters-updated')
-    } catch {
-      // The picker still refetches on the next connection reset.
-    }
-  })
-
-  // 1. Mount Control Plane HTTP + SSE routes (independent of Aggregated Mode!)
+  // 1. Mount Control Plane HTTP + SSE routes.
   // Re-read `connection` per request and call `requestRejection` as a method.
   // Detaching it (`const reject = connection.requestRejection; reject(...)`)
   // drops Cordis's traceable receiver and crashes the desktop host.
@@ -420,102 +339,6 @@ function applyHost(
     }
   }, 'dsh-multi-device: device registry')
 
-  // 3. Attach Aggregated Mode Gateway when enabled and Host services become available
-  if (enableAggregated) {
-    ctx.inject(
-      ['sessionController', 'workspaceController'],
-      (gatewayCtx) => {
-        gatewayCtx.effect(() => {
-          try {
-            const sessionController = (gatewayCtx as unknown as { sessionController: SessionControllerLike }).sessionController
-            const workspaceController = (gatewayCtx as unknown as { workspaceController: WorkspaceControllerLike }).workspaceController
-
-            registry.setLocalWorkspaceCreator(async (path) => {
-              await workspaceController.create({ path })
-            })
-            registry.setLocalSessionCreator(async (cwd) => {
-              const created = await sessionController.create({ cwd })
-              return created.sessionId
-            })
-
-            const abort = new AbortController()
-            let dirty = true
-            let refreshing = false
-            const refreshLocal = async (): Promise<void> => {
-              dirty = true
-              if (refreshing) return
-              refreshing = true
-              try {
-                while (dirty && !abort.signal.aborted) {
-                  dirty = false
-                  const result = await sessionController.list({}, abort.signal)
-                  if (abort.signal.aborted) return
-                  localCatalogRows = result.items as unknown as readonly import('./host/aggregated-catalog.ts').CatalogSummaryInput[]
-                  registry.refreshWorkspaceView()
-                }
-              } catch (error) {
-                if (!abort.signal.aborted) console.error('[dsh-multi-device] Local directory refresh failed', error)
-              } finally { refreshing = false }
-            }
-            registry.setLocalCatalogAdapters(async (sessionId, operation, title, stopActivity) => {
-              if (operation === 'rename') {
-                if (!title?.trim()) throw new Error('A non-empty title is required')
-                await sessionController.rename({ sessionId, title: title.trim() })
-              } else if (operation === 'fork') {
-                const result = await sessionController.fork({ sessionId })
-                await refreshLocal()
-                return result
-              } else {
-                const methods = { archive: 'archiveSession', unarchive: 'unarchiveSession', pin: 'pinSession', unpin: 'unpinSession' } as const
-                await workspaceController[methods[operation]]({ sessionId, ...(operation === 'archive' && stopActivity === true ? { stopActivity: true } : {}) })
-              }
-              await refreshLocal()
-              return {}
-            }, async (query, signal) => (await sessionController.search({ query },
-              signal === undefined ? abort.signal : AbortSignal.any([abort.signal, signal]))).items.map(item => item.sessionId))
-            const disposers: (() => void)[] = []
-            const events = ['api-session/added', 'api-session/removed', 'api-session/activity', 'api-session/status', 'workspace/changed']
-            for (const event of events) {
-              const off = (gatewayCtx as unknown as { on?: (event: string, listener: () => void) => (() => void) | void }).on?.(event, () => { void refreshLocal() })
-              if (typeof off === 'function') disposers.push(off)
-            }
-            const offDomain = (gatewayCtx as unknown as { on?: (event: string, listener: (change: { domain?: string }) => void) => (() => void) | void }).on?.('domain/changed', change => {
-              if (change.domain === 'workspace') void refreshLocal()
-            })
-            if (typeof offDomain === 'function') disposers.push(offDomain)
-            const timer = setInterval(() => { void refreshLocal() }, 15_000)
-            timer.unref?.()
-            void refreshLocal()
-            // The independent catalog does not patch local controllers or Typert dispatch.
-            registry.setGatewayStatus(true)
-            return () => {
-              abort.abort()
-              clearInterval(timer)
-              for (const dispose of disposers) dispose()
-              registry.setGatewayStatus(false)
-            }
-          } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error)
-            console.error(
-              `[dsh-multi-device] Aggregated Mode Gateway degraded (${msg}); Native Mode remains fully operational.`,
-            )
-            registry.setGatewayStatus(false, msg)
-            // Staying in Aggregated Mode without a gateway is a broken
-            // pseudo-aggregate: remote Sessions vanish and the repair loop
-            // can never heal them. Fall back to Native Mode so the UI never
-            // sits in a state that silently drops remote data.
-            if (registry.isAggregatedMode()) {
-              console.error('[dsh-multi-device] Reverting to Native Mode: the aggregated gateway is unavailable.')
-              registry.setDisplayMode('native')
-            }
-            return () => {}
-          }
-        }, 'dsh-multi-device: aggregated-gateway-02')
-      },
-    )
-  } else {
-    registry.setGatewayStatus(false, 'Disabled by configuration')
-  }
 }
 
 export * from './contract.ts'

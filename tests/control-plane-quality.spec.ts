@@ -13,57 +13,10 @@ function registry() {
   const directory = mkdtempSync(join(process.cwd(), '.quality-control-'))
   const instance = new DeviceRegistry(join(directory, 'state.json'), join(directory, 'secrets.json'), {
     localPort: () => 3080, localWorkspaces: () => [], localSessionUpdatedAt: () => new Map(),
-  }, { enableNativeProxy: false, enableTunnels: false })
+  }, { enableTunnels: false })
   cleanups.push(() => { instance.dispose(); rmSync(directory, { recursive: true, force: true }) })
   return instance
 }
-
-describe('partial catalog search', () => {
-  it('returns successful sources and identifies each failed device', async () => {
-    const instance = registry()
-    const internal = instance as any
-    internal.localCatalogSearch = async () => ['local-hit']
-    internal.clients.set(DeviceId('bad'), {
-      id: DeviceId('bad'), deviceConfig: { name: 'Bad' }, isConnected: () => true, stop() {},
-      invokeUnary: async () => { throw new Error('search backend failed') },
-    })
-    internal.clients.set(DeviceId('good'), {
-      id: DeviceId('good'), deviceConfig: { name: 'Good' }, isConnected: () => true, stop() {},
-      invokeUnary: async () => ({ items: [{ sessionId: 'remote-hit' }] }),
-    })
-    const result = await instance.searchCatalogSessions('hit')
-    expect(result.sessionIds).toEqual(expect.arrayContaining(['local-hit', encodeRemoteSessionId(DeviceId('good'), 'remote-hit')]))
-    expect(result.errors).toEqual({ bad: 'search backend failed' })
-  })
-  it('cancels local catalog search through the dispatch signal instead of reporting partial failure', async () => {
-    const instance = registry()
-    const search = vi.fn(async (_query: string, signal?: AbortSignal) => await new Promise<readonly string[]>((_resolve, reject) => {
-      signal?.addEventListener('abort', () => reject(new Error('adapter cancelled')), { once: true })
-    }))
-    instance.setLocalCatalogAdapters(async () => ({}), search)
-    const controller = new AbortController()
-    const pending = new MultiDeviceControlPlane(instance).dispatch({ action: 'searchCatalogSessions', payload: { query: 'hit' } }, controller.signal)
-    controller.abort()
-    expect(await pending).toEqual({ ok: false, error: 'Catalog search aborted' })
-    expect(search).toHaveBeenCalledOnce()
-    expect(search.mock.calls[0]?.[1]).toBe(controller.signal)
-  })
-  it('propagates caller cancellation to the read-only remote model catalog', async () => {
-    const instance = registry()
-    const invokeUnary = vi.fn(async () => ({ models: [] }))
-    vi.spyOn(instance, 'isAggregatedMode').mockReturnValue(true)
-    vi.spyOn(instance, 'sessionScope').mockReturnValue({
-      kind: 'remote', deviceName: 'Remote',
-      client: { isConnected: () => true, invokeUnary },
-    } as any)
-    const controller = new AbortController()
-    const result = await new MultiDeviceControlPlane(instance).dispatch({
-      action: 'modelCatalog', payload: { sessionId: 'md~device~session' },
-    }, controller.signal)
-    expect(result).toEqual({ ok: true, value: { models: [] } })
-    expect(invokeUnary).toHaveBeenCalledWith('session', 'modelCatalog', {}, controller.signal)
-  })
-})
 
 describe('bounded stream queue', () => {
   it('preserves FIFO order across repeated ring-buffer compaction', () => {
@@ -89,30 +42,33 @@ describe('control-plane transport boundaries', () => {
 
   it('rejects malformed fields before dispatch and preserves valid optional/empty fields', async () => {
     const invalid: unknown[] = [
-      { action: 'setMemberExcluded', payload: { memberKey: 'local:/repo', excluded: 'false' } },
+      // Removed aggregated-mode actions must be rejected as unknown, not ignored.
+      { action: 'setDisplayMode', payload: { displayMode: 'native' } },
+      { action: 'catalogSessionAction', payload: { sessionId: 'local', operation: 'rename' } },
+      { action: 'searchCatalogSessions', payload: { query: 'hit' } },
+      { action: 'modelCatalog', payload: { sessionId: 'md~device~session' } },
+      { action: 'createSession', payload: { deviceId: 'remote', cwd: '/repo' } },
+      { action: 'updateAggregationConfig', payload: { autoGitAggregate: true } },
+      { action: 'startGitMatch', payload: {} },
+      { action: 'setPreferredDevice', payload: { logicalWorkspaceId: 'ws', deviceId: 'remote' } },
       { action: 'setActiveSession', payload: { sessionId: 'local', requestSeq: 1.5 } },
       { action: 'removeDevice', payload: { deviceId: 42 } },
       { action: 'upsertDevice', payload: { name: 'bad', transport: { kind: 'ssh', host: 'host', port: 70000 } } },
       { action: 'testDevice', payload: { name: 'bad', transport: { kind: 'direct', baseUrl: 'https://host', rejectUnauthorized: 'no' } } },
       { action: 'upsertDevice', payload: { name: 'bad', transport: { kind: 'ssh', host: 'host' }, auth: { mode: 'unknown' } } },
-      { action: 'updateAggregationConfig', payload: { excludedMemberKeys: 'local:/repo' } },
-      { action: 'upsertManualRule', payload: { id: 'rule', title: '', memberKeys: [42] } },
-      { action: 'setUiPreferences', payload: { nativePane: 1 } },
+      { action: 'setUiPreferences', payload: { crossHostReadState: 1 } },
     ]
     for (const request of invalid) expect(() => parseControlPlaneRequest(request)).toThrow()
     const instance = registry()
-    const excluded = vi.spyOn(instance.aggregator, 'setMemberExcluded')
     const upsert = vi.spyOn(instance, 'upsertDevice')
     expect(await new MultiDeviceControlPlane(instance).dispatch(invalid[0] as any)).toMatchObject({ ok: false })
-    expect(await new MultiDeviceControlPlane(instance).dispatch(invalid[3] as any)).toMatchObject({ ok: false })
-    expect(excluded).not.toHaveBeenCalled()
+    expect(await new MultiDeviceControlPlane(instance).dispatch(invalid[10] as any)).toMatchObject({ ok: false })
     expect(upsert).not.toHaveBeenCalled()
     const valid: unknown[] = [
       { action: 'setActiveSession', payload: { sessionId: '', requestSeq: 0 } },
-      { action: 'catalogSessionAction', payload: { sessionId: 'local', operation: 'rename', title: '', stopActivity: false } },
-      { action: 'createSession', payload: { deviceId: 'remote', cwd: '/repo' } },
-      { action: 'setCustomTitle', payload: { logicalWorkspaceId: 'workspace', title: '' } },
+      { action: 'setUiPreferences', payload: { crossHostReadState: true } },
       { action: 'authenticateDevice', payload: { deviceId: 'remote', credential: '' } },
+      { action: 'markSessionRead', payload: { sessionId: 'md~remote~session' } },
     ]
     for (const request of valid) expect(() => parseControlPlaneRequest(request)).not.toThrow()
   })

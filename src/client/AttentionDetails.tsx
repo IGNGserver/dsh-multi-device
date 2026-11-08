@@ -11,7 +11,7 @@
  *   default colours and read as a foreign widget.
  * - The chip prints a number, not a sentence: `●23` instead of `23 未读`. The
  *   category is carried by the icon, the tooltip and the group heading, which
- *   keeps three device tabs on one row instead of pushing the Aggregated switch
+ *   keeps three device tabs on one row instead of pushing the trailing cluster
  *   into the scrolled-away part of the strip.
  * - A row names the conversation (`title`), then `workspace · device · age`.
  *   The raw Session ID stays available as the row's tooltip and is the visible
@@ -41,10 +41,10 @@ import {
   type MultiDeviceSnapshot,
 } from '../contract.ts'
 import {
-  relativeAge,
   resolveAttentionSessions,
   type AttentionSessionRow,
 } from './attentionSessions.ts'
+import { getClientServices } from './clientServices.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
 import { clientStore, deviceStateToDotState, useMultiDeviceState } from './state.ts'
 
@@ -104,19 +104,6 @@ const CATEGORY_COUNT_KEY: Record<AttentionCategory, MultiDeviceLocaleKey> = {
   unread: 'unreadCount',
 }
 
-const AGE_KEY: Record<'minutes' | 'hours' | 'days', MultiDeviceLocaleKey> = {
-  minutes: 'attentionAgeMinutes',
-  hours: 'attentionAgeHours',
-  days: 'attentionAgeDays',
-}
-
-function ageLabel(row: AttentionSessionRow, now: number, t: (key: MultiDeviceLocaleKey) => string): string | undefined {
-  const age = relativeAge(row.updatedAt, now)
-  if (age === undefined) return undefined
-  if (age.unit === 'now') return t('attentionAgeNow')
-  return t(AGE_KEY[age.unit]).replace('{count}', String(age.n))
-}
-
 function deviceStateOf(snapshot: MultiDeviceSnapshot, deviceId: string): DeviceConnectionState {
   if (deviceId === LOCAL_DEVICE_ID) return 'connected'
   return snapshot.devices.find(device => device.id === deviceId)?.state ?? 'error'
@@ -138,7 +125,6 @@ export function AttentionDetails({
   const snapshot = state.snapshot
   const words = attentionLabels(t)
   const [openCategory, setOpenCategory] = useState<AttentionCategory | null>(null)
-  const [openedAt, setOpenedAt] = useState(0)
   const [failure, setFailure] = useState<{ seq: number; message: string } | null>(null)
 
   const fresh = view?.fresh ?? fallback?.fresh ?? false
@@ -161,32 +147,33 @@ export function AttentionDetails({
   }
 
   /**
-   * Open one row. In Native Mode the owning tab has to be visible first: the
-   * Host publishes the navigation to that device's framed page, and a frame the
-   * user cannot see would swallow the result.
+   * Open one row. The owning tab has to be visible first: the Host publishes
+   * the navigation to that device's framed page, and a frame the user cannot
+   * see would swallow the result.
    */
   const openRow = async (row: AttentionSessionRow): Promise<void> => {
     setOpenCategory(null)
     const decoded = decodeSessionId(row.sessionId)
-    if (clientStore.getSnapshot().displayMode === 'native') {
-      try {
-        if (decoded.isRemote) {
-          const switched = await clientStore.selectNativeDevice(decoded.deviceId)
-          if (!switched.ok) {
-            fail(switched.error)
-            return
-          }
-        } else {
-          clientStore.selectLocalNativeTab()
+    try {
+      if (!decoded.isRemote) {
+        clientStore.selectLocalNativeTab()
+        const workspace = getClientServices().uiWorkspace
+        if (workspace === undefined || typeof workspace.openSession !== 'function') {
+          fail(undefined)
+          return
         }
-      } catch (error) {
-        fail(error instanceof Error ? error.message : String(error))
+        workspace.openSession(row.sessionId)
+        await clientStore.setActiveSession(row.sessionId)
         return
       }
-    }
-    try {
-      const result = await clientStore.openCatalogSession(row.sessionId)
-      if (!result.ok) fail(result.error)
+      const switched = await clientStore.selectNativeDevice(decoded.deviceId)
+      if (!switched.ok) {
+        fail(switched.error)
+        return
+      }
+      // Publishing the selection is what makes the Host tell that device's
+      // framed page to open the conversation.
+      await clientStore.setActiveSession(row.sessionId)
     } catch (error) {
       fail(error instanceof Error ? error.message : String(error))
     }
@@ -199,11 +186,10 @@ export function AttentionDetails({
     }
     const rows = resolveAttentionSessions(ids, snapshot, {
       localDeviceName: t('nativeLocalTab'),
-      now: openedAt,
+      owningDeviceName: deviceName,
     })
     return rows.map(row => {
-      const age = ageLabel(row, openedAt, t)
-      const meta = [row.workspace ?? row.cwd, row.deviceName, age]
+      const meta = [row.cwd, row.deviceName]
         .filter((part): part is string => part !== undefined && part !== '')
       const minimal = row.title === ''
       return (
@@ -248,7 +234,6 @@ export function AttentionDetails({
                 setOpenCategory(null)
                 return
               }
-              setOpenedAt(Date.now())
               setOpenCategory(group.category)
             }}
           >
