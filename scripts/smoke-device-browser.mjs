@@ -428,7 +428,17 @@ export async function main() {
     await dismissWelcome(nativeFrame)
     // The device page owns its own navigation: open the fixture conversation
     // from the remote sidebar, exactly as a user would inside that tab.
-    await nativeFrame.getByText(remoteFixture.sessions[0].title, { exact: true }).first().click({ timeout: TIMEOUT })
+    const remoteRow = nativeFrame.getByText(remoteFixture.sessions[0].title, { exact: true }).first()
+    await remoteRow.waitFor({ timeout: TIMEOUT })
+    await page.screenshot({ path: join(run, '02a-device-page-before-open.png'), fullPage: true })
+    try {
+      await remoteRow.click({ timeout: 20_000 })
+    } catch (error) {
+      // A slow runner can re-render the first-launch notice over the sidebar
+      // between the dismiss and the click. Clear it once, then retry.
+      await dismissWelcome(nativeFrame)
+      await nativeFrame.getByText(remoteFixture.sessions[0].title, { exact: true }).first().click({ timeout: 20_000 })
+    }
     await nativeFrame.getByText(`Isolated browser smoke fixture: ${remoteFixture.sessions[0].id}`, { exact: true }).waitFor({ timeout: TIMEOUT })
     log('Device tab shows the remote DSH page and its own history')
     await page.screenshot({ path: join(run, '02-device-page.png'), fullPage: true })
