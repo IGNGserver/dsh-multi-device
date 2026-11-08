@@ -270,7 +270,7 @@ class Server {
     if (enabled) {
       check(response.ok, `Control-plane snapshot returned HTTP ${response.status}`)
       const snapshot = await response.json()
-      check(snapshot.ok === true && Number.isFinite(snapshot.value?.revision) && Array.isArray(snapshot.value.devices) && snapshot.value.devices.length === 0 && Array.isArray(snapshot.value.logicalWorkspaces) && snapshot.value.hostStatus, 'Invalid/nonempty fresh control-plane snapshot')
+      check(snapshot.ok === true && Number.isFinite(snapshot.value?.revision) && Array.isArray(snapshot.value.devices) && snapshot.value.devices.length === 0 && Array.isArray(snapshot.value.unreadSessionIds) && Array.isArray(snapshot.value.sshConfigHosts), 'Invalid/nonempty fresh control-plane snapshot')
       const attention = snapshot.value.attentionByDevice?.local
       check(attention && ['eligibleSessionIds', 'runningSessionIds', 'pendingSessionIds', 'unreadSessionIds'].every(key => Array.isArray(attention[key])) && typeof attention.fresh === 'boolean', 'Installed Host did not publish the attention member/freshness protocol')
       check(snapshot.value.readCompletions && typeof snapshot.value.readCompletions === 'object' && !Array.isArray(snapshot.value.readCompletions), 'Installed Host did not publish completion cursors')
@@ -282,7 +282,7 @@ class Server {
       const text = await response.text()
       let value
       try { value = JSON.parse(text) } catch { /* expected missing route or SPA fallback */ }
-      check(!(response.ok && value?.ok === true && value.value?.hostStatus), 'Disabled/removed control plane still active')
+      check(!(response.ok && value?.ok === true && Array.isArray(value.value?.devices)), 'Disabled/removed control plane still active')
     }
     return { bundle, rows, graph }
   }

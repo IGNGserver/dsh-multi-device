@@ -426,6 +426,9 @@ export async function main() {
     const client1 = await assertDeviceFrame(page, frame1, deviceId)
     const nativeFrame = frame1.locator('iframe').contentFrame()
     await dismissWelcome(nativeFrame)
+    // The device page owns its own navigation: open the fixture conversation
+    // from the remote sidebar, exactly as a user would inside that tab.
+    await nativeFrame.getByText(remoteFixture.sessions[0].title, { exact: true }).first().click({ timeout: TIMEOUT })
     await nativeFrame.getByText(`Isolated browser smoke fixture: ${remoteFixture.sessions[0].id}`, { exact: true }).waitFor({ timeout: TIMEOUT })
     log('Device tab shows the remote DSH page and its own history')
     await page.screenshot({ path: join(run, '02-device-page.png'), fullPage: true })
