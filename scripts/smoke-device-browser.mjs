@@ -467,10 +467,13 @@ export async function main() {
     await tab2.screenshot({ path: join(run, '03-tab-2-local.png'), fullPage: true })
     await page.screenshot({ path: join(run, '04-tab-1-device.png'), fullPage: true })
     await context.addCookies(remote.cookie.split('; ').map(value => { const index = value.indexOf('='); return { name: value.slice(0, index), value: value.slice(index + 1), url: remote.origin, httpOnly: true, sameSite: 'Lax' } }))
+    log('Plugin-free raw official UI comparison: opening the remote origin directly')
     const officialOnly = await context.newPage(); watchPage(officialOnly, records, 'official-only-control')
     await officialOnly.goto(remote.origin, { waitUntil: 'domcontentloaded' })
-    await officialOnly.getByRole('button', { name: /^(继续|Continue)$/i }).waitFor({ state: 'visible', timeout: 10_000 })
+    // The device page inside the tab already accepted this origin's first-launch
+    // notice in this profile, so the notice may or may not still be there.
     await dismissWelcome(officialOnly)
+    await officialOnly.getByText(remoteFixture.sessions[0].title, { exact: true }).first().waitFor({ timeout: TIMEOUT })
     for (const session of [remoteFixture.sessions[0], remoteFixture.sessions[1], remoteFixture.sessions[0]]) {
       await officialOnly.getByText(session.title, { exact: true }).first().click({ timeout: 10_000 })
       await officialOnly.getByText(`Isolated browser smoke fixture: ${session.id}`, { exact: true }).waitFor({ timeout: 10_000 })
