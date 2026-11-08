@@ -28,7 +28,12 @@ import {
   type SshKeyEntry,
   type UpsertDeviceInput,
 } from '../contract.ts'
-import { emptyDeviceAttention, selectDeviceAttention, type SessionAttentionFact } from '../attention.ts'
+import {
+  type DeviceAttentionView,
+  emptyDeviceAttention,
+  selectDeviceAttention,
+  type SessionAttentionFact,
+} from '../attention.ts'
 import { readRemoteCompletionIdentity } from './completion-identity.ts'
 import { DeviceAuthManager } from './auth.ts'
 import { decodeCatalogDocument, decodeLegacyCatalogs, encodeCatalogDocument } from './catalog-codec.ts'
@@ -58,6 +63,36 @@ import {
   resolveSshConfigForTransport,
 } from './ssh-config.ts'
 import { execSshCommand, probeSshTunnel } from './tunnel.ts'
+
+/**
+ * Join the remote Sessions an attention menu can open to the titles the Host
+ * already holds for them.
+ *
+ * Pure on purpose: the catalog is only reached through `titlesFor`, which is
+ * called at most once per device that actually appears in `attention`. Only
+ * remote IDs are emitted — local conversations are named by the browser's own
+ * Session store, which is live and knows renames first.
+ */
+export function collectAttentionSessionTitles(
+  attention: Readonly<Record<string, DeviceAttentionView>>,
+  titlesFor: (deviceId: DeviceId) => ReadonlyMap<string, string> | undefined,
+): Record<string, string> {
+  const titles: Record<string, string> = {}
+  const perDevice = new Map<DeviceId, ReadonlyMap<string, string> | undefined>()
+  const seen = new Set<string>()
+  for (const view of Object.values(attention)) {
+    for (const sessionId of [...view.runningSessionIds, ...view.pendingSessionIds, ...view.unreadSessionIds]) {
+      if (seen.has(sessionId)) continue
+      seen.add(sessionId)
+      const decoded = decodeSessionId(sessionId)
+      if (!decoded.isRemote) continue
+      if (!perDevice.has(decoded.deviceId)) perDevice.set(decoded.deviceId, titlesFor(decoded.deviceId))
+      const title = perDevice.get(decoded.deviceId)?.get(decoded.rawSessionId)?.trim()
+      if (title !== undefined && title !== '') titles[sessionId] = title
+    }
+  }
+  return titles
+}
 
 /**
  * The SSH tunnel can be up while DSH itself still rejects the HTTP call.
@@ -446,11 +481,39 @@ export class DeviceRegistry {
       if (oldest !== undefined) this.activeSessions.delete(oldest)
     }
     this.activeSessions.set(key, { sessionId: next, seq: requestSeq })
+    // Hand a *new* remote selection to that device's framed page. Without this
+    // the browser switched tabs and the Host recorded the Session, but nothing
+    // ever reached the page, so an attention row clicked from a device tab
+    // opened nothing at all. Only a real change publishes: the Client reports
+    // the same selection on every snapshot poll, and re-sending `open-session`
+    // would restart the remote navigation each time.
+    if (changed) this.publishRemoteSelection(previous?.sessionId, next, key)
     // Snapshot caching is revision-based: local selection and same-session
     // sequence retries must invalidate it just like a remote tab selection.
     if (navigationChanged) this.bumpRevision()
     // Selection is not presence. Only a visible viewing client explicitly marks read.
     return changed
+  }
+
+  /**
+   * Publish a changed selection to the owning device page, and forget the old
+   * device's queued target.
+   *
+   * A queued target outlives the switch on purpose: the proxy replays it when
+   * that page's bridge connects. It must not outlive the device actually being
+   * left, or a later reconnect would re-open a conversation the user left.
+   */
+  private publishRemoteSelection(
+    previousSessionId: string | undefined,
+    nextSessionId: string | undefined,
+    clientId: string,
+  ): void {
+    const previous = previousSessionId === undefined ? undefined : decodeSessionId(previousSessionId)
+    const next = nextSessionId === undefined ? undefined : decodeSessionId(nextSessionId)
+    if (previous?.isRemote && previous.deviceId !== next?.deviceId) {
+      this.nativeProxyManager.clearPendingSession(previous.deviceId, clientId)
+    }
+    if (next?.isRemote) this.publishNativePaneSession(next.deviceId, clientId)
   }
 
   /**
@@ -1589,6 +1652,20 @@ export class DeviceRegistry {
       attentionByDevice[client.id] = projected[client.id] ?? emptyDeviceAttention(fresh)
     }
 
+    // Remote conversations cannot be named by the browser (their page is
+    // cross-origin). Join the ones an attention menu can open to this device's
+    // catalog titles, which the Host already keeps for its own list surface.
+    const sessionTitles = collectAttentionSessionTitles(attentionByDevice, (deviceId) => {
+      const owner = this.clients.get(deviceId)
+      if (owner === undefined) return undefined
+      const titles = new Map<string, string>()
+      for (const summary of owner.sessionSummaries()) {
+        const title = summary.projections?.values.title
+        if (typeof title === 'string') titles.set(summary.sessionId, title)
+      }
+      return titles
+    })
+
     const result: MultiDeviceSnapshot = {
       revision: this.revision,
       hostId: this.hostId,
@@ -1607,6 +1684,7 @@ export class DeviceRegistry {
       unreadSessionIds: this.readTracker.unreadIds(),
       readCompletions: this.readTracker.completionIds(),
       attentionByDevice,
+      ...(Object.keys(sessionTitles).length > 0 ? { sessionTitles } : {}),
       archivedSessionIds: [...archivedSessionIds].sort(),
       subagentSessionIds: [...subagentSessionIds].sort(),
       ui: { ...this.uiPreferences },

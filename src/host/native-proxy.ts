@@ -1420,6 +1420,14 @@ export class NativeProxyManager {
     return true
   }
 
+  /** Drop one device page's queued navigation target for this Client. */
+  clearPendingSession(deviceId: DeviceId, clientId = LEGACY_CLIENT_ID): boolean {
+    const proxy = this.proxies.get(deviceId)
+    if (proxy === undefined) return false
+    proxy.clearPendingSession(clientId)
+    return true
+  }
+
   /** Ask the framed page to refresh its own Session catalog. */
   requestRefresh(deviceId: DeviceId): boolean {
     const proxy = this.proxies.get(deviceId)

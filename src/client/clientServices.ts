@@ -14,7 +14,13 @@ import { useSyncExternalStore } from 'react'
 export interface SessionSummaryLike {
   readonly cwd?: string
   readonly blank?: boolean
+  /** Durable log-backed title, absent until the host projects one. */
+  readonly title?: string
+  /** Human-facing label: durable title, project basename, then the id. */
+  readonly displayTitle?: string
   readonly projectionValues?: Readonly<Record<string, unknown>>
+  /** Local ownership counts; the main view is the Session on screen. */
+  readonly retainedBy?: { readonly mainView?: number }
 }
 
 export interface SessionsListSnapshotLike {
@@ -95,6 +101,21 @@ export function useSessionSummary(sessionId: string | undefined): SessionSummary
       if (sessionId === undefined || services.sessions === undefined) return undefined
       return services.sessions.list.getSnapshot().byId[sessionId]
     },
+    () => undefined,
+  )
+}
+
+/**
+ * Subscribe to the whole Session-list snapshot.
+ *
+ * Attention menus resolve a title for every row at once, so they need the map
+ * rather than one row. Hooks cannot be called per row, so the component holds
+ * this one subscription and passes a plain lookup into the join.
+ */
+export function useSessionListSnapshot(): SessionsListSnapshotLike | undefined {
+  return useSyncExternalStore(
+    subscribeSessionSummary,
+    () => services.sessions?.list.getSnapshot(),
     () => undefined,
   )
 }

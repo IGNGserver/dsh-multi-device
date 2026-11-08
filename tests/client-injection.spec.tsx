@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { apply, type ClientContextLike } from '../src/client/index.tsx'
+import { getClientServices } from '../src/client/clientServices.ts'
 import { clientStore } from '../src/client/state.ts'
 
 // Keep apply(), both dependency-scoped effects and slot registration real;
@@ -27,7 +28,8 @@ function serviceGeneration(id: string) {
     list: observable({ ids: [id], byId: { [id]: { cwd: '/local', retainedBy: { mainView: 1 } } } }),
     refresh: vi.fn(async () => {}),
   }
-  return { sessions, layout }
+  const uiWorkspace = { openSession: vi.fn(), startSession: vi.fn() }
+  return { sessions, layout, uiWorkspace }
 }
 type Generation = ReturnType<typeof serviceGeneration>
 interface Scope {
@@ -99,7 +101,9 @@ function strictCordis(initial: Generation) {
     get(key) { if (key === 'layout') return generation.layout; throw new Error(`Unexpected root get ${key}`) },
   }
   return { root, effects, injections, activate, registered,
-    sessionInjection: () => injections.find(injection => injection.deps.includes('sessions'))!,
+    // Two injections share `sessions`; the tracking one also injects `layout`.
+    sessionInjection: () => injections.find(injection => injection.deps.includes('sessions') && injection.deps.includes('layout'))!,
+    servicesInjection: () => injections.find(injection => injection.deps.includes('uiWorkspace'))!,
     dispose: () => {
       for (const injection of [...injections].reverse()) for (const scope of [...injection.scopes].reverse()) scope.dispose()
       for (const dispose of [...rootDisposers].reverse()) dispose()
@@ -161,6 +165,22 @@ describe('strict Cordis injection activates the client entry', () => {
     expect(clientStore.getSnapshot().activeSessionId).toBe('new-local')
     scope.dispose()
     expect(next.sessions.list.listeners.size).toBe(0)
+  })
+
+  it('binds the Session store and navigation surface so attention rows can act', () => {
+    // The device UI renders from a slot component, so it can only reach these
+    // services through the binding. Without it a click on a local Session had
+    // nothing to call, which is what "the menu does nothing" actually was.
+    const generation = serviceGeneration('local-a')
+    const h = strictCordis(generation)
+    cleanups.push(h.dispose)
+    apply(h.root)
+    expect(h.effects).toContain('dsh-multi-device: client services')
+    expect(getClientServices().sessions).toBe(generation.sessions)
+    expect(getClientServices().uiWorkspace).toBe(generation.uiWorkspace)
+
+    h.servicesInjection().scopes[0]!.dispose()
+    expect(getClientServices().uiWorkspace).toBeUndefined()
   })
 
   it('contributes only the native surfaces and never replaces official sidebar rows', () => {

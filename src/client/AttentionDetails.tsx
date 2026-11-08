@@ -14,12 +14,18 @@
  *   keeps three device tabs on one row instead of pushing the trailing cluster
  *   into the scrolled-away part of the strip.
  * - A row names the conversation (`title`), then `workspace · device · age`.
- *   The raw Session ID stays available as the row's tooltip and is the visible
- *   text only when neither the Host catalog nor the live store knows a title.
- * - Clicking a row opens that conversation through the Host
- *   (`openCatalogSession` handles local and remote owners); in Native Mode the
- *   owning device tab is selected first, so the frame that receives the
- *   navigation is the one the user ends up looking at.
+ *   Titles come from the browser's own Session store for local sessions and
+ *   from the Host's `sessionTitles` projection for remote ones; the raw Session
+ *   ID stays available as the row's tooltip and is the visible text only when
+ *   neither source knows a title.
+ * - Every category owns a fixed-width slot, and the freshness marker is a fixed
+ *   dot rather than a text chip. The strip is a shared row of device tabs, so a
+ *   chip that appeared whenever a Session started used to shift every tab to its
+ *   right; the reserved slots make the strip's geometry independent of attention
+ *   state.
+ * - Clicking a row opens that conversation: a local Session through DSH's own
+ *   `uiWorkspace.openSession`, a remote one by selecting its device tab and
+ *   publishing the selection so the Host tells that framed page to open it.
  *
  * @module dsh-multi-device/client/AttentionDetails
  */
@@ -42,9 +48,10 @@ import {
 } from '../contract.ts'
 import {
   resolveAttentionSessions,
+  resolveAttentionTitle,
   type AttentionSessionRow,
 } from './attentionSessions.ts'
-import { getClientServices } from './clientServices.ts'
+import { getClientServices, useSessionListSnapshot } from './clientServices.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
 import { clientStore, deviceStateToDotState, useMultiDeviceState } from './state.ts'
 
@@ -124,6 +131,9 @@ export function AttentionDetails({
   const state = useMultiDeviceState()
   const snapshot = state.snapshot
   const words = attentionLabels(t)
+  // One subscription for the whole menu: hooks cannot run per row, and the tab
+  // strip would otherwise re-subscribe for every device it renders.
+  const sessionList = useSessionListSnapshot()
   const [openCategory, setOpenCategory] = useState<AttentionCategory | null>(null)
   const [failure, setFailure] = useState<{ seq: number; message: string } | null>(null)
 
@@ -135,7 +145,13 @@ export function AttentionDetails({
         { category: 'running' as const, ids: [] as readonly string[], count: fallback?.runningCount ?? 0 },
         { category: 'unread' as const, ids: fallback?.unreadSessionIds ?? [], count: fallback?.unreadSessionIds.length ?? 0 },
       ]
-  const visible = groups.filter(group => group.count > 0)
+
+  /** Local store first, then the Host's projection for remote conversations. */
+  const titleFor = (sessionId: string): string | undefined =>
+    resolveAttentionTitle(sessionId, sessionList?.byId[sessionId], snapshot.sessionTitles)
+
+  /** Keep a 1–2 digit chip inside its fixed slot; never wrap the strip. */
+  const chipCount = (count: number): string => (count > 99 ? '99+' : String(count))
 
   const fail = (detail: string | undefined): void => {
     setFailure({
@@ -187,6 +203,7 @@ export function AttentionDetails({
     const rows = resolveAttentionSessions(ids, snapshot, {
       localDeviceName: t('nativeLocalTab'),
       owningDeviceName: deviceName,
+      title: titleFor,
     })
     return rows.map(row => {
       const meta = [row.cwd, row.deviceName]
@@ -213,11 +230,39 @@ export function AttentionDetails({
 
   return (
     <span className="dsh-md-attention" role="group" aria-label={`${deviceName} ${words.members}`}>
-      {!fresh && (
-        <span role="status" className="dsh-md-attention-stale" data-attention-stale="true">{words.stale}</span>
+      {/* Fixed-width freshness marker: the text form changed the tab width every
+          time a snapshot flipped between cached and live, so the word moves into
+          the marker's accessible name and tooltip. An empty slot keeps the
+          cluster from breathing. */}
+      {fresh ? (
+        <span className="dsh-md-attention-stale-slot" aria-hidden="true" />
+      ) : (
+        <span
+          role="status"
+          className="dsh-md-attention-stale"
+          data-attention-stale="true"
+          aria-label={words.stale}
+          title={words.stale}
+        >
+          <span className="dsh-md-attention-stale-dot" aria-hidden="true" />
+        </span>
       )}
-      {visible.map(group => {
+      {/* Every category keeps its slot whether or not it has members, so a
+          Session starting or finishing never moves the neighbouring tabs. An
+          empty slot carries no category attribute: "no members" must never read
+          as an authoritative zero. */}
+      {groups.map(group => {
         const label = t(CATEGORY_COUNT_KEY[group.category]).replace('{count}', String(group.count))
+        if (group.count === 0) {
+          return (
+            <span
+              key={group.category}
+              className="dsh-md-attention-slot"
+              data-attention-slot={group.category}
+              aria-hidden="true"
+            />
+          )
+        }
         const chip = (
           <button
             type="button"
@@ -238,7 +283,7 @@ export function AttentionDetails({
             }}
           >
             {categoryIcon(group.category)}
-            <span className="dsh-md-attention-count">{group.count}</span>
+            <span className="dsh-md-attention-count">{chipCount(group.count)}</span>
           </button>
         )
         return (

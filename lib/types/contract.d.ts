@@ -319,6 +319,17 @@ export interface MultiDeviceSnapshot {
     /** Shared sidebar-policy projection, including local; members make badges explainable. */
     readonly attentionByDevice?: Readonly<Record<string, DeviceAttentionView>>;
     /**
+     * Titles for the remote Sessions named in {@link attentionByDevice}.
+     *
+     * A remote conversation lives inside a cross-origin device page, so the local
+     * Session store cannot name it. The Host already holds each device's catalog
+     * titles, so it joins the ones an attention menu can open. Only those IDs are
+     * published — never whole catalogs, and never local IDs (the browser store
+     * names those itself). Keys are namespaced (`md~<device>~<raw>`). Optional so
+     * a newer Client still parses older Host snapshots.
+     */
+    readonly sessionTitles?: Readonly<Record<string, string>>;
+    /**
      * Sessions archived on their owning device. Local Session IDs are plain;
      * remote ones are namespaced. DSH hides archived rows by default, so the
      * unread counters subtract this set instead of reporting reminders the
