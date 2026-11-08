@@ -17,6 +17,7 @@ import {
   pathBasename,
   resolveAttentionSession,
   resolveAttentionSessions,
+  resolveAttentionTitle,
 } from '../src/client/attentionSessions.ts'
 
 const deviceId = DeviceId('dev-a')
@@ -73,5 +74,16 @@ describe('attention Session join', () => {
     expect(pathBasename('C:\\work\\project')).toBe('project')
     expect(pathBasename('/')).toBeUndefined()
     expect(pathBasename(undefined)).toBeUndefined()
+  })
+})
+
+describe('attention title resolution', () => {
+  it('prefers the live local label, then the durable title, then the Host map', () => {
+    const id = remoteId
+    expect(resolveAttentionTitle(id, { displayTitle: '本机标签', title: 'durable' }, { [id]: 'host' })).toBe('本机标签')
+    expect(resolveAttentionTitle(id, { displayTitle: '   ', title: 'durable' }, { [id]: 'host' })).toBe('durable')
+    expect(resolveAttentionTitle(id, undefined, { [id]: ' host ' })).toBe('host')
+    expect(resolveAttentionTitle(id, undefined, undefined)).toBeUndefined()
+    expect(resolveAttentionTitle(id, {}, { [id]: '   ' })).toBeUndefined()
   })
 })

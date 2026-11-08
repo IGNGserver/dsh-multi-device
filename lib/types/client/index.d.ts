@@ -16,6 +16,7 @@
  * @module dsh-multi-device/client
  */
 import React from 'react';
+import { type SessionsServiceLike, type UiWorkspaceServiceLike } from './clientServices.ts';
 import { type MultiDeviceLocaleKey } from './locales.ts';
 import { type SessionStatusSource } from './readState.ts';
 export declare const SETTINGS_SECTION_ID = "multi-device";
@@ -33,22 +34,6 @@ export interface SlotEntryLike {
             };
         };
     };
-}
-interface SessionSummaryLike {
-    readonly retainedBy?: {
-        readonly mainView?: number;
-    };
-}
-interface SessionsListSnapshotLike {
-    readonly ids: readonly string[];
-    readonly byId: Readonly<Record<string, SessionSummaryLike>>;
-}
-interface SessionsServiceLike {
-    readonly list: {
-        getSnapshot(): SessionsListSnapshotLike;
-        subscribe?(listener: () => void): () => void;
-    };
-    refresh(): Promise<void>;
 }
 export interface ClientContextLike {
     effect(fn: () => (() => void) | void, label?: string): void;
@@ -72,6 +57,8 @@ export interface ClientContextLike {
         };
     };
     sessions?: SessionsServiceLike;
+    /** DSH's own Session navigation surface (opens a conversation in the local UI). */
+    uiWorkspace?: UiWorkspaceServiceLike;
     uiSession?: {
         readonly sessionStatus?: SessionStatusSource;
     };
@@ -98,4 +85,3 @@ export declare function openSettingsSection(ctx: ClientContextLike, sectionId?: 
  */
 export declare function installLocalSessionTracking(source: ClientContextLike): () => void;
 export declare function apply(ctx: ClientContextLike): void;
-export {};

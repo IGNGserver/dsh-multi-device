@@ -16,6 +16,12 @@
  * @module dsh-multi-device/client
  */
 import React from 'react'
+import {
+  bindClientServices,
+  type SessionsListSnapshotLike,
+  type SessionsServiceLike,
+  type UiWorkspaceServiceLike,
+} from './clientServices.ts'
 import { LOCALE_NS, en, zh, type MultiDeviceLocaleKey } from './locales.ts'
 import { NativeOverlay } from './NativeOverlay.tsx'
 import { MultiDeviceHubPanel } from './MultiDeviceHubPanel.tsx'
@@ -55,20 +61,6 @@ export interface SlotEntryLike {
   }
 }
 
-interface SessionSummaryLike {
-  readonly retainedBy?: { readonly mainView?: number }
-}
-interface SessionsListSnapshotLike {
-  readonly ids: readonly string[]
-  readonly byId: Readonly<Record<string, SessionSummaryLike>>
-}
-interface SessionsServiceLike {
-  readonly list: {
-    getSnapshot(): SessionsListSnapshotLike
-    subscribe?(listener: () => void): () => void
-  }
-  refresh(): Promise<void>
-}
 export interface ClientContextLike {
   effect(fn: () => (() => void) | void, label?: string): void
   inject(deps: readonly string[], fn: (ctx: ClientContextLike) => void): void
@@ -86,6 +78,8 @@ export interface ClientContextLike {
     }
   }
   sessions?: SessionsServiceLike
+  /** DSH's own Session navigation surface (opens a conversation in the local UI). */
+  uiWorkspace?: UiWorkspaceServiceLike
   uiSession?: {
     readonly sessionStatus?: SessionStatusSource
   }
@@ -203,6 +197,23 @@ function applyClient(ctx: ClientContextLike): void {
     try { return ctx.locale.bind?.(LOCALE_NS) ?? translateFallback } catch { return translateFallback }
   }
   const handleOpenSettings = (): void => { openSettingsSection(ctx, SETTINGS_SECTION_ID) }
+
+  // Publish DSH's Session store and navigation surface to the device UI.
+  //
+  // The attention menus are rendered by a slot component, not by this entry, so
+  // they cannot receive these services as props. Binding them here is what makes
+  // an attention row actionable: without it `getClientServices()` stays empty and
+  // clicking a local Session can only report "could not open". It also gives the
+  // menus the conversation titles the local store already knows.
+  ctx.inject(['sessions', 'uiWorkspace'], (serviceCtx) => {
+    serviceCtx.effect(
+      () => bindClientServices({
+        ...(serviceCtx.sessions !== undefined ? { sessions: serviceCtx.sessions } : {}),
+        ...(serviceCtx.uiWorkspace !== undefined ? { uiWorkspace: serviceCtx.uiWorkspace } : {}),
+      }),
+      'dsh-multi-device: client services',
+    )
+  })
 
   // The local main view feeds the Host-owned read state; nothing is merged into
   // the local Session store, so this is the only local navigation the plugin

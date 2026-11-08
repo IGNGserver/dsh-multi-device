@@ -589,15 +589,9 @@ html[data-platform='darwin'] .dsh-md-frame-native.dsh-md-frame-desktop {
   -webkit-app-region: no-drag;
 }
 
-/* Compact bars render the mode switch and Settings before the tab strip, so
- * the Settings gear is always inside the visible viewport. */
-.dsh-md-native-bar-leading {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  flex: none;
-}
-
+/* Compact bars only tighten the gap and padding. The Settings entry stays in the
+ * trailing cluster at every width: moving it across the strip at 720px re-flowed
+ * every tab, and the bar's width is already clamped to the visible viewport. */
 .dsh-md-native-bar[data-compact='true'] {
   gap: 6px;
   padding: 0 8px;
@@ -720,6 +714,20 @@ html[data-platform='darwin'] .dsh-md-native-bar {
   flex-shrink: 0;
 }
 
+/*
+ * The keep-alive release button lives in a slot that exists for every device
+ * that can be kept alive, not only for the ones currently mounted. Adding it on
+ * the first click resized the tab and shifted every tab beside it.
+ */
+.dsh-md-tab-action-slot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex: none;
+}
+
 .dsh-md-pill-inner {
   display: inline-flex;
   align-items: center;
@@ -735,27 +743,21 @@ html[data-platform='darwin'] .dsh-md-native-bar {
   white-space: nowrap;
 }
 
-/* Latency is a diagnostic, not a label: keep it out of the resting layout and
- * reveal it when the pointer or keyboard focus is on that tab. */
-.dsh-md-pill-latency {
-  display: none;
-}
-
-.dsh-md-native-tab-item:hover .dsh-md-pill-latency,
-.dsh-md-native-tab-item:focus-within .dsh-md-pill-latency {
-  display: inline;
-}
-
 /*
- * Attention chips: a number with a category icon, never a sentence. Three
- * device tabs (name + 3 counts each) have to fit beside the trailing cluster,
- * and a "23 未读" chip per category did not.
+ * Attention chips: a number with a category icon, never a sentence. Every
+ * category owns a slot of this exact width whether or not it has members, and
+ * the freshness marker is a dot instead of a text chip, so a Session starting
+ * or finishing never changes the strip's geometry.
  */
+html {
+  --dsh-md-attention-slot-width: 30px;
+}
 .dsh-md-attention {
   position: relative;
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  flex: none;
 }
 
 /* Menu wraps its anchor in a span; keep the chip inline with the pill. */
@@ -764,19 +766,44 @@ html[data-platform='darwin'] .dsh-md-native-bar {
   align-items: center;
 }
 
-.dsh-md-attention-stale {
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 11px;
-  white-space: nowrap;
+/* Freshness marker and the empty slot that replaces it share one box, so a
+ * snapshot flipping between cached and live cannot resize the tab. */
+.dsh-md-attention-stale,
+.dsh-md-attention-stale-slot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 8px;
+  height: 20px;
+  flex: none;
+}
+
+.dsh-md-attention-stale-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dsw-alias-state-warn-primary);
+}
+
+/* Reserved space for an empty category. Same width as a chip, invisible. */
+.dsh-md-attention-slot {
+  display: inline-flex;
+  width: var(--dsh-md-attention-slot-width, 30px);
+  height: 20px;
+  flex: none;
 }
 
 .dsh-md-attention-chip {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  justify-content: center;
+  gap: 2px;
   box-sizing: border-box;
+  width: var(--dsh-md-attention-slot-width, 30px);
   height: 20px;
-  padding: 0 6px;
+  padding: 0;
+  overflow: hidden;
+  flex: none;
   border: 0.5px solid transparent;
   border-radius: 999px;
   background: var(--dsw-alias-interactive-bg-selected, rgba(103, 158, 254, 0.12));

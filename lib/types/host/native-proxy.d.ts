@@ -159,6 +159,8 @@ export declare class NativeProxyManager {
     bridgeSnapshot(deviceId: DeviceId, clientId?: string): NativeBridgeSnapshot;
     /** Navigate the framed page to one raw remote Session (queued until ready). */
     openSession(deviceId: DeviceId, sessionId: string, clientId?: string, requestSeq?: number): boolean;
+    /** Drop one device page's queued navigation target for this Client. */
+    clearPendingSession(deviceId: DeviceId, clientId?: string): boolean;
     /** Ask the framed page to refresh its own Session catalog. */
     requestRefresh(deviceId: DeviceId): boolean;
     /** Push Host-owned fold state to the device's framed page(s). */

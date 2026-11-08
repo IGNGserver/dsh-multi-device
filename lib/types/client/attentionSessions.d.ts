@@ -1,14 +1,17 @@
 /**
  * Turn the Host's attention projection (bare Session IDs) into rows a person
- * can read: owning device, category and — when the browser already knows the
- * Session — the conversation title from DSH's own Session store.
+ * can read: owning device, category and the conversation title.
  *
- * The projection itself is ID-only on purpose (`src/attention.ts` never carries
- * titles or message text), and in Native Mode the Host does not project remote
- * Session rows into the local snapshot any more: each device's conversations
- * live inside that device's own page. So this join deliberately has no
- * cross-device catalog to read. It supplies the identity and lets the caller
- * pass a live title resolver for Sessions the local store does know.
+ * The projection itself stays ID-only (`src/attention.ts` never carries titles
+ * or message text). Titles come from exactly two places, in this order:
+ *
+ * 1. The browser's own Session store. It is the only live source for local
+ *    conversations and reflects renames immediately.
+ * 2. `snapshot.sessionTitles`, published by the Host for the remote Sessions it
+ *    reports attention for. A remote conversation lives inside a cross-origin
+ *    device page the parent cannot read, but the Host already keeps that
+ *    device's catalog titles (`DeviceCatalog` control projections), so it can
+ *    join them without projecting whole catalogs into the local snapshot.
  *
  * Pure and synchronous: the component owns rendering, this owns the join.
  *
@@ -38,6 +41,21 @@ export interface AttentionJoinOptions {
     readonly owningDeviceId?: string;
     readonly owningDeviceName?: string;
 }
+/** The title fields one local Session-store row is read for. */
+export interface AttentionTitleSource {
+    readonly displayTitle?: string;
+    readonly title?: string;
+}
+/** Host-published titles for remote attention rows, keyed by namespaced id. */
+export type AttentionTitleMap = Readonly<Record<string, string>>;
+/**
+ * Resolve one attention row's title, or `undefined` when nothing knows it yet.
+ *
+ * Local first: the browser's store carries the durable title and the project
+ * basename fallback DSH itself shows, while the Host map is a projection that
+ * only refreshes when a catalog frame arrives.
+ */
+export declare function resolveAttentionTitle(sessionId: string, local: AttentionTitleSource | undefined, hostTitles: AttentionTitleMap | undefined): string | undefined;
 /** Last non-empty path segment, tolerating both separators. */
 export declare function pathBasename(path: string | undefined): string | undefined;
 /**

@@ -1,8 +1,18 @@
 import { type DeviceAuthState, type DeviceCatalogCache, type DeviceConfig, DeviceId, type DeviceView, type MultiDeviceSnapshot, type MultiDeviceUiPreferences, type SshKeyEntry, type UpsertDeviceInput } from '../contract.ts';
-import { type SessionAttentionFact } from '../attention.ts';
+import { type DeviceAttentionView, type SessionAttentionFact } from '../attention.ts';
 import { DeviceAuthManager } from './auth.ts';
 import { NativeProxyManager } from './native-proxy.ts';
 import { RemoteDeviceClient } from './remote-client.ts';
+/**
+ * Join the remote Sessions an attention menu can open to the titles the Host
+ * already holds for them.
+ *
+ * Pure on purpose: the catalog is only reached through `titlesFor`, which is
+ * called at most once per device that actually appears in `attention`. Only
+ * remote IDs are emitted — local conversations are named by the browser's own
+ * Session store, which is live and knows renames first.
+ */
+export declare function collectAttentionSessionTitles(attention: Readonly<Record<string, DeviceAttentionView>>, titlesFor: (deviceId: DeviceId) => ReadonlyMap<string, string> | undefined): Record<string, string>;
 /**
  * The SSH tunnel can be up while DSH itself still rejects the HTTP call.
  * Say so, instead of pointing the user at the private key.
@@ -159,6 +169,15 @@ export declare class DeviceRegistry {
      * the scope back to a previously selected Session.
      */
     setActiveSession(sessionId: string | undefined, requestSeq?: number, clientId?: string): boolean;
+    /**
+     * Publish a changed selection to the owning device page, and forget the old
+     * device's queued target.
+     *
+     * A queued target outlives the switch on purpose: the proxy replays it when
+     * that page's bridge connects. It must not outlive the device actually being
+     * left, or a later reconnect would re-open a conversation the user left.
+     */
+    private publishRemoteSelection;
     /**
      * Clear one remote Session's unread marker. Returns true when this call
      * actually removed a marker, so callers can distinguish a real transition

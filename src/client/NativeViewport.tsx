@@ -49,6 +49,9 @@ import { assessBrowserNativeAccess } from '../host/browser-relay.ts'
 import { clientStore, deviceStateToDotState, useMultiDeviceState } from './state.ts'
 import { countableUnreadIds, EMPTY_UNREAD_SESSION_IDS, groupUnreadSessionIds } from './unreadCounts.ts'
 
+/** Layout effect in the browser, plain effect during a server render. */
+const useBrowserLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect
+
 interface DesktopBrowserBridgeLike {
   acquire(workspace: string): Promise<{ lease: string; partition: string }>
   release(lease: string): Promise<void>
@@ -329,7 +332,12 @@ export function NativeTabBar({
   // Measure the frame (and only the frame). The result depends solely on the
   // frame box and the viewport, so growing the window back after shrinking it
   // restores the full width on the very next measurement.
-  useEffect(() => {
+  //
+  // A layout effect, not an effect: the CSS fallback box is the full viewport,
+  // so measuring after paint painted the strip at x=0 for one frame and then
+  // jumped it to the frame's left edge (the sidebar width) — the tab cards
+  // appeared to "move by themselves" on every load.
+  useBrowserLayoutEffect(() => {
     if (typeof window === 'undefined') return
     let frame: HTMLElement | undefined
     let frameObserver: ResizeObserver | undefined
@@ -468,7 +476,10 @@ export function NativeTabBar({
         ? undefined
         : { left: `${layout.left}px`, top: `${layout.top}px`, width: `${layout.width}px` }}
     >
-      {compact && <div className="dsh-md-native-bar-leading">{settingsButton}</div>}
+      {/* No leading cluster: moving the Settings entry from right to left when
+          the frame crossed the compact breakpoint re-flowed every tab. The bar's
+          width is clamped to the visible viewport, so the trailing cluster stays
+          on screen at any size. */}
 
       <div className="dsh-md-native-tabs" role="tablist" aria-label={t('nativeTabsLabel')}>
         <div className="dsh-md-native-tab-item">
@@ -501,15 +512,17 @@ export function NativeTabBar({
                 active={isSelected}
                 role="tab"
                 aria-selected={isSelected}
+                // Latency used to be an inline span revealed on hover, so merely
+                // moving the pointer across the strip resized the tabs under it.
+                // The label carries it instead: same information, no geometry.
+                title={dev.latencyMs !== undefined
+                  ? `${dev.name} · ${dev.latencyMs}ms`
+                  : dev.name}
                 onClick={() => { void clientStore.selectNativeDevice(dev.id) }}
               >
                 <span className="dsh-md-pill-inner">
                   <StateDot state={deviceStateToDotState(dev.state)} size={8} />
                   <span className="dsh-md-pill-name">{dev.name}</span>
-
-                  {dev.latencyMs !== undefined && (
-                    <span className="dsh-md-muted dsh-md-pill-latency">{dev.latencyMs}ms</span>
-                  )}
                 </span>
               </Pill>
               <AttentionDetails
@@ -524,17 +537,25 @@ export function NativeTabBar({
                   fresh: attentionByDevice === undefined && dev.state === 'connected' && dev.catalogStale !== true,
                 }}
               />
-              {isKeptAlive && (
-                <Tooltip label={t('releaseKeepAlive')} side="bottom">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    aria-label={t('releaseKeepAlive')}
-                    onClick={() => clientStore.releaseKeepAliveDevice(dev.id)}
-                  >
-                    <IconCloseOutlineRegular size={12} />
-                  </Button>
-                </Tooltip>
+              {/* Fixed slot: the keep-alive release button only exists for
+                  mounted pages, and adding it on the first click used to widen
+                  the tab and shift every tab beside it. The slot follows the
+                  device's keep-alive setting, which is config, not live state. */}
+              {dev.keepNativeAlive !== false && (
+                <span className="dsh-md-tab-action-slot">
+                  {isKeptAlive && (
+                    <Tooltip label={t('releaseKeepAlive')} side="bottom">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        aria-label={t('releaseKeepAlive')}
+                        onClick={() => clientStore.releaseKeepAliveDevice(dev.id)}
+                      >
+                        <IconCloseOutlineRegular size={12} />
+                      </Button>
+                    </Tooltip>
+                  )}
+                </span>
               )}
             </div>
           )
@@ -575,7 +596,7 @@ export function NativeTabBar({
           </div>
         )}
 
-        {!compact && settingsButton}
+        {settingsButton}
       </div>
     </div>
   )
