@@ -1,23 +1,80 @@
 /**
  * Viewport geometry for the Native Mode tab bar.
  *
- * The tab strip is absolutely positioned against the Host frame. That frame is
- * normally the browser viewport, but an embedded remote page (Electron
- * `<webview>` or a wide iframe) can widen the layout, so `left: 0; right: 0`
- * resolves to a box wider than what the user can see. Right-aligned controls
- * (the Settings gear and the rightmost "Aggregated Mode" switch) then render
- * off-screen — the exact failure a Windows Desktop user reported: device tabs
- * visible, mode switch missing, no way back to Aggregated Mode.
+ * The tab strip spans the Host frame. That frame is normally the browser
+ * viewport, but an embedded remote page (Electron `<webview>` or a wide iframe)
+ * can widen the layout, so a box sized from the frame alone can be wider than
+ * what the user can see. Right-aligned controls (the Settings gear and the
+ * rightmost "Aggregated Mode" switch) would then render off-screen — the exact
+ * failure a Windows Desktop user reported: device tabs visible, mode switch
+ * missing, no way back to Aggregated Mode.
  *
- * This module keeps the measurement pure and testable: {@link measureNativeBar}
- * decides the clamped width and the compact layout, while the live bar records
- * the last measurement so Diagnostics can report the real geometry.
+ * **The frame is the only measurement source.** An earlier version fed the
+ * bar's own `getBoundingClientRect()` back into this module and pinned the
+ * result as `max-width`; the bar could shrink but never grow back, so after any
+ * narrow window the mode switch stayed parked mid-window with a dead band on
+ * its right (the background colours are identical, so the boundary is
+ * invisible and the band reads as "something invisible eats my clicks").
+ * {@link resolveBarLayout} therefore takes the *frame* box, never the bar box.
+ *
+ * This module keeps the geometry pure and testable: {@link resolveBarLayout}
+ * decides the box and the compact layout, {@link measureNativeBar} keeps the
+ * Diagnostics numbers, and the live bar records the last measurement.
  *
  * @module dsh-multi-device/client/barMetrics
  */
 
 /** Width (CSS px) below which trailing controls move into the leading cluster. */
 export const COMPACT_BAR_WIDTH = 720
+
+/** Host frame box, in viewport pixels, as read from `getBoundingClientRect()`. */
+export interface BarLayoutInput {
+  /** Frame left edge in viewport coordinates. */
+  readonly frameLeft: number
+  /** Frame top edge in viewport coordinates. */
+  readonly frameTop: number
+  /** Frame width; 0 when the frame is not laid out yet. */
+  readonly frameWidth: number
+  readonly viewportWidth: number
+  /** Host chrome height above the frame content (Windows/macOS title bar). */
+  readonly chromeTop: number
+}
+
+/** Where the Native Mode tab bar sits, and how dense it has to be. */
+export interface BarLayout {
+  readonly left: number
+  readonly top: number
+  readonly width: number
+  readonly compact: boolean
+  /** The viewport cuts the frame's right edge, so the bar stops early. */
+  readonly clipped: boolean
+}
+
+/**
+ * Resolve the bar box from the Host frame.
+ *
+ * Idempotent by construction: the result depends only on the frame and the
+ * viewport, so a window that grows back after shrinking gets its full width
+ * back on the very next measurement.
+ */
+export function resolveBarLayout(input: BarLayoutInput): BarLayout {
+  const frameLeft = finiteNonNegative(input.frameLeft)
+  const frameWidth = finiteNonNegative(input.frameWidth)
+  const viewportWidth = finiteNonNegative(input.viewportWidth)
+  const chromeTop = finiteNonNegative(input.chromeTop)
+  // A frame wider than the viewport (embedded remote page) must not push the
+  // right-aligned switch off-screen; a zero viewport (headless render) keeps
+  // the frame width untouched.
+  const visible = viewportWidth > 0 ? Math.max(0, viewportWidth - frameLeft) : frameWidth
+  const width = frameWidth > 0 ? (visible > 0 ? Math.min(frameWidth, visible) : frameWidth) : visible
+  return {
+    left: frameLeft,
+    top: finiteNonNegative(input.frameTop) + chromeTop,
+    width,
+    compact: width > 0 && width < COMPACT_BAR_WIDTH,
+    clipped: frameWidth > 0 && visible > 0 && frameWidth > visible + 1,
+  }
+}
 
 /** One measurement of the Native Mode tab bar against the visible viewport. */
 export interface NativeBarMetrics {
@@ -94,4 +151,52 @@ export function recordNativeBarMetrics(metrics: NativeBarMetrics | undefined): v
 /** Read the last live measurement (undefined before the first render). */
 export function readNativeBarMetrics(): NativeBarMetrics | undefined {
   return current
+}
+
+/**
+ * What sits on top of the "Aggregated Mode" switch, if anything.
+ *
+ * The bar can only be occluded by something the Host owns: its own overlay
+ * children live in one stacking context, so a sibling seat with a higher
+ * `z-index` (or a native window-controls strip) wins the hit test. Guessing
+ * which one is hopeless from a screenshot, so the live bar probes the switch
+ * centre with `document.elementFromPoint()` and records the answer here for the
+ * Diagnostics report.
+ */
+export interface NativeBarObstruction {
+  /** Short, copy-pasteable identity: tag, id, first classes, computed z-index. */
+  readonly detail: string
+  readonly updatedAt: number
+}
+
+let obstruction: NativeBarObstruction | undefined
+
+/** Record (or clear) the last occlusion probe result. */
+export function recordNativeBarObstruction(next: NativeBarObstruction | undefined): void {
+  obstruction = next
+}
+
+/** Read the last occlusion probe result (undefined while nothing covers the switch). */
+export function readNativeBarObstruction(): NativeBarObstruction | undefined {
+  return obstruction
+}
+
+/** Describe the element that swallowed a click, without leaking page text. */
+export function describeObstruction(element: Element | null | undefined): string | undefined {
+  if (element === null || element === undefined) return undefined
+  const tag = element.tagName.toLowerCase()
+  const id = element.id === '' ? '' : `#${element.id}`
+  const classes = Array.from(element.classList)
+    .filter(name => !name.startsWith('dsh-md-'))
+    .slice(0, 2)
+    .map(name => `.${name}`)
+    .join('')
+  let zIndex = ''
+  try {
+    const style = globalThis.getComputedStyle?.(element)
+    if (style !== undefined && style.zIndex !== 'auto' && style.zIndex !== '') zIndex = ` z=${style.zIndex}`
+  } catch {
+    // Cross-origin or detached node: the tag/class identity is still useful.
+  }
+  return `${tag}${id}${classes}${zIndex}`
 }

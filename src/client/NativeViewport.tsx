@@ -39,12 +39,16 @@ import {
   Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { LOCAL_DEVICE_ID, type DeviceId, type DeviceView } from '../contract.ts'
 import { AuthRequiredPanel } from './AuthPanel.tsx'
 import {
-  type NativeBarMetrics,
+  type BarLayout,
+  describeObstruction,
   measureNativeBar,
   recordNativeBarMetrics,
+  recordNativeBarObstruction,
+  resolveBarLayout,
 } from './barMetrics.ts'
 import { attentionUnreadIds } from '../attention.ts'
 import { AttentionDetails } from './AttentionDetails.tsx'
@@ -307,6 +311,17 @@ export function KeepAliveDeviceFrame({
 /**
  * Always-visible Native Mode tab strip. 本机 is the first tab and the stable
  * fallback when no remote device is selected.
+ *
+ * Two properties keep the strip honest at every window size:
+ * - Its box is measured from the **Host frame**, never from the bar itself. The
+ *   previous version fed the bar's own rect back in and pinned it as
+ *   `max-width`, so the strip could shrink and never grow again — the mode
+ *   switch stayed parked mid-window with a same-coloured dead band on its right.
+ * - It renders through a portal onto `<body>` with an explicit z-index, because
+ *   the Host's own `shell.overlay` seat is a stacking context (`z-index: 20`)
+ *   and in-frame chrome (`[data-shell-leading]` at 25, the sidebar toggle at 30)
+ *   paints above it. Portalled, the strip is clipped by nothing and loses no
+ *   clicks; a runtime probe reports whatever still covers the switch.
  */
 export function NativeTabBar({
   t,
@@ -319,45 +334,109 @@ export function NativeTabBar({
   const { devices } = state.snapshot
   const [switching, setSwitching] = useState(false)
   const [switchFailure, setSwitchFailure] = useState<{ seq: number; message: string } | null>(null)
-  const [bar, setBar] = useState<NativeBarMetrics | undefined>(undefined)
+  const [layout, setLayout] = useState<BarLayout | undefined>(undefined)
+  const [obstructed, setObstructed] = useState<string | undefined>(undefined)
   const failureSeq = useRef(0)
   const barRef = useRef<HTMLDivElement | null>(null)
+  const switchRef = useRef<HTMLSpanElement | null>(null)
 
-  // Clamp the strip to what the viewport can actually show. A frame wider than
-  // the window (embedded remote page) would otherwise push the right-aligned
-  // Settings gear and mode switch off-screen, leaving Native Mode with no way
-  // back to Aggregated Mode.
+  // Measure the frame (and only the frame). The result depends solely on the
+  // frame box and the viewport, so growing the window back after shrinking it
+  // restores the full width on the very next measurement.
   useEffect(() => {
     if (state.displayMode !== 'native') return
+    if (typeof window === 'undefined') return
+    let frame: HTMLElement | undefined
+    let frameObserver: ResizeObserver | undefined
+
+    const resolveFrame = (): HTMLElement | undefined => {
+      const shell = document.querySelector('[data-shell-overlay]')?.parentElement
+      return shell instanceof HTMLElement ? shell : undefined
+    }
+
     const measure = (): void => {
-      if (typeof window === 'undefined') return
-      const rect = barRef.current?.getBoundingClientRect()
-      const metrics = measureNativeBar({
+      const next = resolveFrame()
+      if (next !== undefined && next !== frame) {
+        // The Host can replace the frame on a re-render; re-observe it.
+        frame = next
+        frameObserver?.disconnect()
+        frameObserver = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(measure)
+        frameObserver?.observe(next)
+      }
+      const rect = frame?.getBoundingClientRect()
+      const chromeTop = Number.parseFloat(
+        getComputedStyle(document.documentElement).getPropertyValue('--dsh-frame-chrome-top'),
+      )
+      const resolved = resolveBarLayout({
+        frameLeft: rect?.left ?? 0,
+        frameTop: rect?.top ?? 0,
+        frameWidth: rect?.width ?? 0,
+        viewportWidth: window.innerWidth,
+        chromeTop: Number.isFinite(chromeTop) ? chromeTop : 0,
+      })
+      setLayout(previous => (
+        previous !== undefined
+        && previous.left === resolved.left
+        && previous.top === resolved.top
+        && previous.width === resolved.width
+        && previous.compact === resolved.compact
+          ? previous
+          : resolved
+      ))
+      recordNativeBarMetrics(measureNativeBar({
         innerWidth: window.innerWidth,
         innerHeight: window.innerHeight,
         devicePixelRatio: window.devicePixelRatio,
-        left: rect?.left ?? 0,
-        width: rect?.width ?? 0,
-      })
-      recordNativeBarMetrics(metrics)
-      setBar(previous =>
-        previous !== undefined
-        && previous.clampedWidth === metrics.clampedWidth
-        && previous.compact === metrics.compact
-        && previous.barLeft === metrics.barLeft
-          ? previous
-          : metrics)
+        left: resolved.left,
+        // Diagnostics reports the frame extent the bar *would* take, so a
+        // clipped frame still shows up as clipped after the box is clamped.
+        width: rect?.width ?? resolved.width,
+      }))
     }
+
     measure()
     window.addEventListener('resize', measure)
-    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(measure)
-    if (observer !== undefined && barRef.current !== null) observer.observe(barRef.current)
+    // Fullscreen toggles the Host's chrome height to 0; a sidebar collapse or a
+    // panel drag changes the frame without changing window.innerWidth.
+    const hostObserver = typeof MutationObserver === 'undefined'
+      ? undefined
+      : new MutationObserver(measure)
+    hostObserver?.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['data-fullscreen', 'data-platform', 'data-windows-titlebar'],
+    })
     return () => {
       window.removeEventListener('resize', measure)
-      observer?.disconnect()
+      frameObserver?.disconnect()
+      hostObserver?.disconnect()
       recordNativeBarMetrics(undefined)
     }
   }, [state.displayMode])
+
+  // Occlusion probe: name whatever sits on top of the mode switch. The Host's
+  // native window controls and its own in-frame seats are the only candidates,
+  // and guessing between them from a screenshot is hopeless.
+  useEffect(() => {
+    if (state.displayMode !== 'native' || layout === undefined) return
+    if (typeof document === 'undefined' || typeof document.elementFromPoint !== 'function') return
+    const probe = (): void => {
+      const element = switchRef.current
+      const barElement = barRef.current
+      if (element === null || barElement === null) {
+        setObstructed(undefined)
+        recordNativeBarObstruction(undefined)
+        return
+      }
+      const rect = element.getBoundingClientRect()
+      if (rect.width === 0 || rect.height === 0) return
+      const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+      const detail = hit === null || barElement.contains(hit) ? undefined : describeObstruction(hit)
+      setObstructed(previous => (previous === detail ? previous : detail))
+      recordNativeBarObstruction(detail === undefined ? undefined : { detail, updatedAt: Date.now() })
+    }
+    const handle = requestAnimationFrame(probe)
+    return () => cancelAnimationFrame(handle)
+  }, [state.displayMode, layout, devices.length, switching, state.activeNativeDeviceId])
 
   if (state.displayMode !== 'native') return null
 
@@ -394,8 +473,8 @@ export function NativeTabBar({
     })
   }
 
-  const compact = bar?.compact === true
-  const clipped = bar === undefined ? false : bar.barWidth > bar.clampedWidth + 1
+  const compact = layout?.compact === true
+  const clipped = layout?.clipped === true
 
   const settingsButton = (
     <Tooltip label={t('settingsSectionTitle')} side="bottom" align={compact ? 'start' : 'end'}>
@@ -411,33 +490,38 @@ export function NativeTabBar({
   )
 
   // The way back to Aggregated Mode. Rightmost while there is room; the leading
-  // cluster when the bar is narrow or clipped, so it can never be pushed
-  // off-screen by a Host frame that is wider than the viewport.
+  // cluster when the bar is narrow, so it can never be pushed off-screen by a
+  // Host frame that is wider than the viewport.
   const aggregatedSwitch = (
-    <Tooltip label={t('switchToAggregated')} side="bottom" align={compact ? 'start' : 'end'}>
-      <Button
-        variant="outline"
-        size="sm"
-        className="dsh-md-native-mode-switch"
-        icon={<IconChevronLeftOutlineRegular size={12} />}
-        aria-label={t('switchToAggregated')}
-        aria-busy={switching || undefined}
-        disabled={switching}
-        onClick={switchToAggregated}
-      >
-        {compact ? null : t('modeAggregated')}
-      </Button>
-    </Tooltip>
+    <span ref={switchRef} className="dsh-md-native-mode-switch-wrap">
+      <Tooltip label={t('switchToAggregated')} side="bottom" align={compact ? 'start' : 'end'}>
+        <Button
+          variant="outline"
+          size="sm"
+          className="dsh-md-native-mode-switch"
+          icon={<IconChevronLeftOutlineRegular size={12} />}
+          aria-label={t('switchToAggregated')}
+          aria-busy={switching || undefined}
+          disabled={switching}
+          onClick={switchToAggregated}
+        >
+          {compact ? null : t('modeAggregated')}
+        </Button>
+      </Tooltip>
+    </span>
   )
 
-  return (
+  const bar = (
     <div
       className="dsh-md-native-bar"
       ref={barRef}
       data-compact={compact ? 'true' : 'false'}
       data-clipped={clipped ? 'true' : 'false'}
+      data-obstructed={obstructed ?? 'false'}
       data-mode="native"
-      style={bar !== undefined && bar.clampedWidth > 0 ? { maxWidth: bar.clampedWidth } : undefined}
+      style={layout === undefined
+        ? undefined
+        : { left: `${layout.left}px`, top: `${layout.top}px`, width: `${layout.width}px` }}
     >
       {compact && (
         <div className="dsh-md-native-bar-leading">
@@ -481,10 +565,10 @@ export function NativeTabBar({
               >
                 <span className="dsh-md-pill-inner">
                   <StateDot state={deviceStateToDotState(dev.state)} size={8} />
-                  <span>{dev.name}</span>
+                  <span className="dsh-md-pill-name">{dev.name}</span>
 
                   {dev.latencyMs !== undefined && (
-                    <span className="dsh-md-muted">{dev.latencyMs}ms</span>
+                    <span className="dsh-md-muted dsh-md-pill-latency">{dev.latencyMs}ms</span>
                   )}
                 </span>
               </Pill>
@@ -517,44 +601,49 @@ export function NativeTabBar({
         })}
       </div>
 
-      {activeDevice !== undefined && (
-        <div className="dsh-md-native-bar-actions">
-          <Tooltip label={t('reloadPage')} side="bottom">
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label={t('reloadPage')}
-              onClick={() => clientStore.reloadNativeDevice(activeDevice.id)}
-            >
-              <IconRefreshOutlineRegular size={14} />
-            </Button>
-          </Tooltip>
-          {(activeDevice.nativeProxyUrl ?? activeDevice.effectiveBaseUrl) !== undefined && (
-            <Tooltip label={t('openExternal')} side="bottom">
+      {/* Trailing cluster: always pinned to the bar's right edge. `flex: none` +
+          `margin-inline-start: auto` keeps it out of the tab strip's scroll
+          area, so the Aggregated switch can never be scrolled away or clipped. */}
+      <div className="dsh-md-native-bar-trailing">
+        {activeDevice !== undefined && (
+          <div className="dsh-md-native-bar-actions">
+            <Tooltip label={t('reloadPage')} side="bottom">
               <Button
                 variant="ghost"
                 size="icon"
-                aria-label={t('openExternal')}
-                onClick={() => {
-                  const access = assessBrowserNativeAccess({ pageUrl: window.location.href, proxyUrl: activeDevice.nativeProxyUrl, desktopGuest: getDesktopBrowserBridge() !== undefined })
-                  if (access.status === 'available') window.open(access.url, '_blank', 'noopener,noreferrer')
-                }}
+                aria-label={t('reloadPage')}
+                onClick={() => clientStore.reloadNativeDevice(activeDevice.id)}
               >
-                <IconRightUpOutlineRegular size={14} />
+                <IconRefreshOutlineRegular size={14} />
               </Button>
             </Tooltip>
-          )}
-        </div>
-      )}
+            {(activeDevice.nativeProxyUrl ?? activeDevice.effectiveBaseUrl) !== undefined && (
+              <Tooltip label={t('openExternal')} side="bottom">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label={t('openExternal')}
+                  onClick={() => {
+                    const access = assessBrowserNativeAccess({ pageUrl: window.location.href, proxyUrl: activeDevice.nativeProxyUrl, desktopGuest: getDesktopBrowserBridge() !== undefined })
+                    if (access.status === 'available') window.open(access.url, '_blank', 'noopener,noreferrer')
+                  }}
+                >
+                  <IconRightUpOutlineRegular size={14} />
+                </Button>
+              </Tooltip>
+            )}
+          </div>
+        )}
 
-      {!compact && settingsButton}
+        {!compact && settingsButton}
 
-      {!compact && <span className="dsh-md-native-bar-sep" aria-hidden="true" />}
+        {!compact && <span className="dsh-md-native-bar-sep" aria-hidden="true" />}
 
-      {/* Rightmost action while there is room: Aggregated Mode is one click
-          away, never buried in Settings. The Host persists the switch and
-          re-merges remote rows. Compact/clipped bars render it first instead. */}
-      {!compact && aggregatedSwitch}
+        {/* Rightmost action while there is room: Aggregated Mode is one click
+            away, never buried in Settings. The Host persists the switch and
+            re-merges remote rows. Compact bars render it first instead. */}
+        {!compact && aggregatedSwitch}
+      </div>
 
       {switchFailure !== null && (
         <Toast
@@ -566,6 +655,12 @@ export function NativeTabBar({
       )}
     </div>
   )
+
+  // Portal onto <body>: the Host's shell overlay is a stacking context below
+  // its own in-frame chrome, and its frame clips overflow. Portalled, the strip
+  // is above both while still losing to Tooltips (100), modals (1000) and menus
+  // (1100).
+  return typeof document === 'undefined' ? bar : createPortal(bar, document.body)
 }
 
 /**

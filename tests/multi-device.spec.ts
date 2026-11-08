@@ -162,7 +162,11 @@ import {
 import {
   barIsClipped,
   COMPACT_BAR_WIDTH,
+  describeObstruction,
   measureNativeBar,
+  readNativeBarObstruction,
+  recordNativeBarObstruction,
+  resolveBarLayout,
 } from '../src/client/barMetrics.ts'
 
 const tempDirs: string[] = []
@@ -5179,6 +5183,59 @@ describe('0e. Snapshot visibility inputs for unread counters', () => {
 })
 
 describe('0c. Native bar geometry & diagnostics', () => {
+  it('grows back after the window shrinks — the bar box never ratchets', () => {
+    // The regression: the bar used to feed its own rendered width back in, so a
+    // window that went 1400 -> 800 -> 1400 left the strip pinned at 800 with a
+    // dead band on the right. The layout is now a pure function of the frame.
+    const wide = resolveBarLayout({ frameLeft: 0, frameTop: 0, frameWidth: 1400, viewportWidth: 1400, chromeTop: 48 })
+    expect(wide.width).toBe(1400)
+    expect(wide.top).toBe(48)
+    expect(wide.compact).toBe(false)
+    const narrow = resolveBarLayout({ frameLeft: 0, frameTop: 0, frameWidth: 800, viewportWidth: 800, chromeTop: 48 })
+    expect(narrow.width).toBe(800)
+    const again = resolveBarLayout({ frameLeft: 0, frameTop: 0, frameWidth: 1400, viewportWidth: 1400, chromeTop: 48 })
+    expect(again.width).toBe(1400)
+    expect(again).toEqual(wide)
+  })
+
+  it('clamps to the visible viewport when the frame is wider or offset', () => {
+    const embedded = resolveBarLayout({ frameLeft: 0, frameTop: 0, frameWidth: 2000, viewportWidth: 1240, chromeTop: 0 })
+    expect(embedded.width).toBe(1240)
+    expect(embedded.clipped).toBe(true)
+    const offset = resolveBarLayout({ frameLeft: 40, frameTop: 10, frameWidth: 2000, viewportWidth: 1240, chromeTop: 32 })
+    expect(offset.width).toBe(1200)
+    expect(offset.left).toBe(40)
+    expect(offset.top).toBe(42)
+  })
+
+  it('switches to the compact layout from the resolved width, not the viewport alone', () => {
+    const narrow = resolveBarLayout({ frameLeft: 0, frameTop: 0, frameWidth: 600, viewportWidth: 1600, chromeTop: 0 })
+    expect(narrow.compact).toBe(true)
+    const boundary = resolveBarLayout({ frameLeft: 0, frameTop: 0, frameWidth: COMPACT_BAR_WIDTH, viewportWidth: 1600, chromeTop: 0 })
+    expect(boundary.compact).toBe(false)
+    // Headless: no frame box yet, fall back to what the viewport allows.
+    const headless = resolveBarLayout({ frameLeft: 0, frameTop: 0, frameWidth: 0, viewportWidth: 900, chromeTop: 0 })
+    expect(headless.width).toBe(900)
+    expect(headless.compact).toBe(false)
+  })
+
+  it('describes an occlusion probe result without leaking page text', () => {
+    expect(describeObstruction(undefined)).toBeUndefined()
+    const element = {
+      tagName: 'DIV',
+      id: '',
+      classList: ['pI_x6G_leadingSeat', 'dsh-md-native-tabs'],
+    } as unknown as Element
+    expect(describeObstruction(element)).toBe('div.pI_x6G_leadingSeat')
+  })
+
+  it('records and clears the last obstruction for Diagnostics', () => {
+    recordNativeBarObstruction({ detail: 'div.seat z=25', updatedAt: 1 })
+    expect(readNativeBarObstruction()?.detail).toBe('div.seat z=25')
+    recordNativeBarObstruction(undefined)
+    expect(readNativeBarObstruction()).toBeUndefined()
+  })
+
   it('clamps a Host frame that is wider than the viewport', () => {
     const metrics = measureNativeBar({ innerWidth: 1240, innerHeight: 800, left: 0, width: 2000, now: 1 })
     expect(metrics.barWidth).toBe(2000)

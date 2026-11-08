@@ -27,7 +27,7 @@ import {
   type WorkspaceAggregationConfig,
 } from '../contract.ts'
 import type { ControlPlaneRequest, DiagnosticsClientReport, MultiDeviceDiagnostics } from '../runtime.ts'
-import { readNativeBarMetrics } from './barMetrics.ts'
+import { readNativeBarMetrics, readNativeBarObstruction } from './barMetrics.ts'
 import { getClientServices } from './clientServices.ts'
 import { readSessionLinkReport } from './sessionLinkRepair.ts'
 
@@ -1307,6 +1307,7 @@ export class MultiDeviceClientStore {
 export function collectClientDiagnosticsReport(): DiagnosticsClientReport | undefined {
   if (typeof window === 'undefined') return undefined
   const bar = readNativeBarMetrics()
+  const obstruction = readNativeBarObstruction()
   // The repair loop runs in the browser and owns the only view of the Session
   // store, so it contributes the evidence the Host cannot see.
   const sessionLink = readSessionLinkReport()
@@ -1322,6 +1323,7 @@ export function collectClientDiagnosticsReport(): DiagnosticsClientReport | unde
           compact: bar.compact,
         }
       : {}),
+    ...(obstruction !== undefined ? { barObstruction: obstruction.detail } : {}),
     ...(typeof navigator !== 'undefined' && typeof navigator.userAgent === 'string'
       ? { userAgent: navigator.userAgent }
       : {}),
