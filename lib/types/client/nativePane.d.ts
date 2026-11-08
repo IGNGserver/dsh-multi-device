@@ -24,6 +24,7 @@ export interface NativePaneVisibilityInput {
     readonly device: DeviceView | undefined;
     /** The pane's center-column geometry was measured successfully. */
     readonly geometryReady: boolean;
+    readonly independentCatalog?: boolean;
 }
 /**
  * Whether the framed page is the visible conversation surface.
@@ -42,3 +43,5 @@ export declare function shouldShowNativePane(input: NativePaneVisibilityInput): 
  * the user opened DSH at `http://localhost:3080`.
  */
 export declare function resolveSameSiteProxyUrl(rawUrl: string | undefined): string | undefined;
+/** Cross-site iframe cookies are not reliable on an IPv6 parent + IPv4 proxy. */
+export declare function nativeProxyEmbeddingError(rawUrl: string | undefined): string | undefined;

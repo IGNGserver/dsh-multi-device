@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { execFileSync, spawn } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { tmpdir, hostname } from 'node:os'
+import { dirname, join } from 'node:path'
 import { JsonSnapshotFile, resolvePluginStorage } from '../src/host/storage.ts'
-import { buildGitScanScript, parseGitScanOutput } from '../src/host/git-scan.ts'
+import { buildGitScanScript, parseGitScanOutput, parseGitScanProjection } from '../src/host/git-scan.ts'
 import { buildReadSharedStateCommand, buildWriteSharedStateCommand, parseSharedReadDocument } from '../src/host/shared-state.ts'
 import { DeviceRegistry } from '../src/host/registry.ts'
 import { DeviceId } from '../src/contract.ts'
@@ -76,6 +76,47 @@ describe('durable profile-local snapshots', () => {
     expect(JSON.parse(readFileSync(path, 'utf8')).value).toBe(1)
   })
 
+  it('recovers only a complete lock owned by a dead local process', () => {
+    const path = join(temp(), 'data.json'), file = new JsonSnapshotFile(path)
+    file.write({ value: 1 })
+    const child = spawnSync(process.execPath, ['-e', ''], { stdio: 'ignore' })
+    expect(child.status).toBe(0)
+    expect(child.pid).toBeTypeOf('number')
+    writeFileSync(`${path}.lock`, JSON.stringify({ version: 1, pid: child.pid, hostname: hostname(), owner: 'dead-owner-fixture', createdAt: Date.now() }))
+    file.write({ value: 2 })
+    expect(file.read()).toEqual({ value: 2 })
+    expect(existsSync(`${path}.lock`)).toBe(false)
+    expect(existsSync(`${path}.lock.recovery`)).toBe(false)
+  })
+
+  it.each(['alive', 'remote', 'invalid'])('never steals a %s lock', kind => {
+    const path = join(temp(), 'data.json'), file = new JsonSnapshotFile(path)
+    file.write({ value: 1 })
+    const lock = kind === 'invalid' ? 'legacy fixture' : JSON.stringify({
+      version: 1, pid: kind === 'alive' ? process.pid : 999999,
+      hostname: kind === 'alive' ? hostname() : 'another-host.invalid', owner: 'protected-owner-fixture', createdAt: Date.now(),
+    })
+    writeFileSync(`${path}.lock`, lock)
+    expect(() => file.write({ value: 2 })).toThrow('Storage is busy')
+    expect(readFileSync(`${path}.lock`, 'utf8')).toBe(lock)
+    expect(file.read()).toEqual({ value: 1 })
+  })
+
+  it('serializes async writes and retains async stale-writer CAS', async () => {
+    const path = join(temp(), 'data.json'), file = new JsonSnapshotFile(path)
+    await file.writeAsync({ value: 0 })
+    await Promise.all([file.writeAsync({ value: 1 }), file.writeAsync({ value: 2 })])
+    expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ value: 2 })
+    expect(JSON.parse(readFileSync(`${path}.bak`, 'utf8'))).toEqual({ value: 1 })
+    expect(readdirSync(dirname(path)).sort()).toEqual(['data.json', 'data.json.bak'])
+    const stale = new JsonSnapshotFile(path)
+    const current = new JsonSnapshotFile(path)
+    await stale.readAsync(); await current.readAsync()
+    await current.writeAsync({ value: 3 })
+    await expect(stale.writeAsync({ value: 4 })).rejects.toThrow('reload before saving')
+    expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ value: 3 })
+  })
+
   it('copies legacy state once into independent Profile storage, preserving originals', () => {
     const home = temp(), legacy = join(home, 'plugins'); mkdirSync(legacy)
     writeFileSync(join(legacy, 'dsh-multi-device.json'), JSON.stringify({ version: 1, hostId: 'legacy-host', devices: [] }))
@@ -123,6 +164,28 @@ describe.skipIf(process.platform === 'win32')('real POSIX scanning and shared-st
     execFileSync('git', ['-C', main, 'worktree', 'add', '-qb', 'scan-fixture', worktree])
     const output = execFileSync('sh', ['-c', buildGitScanScript([dir])], { encoding: 'utf8' })
     expect(parseGitScanOutput(output).map(repo => repo.path).sort()).toEqual([main, worktree].sort())
+  })
+
+  it('parses framed origins containing delimiters and reports truncation explicitly', () => {
+    const output = ['__DSH_REPO_V2__', '/tmp/repo\twith delimiters', 'https://example.com/org/repo.git\n', '__DSH_SCAN_TRUNCATED_V2__', '__DSH_SCAN_DONE_V2__', ''].join('\0')
+    const parsed = parseGitScanProjection(output)
+    expect(parsed.complete).toBe(true)
+    expect(parsed.truncated).toBe(true)
+    expect(parsed.repos).toEqual([{ path: '/tmp/repo\twith delimiters', rawOrigin: 'https://example.com/org/repo.git', gitRemote: 'example.com/org/repo' }])
+  })
+
+  it('caps candidate processing without mistaking a partial scan for completion', () => {
+    const dir = temp()
+    for (const name of ['one', 'two']) {
+      const repo = join(dir, name)
+      mkdirSync(repo, { recursive: true })
+      execFileSync('git', ['init', '-q', repo])
+      execFileSync('git', ['-C', repo, 'remote', 'add', 'origin', `https://example.com/org/${name}.git`])
+    }
+    const parsed = parseGitScanProjection(execFileSync('sh', ['-c', buildGitScanScript([dir], 4, 1)], { encoding: 'utf8' }))
+    expect(parsed.complete).toBe(true)
+    expect(parsed.truncated).toBe(true)
+    expect(parsed.repos).toHaveLength(1)
   })
 
   it('reports broken worktree metadata instead of a successful empty scan', () => {

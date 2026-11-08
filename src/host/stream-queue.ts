@@ -14,7 +14,9 @@
 export const DEFAULT_STREAM_BACKLOG = 2048
 
 export class BoundedStreamQueue<T> {
-  private readonly items: T[] = []
+  private items: Array<T | undefined> = []
+  private head = 0
+  private size = 0
   private overflowed = false
   private wake: (() => void) | undefined
 
@@ -23,16 +25,29 @@ export class BoundedStreamQueue<T> {
   /** Append a frame. Frames after the cap are dropped; the consumer will fail. */
   push(item: T): void {
     if (this.overflowed) return
-    if (this.items.length >= this.limit) {
+    if (this.size >= this.limit) {
       this.overflowed = true
     } else {
       this.items.push(item)
+      this.size += 1
     }
     this.notify()
   }
 
   shift(): T | undefined {
-    return this.items.shift()
+    if (this.size === 0) return undefined
+    const item = this.items[this.head]
+    this.items[this.head] = undefined
+    this.head += 1
+    this.size -= 1
+    if (this.size === 0) {
+      this.items = []
+      this.head = 0
+    } else if (this.head >= 1024 && this.head * 2 >= this.items.length) {
+      this.items = this.items.slice(this.head)
+      this.head = 0
+    }
+    return item
   }
 
   get overflow(): boolean {

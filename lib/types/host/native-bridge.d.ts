@@ -14,9 +14,9 @@
  * already carries the HttpOnly proxy cookie, and Electron `<webview>` guests
  * do not expose a reliable `contentWindow`.
  *
- * Failure is always graceful: when the module id, loader shape or CSP differs,
- * the bridge reports `failed` (or simply never becomes ready) and the client
- * falls back to the local mirror renderer.
+ * Failure is always explicit: unsupported workspace/session contracts report a
+ * bridge failure or navigation error; the native page is never replaced by a
+ * mirror renderer.
  *
  * @module dsh-multi-device/host/native-bridge
  */
@@ -37,12 +37,16 @@ export declare const NATIVE_BRIDGE_SCRIPT: string;
  * the remote workspace store.
  */
 export declare function sanitizeGroupState(value: unknown): Record<string, boolean>;
+/** Bounded raw-session completion map for the Host/page boundary. */
+export declare function sanitizeReadCompletions(value: unknown): Record<string, string>;
 /** Initial page state served alongside the bridge script. */
 export interface NativeBridgeScriptState {
     /** Explicit workspace fold state last observed by the Host. */
     readonly groups?: Readonly<Record<string, boolean>>;
     /** Raw remote Session IDs whose completion is currently unread. */
     readonly unread?: readonly string[];
+    /** All current completion tokens, including already-read completions. */
+    readonly readCompletions?: Readonly<Record<string, string>>;
 }
 /**
  * Build the per-device bridge response. The state prefix runs before the

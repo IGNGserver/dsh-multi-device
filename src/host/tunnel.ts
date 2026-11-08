@@ -27,6 +27,8 @@ import {
 export type TunnelState = 'connecting' | 'up' | 'error' | 'stopped'
 
 export const SSH2_MISSING_MESSAGE = 'The optional ssh2 engine is not installed. Use system-ssh with an SSH agent, or explicitly install ssh2 in this DSH Profile through dsh plugin and approve only its reported build scripts.'
+const MAX_EXEC_STDOUT_BYTES = 2 * 1024 * 1024
+const MAX_EXEC_STDERR_BYTES = 256 * 1024
 
 export interface TunnelStatus {
   readonly state: TunnelState
@@ -141,6 +143,7 @@ export function buildSystemSshArgs(
 
   if (transport.privateKeyPath !== undefined && transport.privateKeyPath.trim() !== '') {
     args.push('-i', expandHomePath(transport.privateKeyPath.trim()))
+    args.push('-o', 'IdentitiesOnly=yes')
   }
 
   if (transport.proxyJump !== undefined && transport.proxyJump.trim() !== '') {
@@ -160,7 +163,9 @@ export async function execSshCommand(
   transport: SshTransportConfig,
   command: string,
   timeoutMs = 8_000,
+  signal?: AbortSignal,
 ): Promise<{ ok: true; stdout: string } | { ok: false; error: string }> {
+  if (signal?.aborted === true) return { ok: false, error: 'ssh command aborted' }
   const resolved = resolveSshConfigForTransport(transport)
   const useSsh2 = transport.engine === 'ssh2'
 
@@ -171,7 +176,7 @@ export async function execSshCommand(
         error: 'ssh2 engine cannot honor ProxyJump/ProxyCommand; use system-ssh with an SSH agent',
       }
     }
-    return execViaSsh2(transport, resolved, command, timeoutMs)
+    return execViaSsh2(transport, resolved, command, timeoutMs, signal)
   }
 
   const parsedSpec = parseSshTargetSpec(transport.host)
@@ -196,15 +201,22 @@ export async function execSshCommand(
   args.push(parsedSpec.host, command)
 
   return new Promise((resolve) => {
-    let stdout = ''
-    let stderr = ''
+    const stdoutChunks: Buffer[] = []
+    const stderrChunks: Buffer[] = []
+    let stdoutBytes = 0
+    let stderrBytes = 0
     let settled = false
     const proc = spawn('ssh', args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    const onAbort = (): void => {
+      try { proc.kill('SIGKILL') } catch { /* already exited */ }
+      finish({ ok: false, error: 'ssh command aborted' })
+    }
     const finish = (res: { ok: true; stdout: string } | { ok: false; error: string }): void => {
       if (settled) return
       settled = true
       clearTimeout(timer)
       clearTimeout(killTimer)
+      signal?.removeEventListener('abort', onAbort)
       resolve(res)
     }
     const timer = setTimeout(() => {
@@ -215,14 +227,33 @@ export async function execSshCommand(
       try { proc.kill('SIGKILL') } catch { /* ignore */ }
       finish({ ok: false, error: 'ssh command timed out' })
     }, timeoutMs + 500)
+    if (signal?.aborted === true) { onAbort(); return }
+    signal?.addEventListener('abort', onAbort, { once: true })
 
-    proc.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString('utf8') })
-    proc.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8') })
+    proc.stdout?.on('data', (chunk: Buffer) => {
+      stdoutBytes += chunk.byteLength
+      if (stdoutBytes > MAX_EXEC_STDOUT_BYTES) {
+        try { proc.kill('SIGKILL') } catch { /* already exited */ }
+        finish({ ok: false, error: 'ssh command exceeded its stdout limit' })
+        return
+      }
+      stdoutChunks.push(chunk)
+    })
+    proc.stderr?.on('data', (chunk: Buffer) => {
+      stderrBytes += chunk.byteLength
+      if (stderrBytes > MAX_EXEC_STDERR_BYTES) {
+        try { proc.kill('SIGKILL') } catch { /* already exited */ }
+        finish({ ok: false, error: 'ssh command exceeded its stderr limit' })
+        return
+      }
+      stderrChunks.push(chunk)
+    })
     proc.on('error', (err) => {
       finish({ ok: false, error: err.message })
     })
     proc.on('close', (code) => {
-      if (code === 0) finish({ ok: true, stdout })
+      const stderr = Buffer.concat(stderrChunks).toString('utf8')
+      if (code === 0) finish({ ok: true, stdout: Buffer.concat(stdoutChunks).toString('utf8') })
       else finish({ ok: false, error: stderr.trim() || `ssh exited with code ${String(code)}` })
     })
   })
@@ -233,6 +264,7 @@ async function execViaSsh2(
   resolved: ResolvedSshParameters,
   command: string,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<{ ok: true; stdout: string } | { ok: false; error: string }> {
   let ClientCtor: new () => Ssh2ClientLike
   try {
@@ -257,14 +289,21 @@ async function execViaSsh2(
   return new Promise((resolve) => {
     const conn = new ClientCtor()
     let settled = false
+    const onAbort = (): void => finish({ ok: false, error: 'ssh2 exec aborted' })
     const finish = (res: { ok: true; stdout: string } | { ok: false; error: string }): void => {
       if (settled) return
       settled = true
       clearTimeout(timer)
-      try { conn.end() } catch { /* ignore */ }
+      signal?.removeEventListener('abort', onAbort)
+      try {
+        if (conn.destroy !== undefined) conn.destroy()
+        else conn.end()
+      } catch { /* already closed */ }
       resolve(res)
     }
     const timer = setTimeout(() => finish({ ok: false, error: 'ssh2 exec timed out' }), timeoutMs)
+    if (signal?.aborted === true) { onAbort(); return }
+    signal?.addEventListener('abort', onAbort, { once: true })
 
     conn.on('ready', () => {
       conn.exec?.(command, (err, stream) => {
@@ -272,12 +311,29 @@ async function execViaSsh2(
           finish({ ok: false, error: err?.message ?? 'ssh2 exec failed' })
           return
         }
-        let stdout = ''
-        let stderr = ''
-        stream.on('data', (data: Buffer) => { stdout += data.toString('utf8') })
-        stream.stderr?.on('data', (data: Buffer) => { stderr += data.toString('utf8') })
+        const stdoutChunks: Buffer[] = []
+        const stderrChunks: Buffer[] = []
+        let stdoutBytes = 0
+        let stderrBytes = 0
+        stream.on('data', (data: Buffer) => {
+          stdoutBytes += data.byteLength
+          if (stdoutBytes > MAX_EXEC_STDOUT_BYTES) {
+            finish({ ok: false, error: 'ssh2 exec exceeded its stdout limit' })
+            return
+          }
+          stdoutChunks.push(data)
+        })
+        stream.stderr?.on('data', (data: Buffer) => {
+          stderrBytes += data.byteLength
+          if (stderrBytes > MAX_EXEC_STDERR_BYTES) {
+            finish({ ok: false, error: 'ssh2 exec exceeded its stderr limit' })
+            return
+          }
+          stderrChunks.push(data)
+        })
         stream.on('close', (code: number) => {
-          if (code === 0) finish({ ok: true, stdout })
+          const stderr = Buffer.concat(stderrChunks).toString('utf8')
+          if (code === 0) finish({ ok: true, stdout: Buffer.concat(stdoutChunks).toString('utf8') })
           else finish({ ok: false, error: stderr.trim() || `ssh2 command exited ${String(code)}` })
         })
       })

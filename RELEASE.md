@@ -15,7 +15,7 @@
 本批需将**真实官方安装 smoke 加入 CI 和 release 工作流，失败即不得发布**。不能仅凭旧工作流的 typecheck/build/test 宣称已满足本门禁；以实际 workflow 内容、运行日志和 run 链接为证。运行目标应来自锁定版本的官方 DSH 安装，不以本仓库 stubs 或源码 mock 替代。
 
 - [ ] 版本一致性：`pnpm run verify:version`；类型、构建、单元/集成：`pnpm run typecheck`、`pnpm run build`、`pnpm run test`，记录真实结果。
-- [ ] 包结构：从 CI 构建结果 `npm pack` 得到实际 `.tgz`；检查 Host/Browser 入口、bundle patch、locale metadata、图标与声明资源确实随包分发并能解析。基础包不能安装 optional `ssh2` / `cpu-features`，不能为其申请原生构建脚本授权。
+- [ ] 包结构：build 后运行 `pnpm run verify:artifacts`，要求 tracked/untracked `lib/**` 零 drift，Host/Browser/Contract 不超过脚本预算；从 CI 构建结果 `npm pack` 得到实际 `.tgz`，packed `lib/**` 必须与实际构建文件精确一致。检查 Host/Browser 入口、bundle patch、locale metadata、图标与声明资源确实随包分发并能解析。基础包不能安装 optional `ssh2` / `cpu-features`，不能为其申请原生构建脚本授权。
 - [ ] 官方安装：隔离 `DSH_HOME`、路径含空格的资产，官方 `dsh plugin --profile web add <tgz>` → `--dump-config` 组合成功 → 启动 Host → 客户端入口可获取且真实加载 → 停用/卸载 → 数据仍保留。不能仅断言 pnpm 返回 0 或 patch 中有包名。
 - [ ] 兼容矩阵：记录实际 DSH / Node / pnpm / OS 版本，覆盖声明的 DSH 下界及当前目标 DSH、所支持的 pnpm 主版本。只有实际通过的格子能标记通过；未覆盖的 Desktop / Windows / macOS 视觉与系统集成单列，不据 Linux smoke 外推“全平台可用”。
 - [ ] 升级/回滚：精确旧/新版本资产、旧数据夹具、停 Host 后官方 CLI `add` 版本 URL；验证重启加载、数据隔离和认证缓存失效。管理器 `already-installed` 要走卸载→新 URL→启用，不能把重复添加当作更新。
@@ -26,7 +26,7 @@
 
 ### 自动化官方 smoke（CI 门禁入口）
 
-[smoke-official-install.mjs](<scripts/smoke-official-install.mjs>) 要求 Node 24+、PATH 上为 pnpm 11。使用预构建 CI tarball 和精确官方 DSH 安装；以下变量必须替换为真实**绝对路径**，根目录须已存在且位于源码树外的本机盘/CI 临时区：
+[smoke-official-install.mjs](<scripts/smoke-official-install.mjs>) 要求 Node 24+、PATH 上为 pnpm 11。pnpm 11 已用 `pmOnFail` 取代旧的 `managePackageManagerVersions`；隔离环境必须设置 `pnpm_config_pm_on_fail=ignore`，防止仓库 `packageManager` 字段把 smoke 静默切回 pnpm 10，脚本还会断言实际版本。使用预构建 CI tarball 和精确官方 DSH 安装；以下变量必须替换为真实**绝对路径**，根目录须已存在且位于源码树外的本机盘/CI 临时区：
 
 ```bash
 # 先设置三个绝对路径；CLI 是官方安装的 lib/bin.js，不是任意 shell 命令。
@@ -97,7 +97,7 @@ dsh plugin --profile web remove dsh-multi-device
    git push origin vX.Y.Z
    ```
 
-3. 等待 tag 触发的 [release.yml](<.github/workflows/release.yml>)：校验 tag 与 `VERSION` 相符、版本/类型/构建/测试通过、生成实际 npm tarball 与 bundle，**官方安装 smoke 通过后**才允许发布。不要在缺少门禁时先发布再补验收。
+3. 等待 tag 触发的 [release.yml](<.github/workflows/release.yml>)：校验 tag 与 `VERSION` 相符、版本/类型/构建/artifact drift/bundle budget/测试通过、生成实际 npm tarball 与 bundle，**官方安装 smoke 通过后**才允许发布。smoke 通过后，固定 commit 的 `actions/attest-build-provenance` 为最终 `release-assets/*` 生成 GitHub build provenance；workflow 使用 `id-token: write` 与 `attestations: write`，notes 记录精确 `GITHUB_SHA`、run URL 和仓库 attestations 入口。不要在缺少门禁或 attestation 失败时先发布再补验收。
 4. 核对 Release 渠道、目标提交、资产非空、SHA-256 校验文件匹配，抽验最终下载资产可通过官方安装路径加载。Release notes 必须给精确版本 `.tgz` URL、管理器优先、Desktop 内置入口和退出条件、数据/认证迁移及已知平台边界；不诱导裸包名 npm 安装或源码 build。
 
 “发布 release”默认是测试渠道（`prerelease=true`、非 latest）。只有明确要求“正式发布”才在已验收 tag 上运行：

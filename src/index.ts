@@ -414,6 +414,9 @@ function applyHost(
     registry.startAll()
     return () => {
       registry.dispose()
+      void registry.flushPersistence().catch(error => {
+        console.error('[dsh-multi-device] Failed to flush catalog persistence:', error)
+      })
     }
   }, 'dsh-multi-device: device registry')
 
@@ -468,7 +471,8 @@ function applyHost(
               }
               await refreshLocal()
               return {}
-            }, async query => (await sessionController.search({ query }, abort.signal)).items.map(item => item.sessionId))
+            }, async (query, signal) => (await sessionController.search({ query },
+              signal === undefined ? abort.signal : AbortSignal.any([abort.signal, signal]))).items.map(item => item.sessionId))
             const disposers: (() => void)[] = []
             const events = ['api-session/added', 'api-session/removed', 'api-session/activity', 'api-session/status', 'workspace/changed']
             for (const event of events) {

@@ -43,18 +43,43 @@ export interface BoundClientServices {
 }
 
 let services: BoundClientServices = {}
-let sessionSubscribe: ((listener: () => void) => () => void) | undefined
+const sessionListeners = new Set<() => void>()
+let unsubscribeSessions: (() => void) | undefined
+
+function attachSessionList(): void {
+  unsubscribeSessions?.()
+  unsubscribeSessions = sessionListeners.size > 0
+    ? services.sessions?.list.subscribe?.(notifySessionListeners)
+    : undefined
+}
+
+function notifySessionListeners(): void {
+  for (const listener of [...sessionListeners]) {
+    try { listener() } catch { /* isolate service consumers */ }
+  }
+}
+
+function subscribeSessionSummary(listener: () => void): () => void {
+  sessionListeners.add(listener)
+  if (sessionListeners.size === 1) attachSessionList()
+  return () => {
+    sessionListeners.delete(listener)
+    if (sessionListeners.size === 0) attachSessionList()
+  }
+}
 
 /** Publish the injected services; returns a disposer that clears them. */
 export function bindClientServices(next: BoundClientServices): () => void {
   services = next
-  sessionSubscribe = typeof next.sessions?.list.subscribe === 'function'
-    ? next.sessions.list.subscribe.bind(next.sessions.list)
-    : undefined
+  attachSessionList()
+  // Mounted hooks must move from A to B (and back to the empty service) without
+  // waiting for an unrelated React render or a future list event.
+  notifySessionListeners()
   return () => {
     if (services !== next) return
     services = {}
-    sessionSubscribe = undefined
+    attachSessionList()
+    notifySessionListeners()
   }
 }
 
@@ -65,15 +90,11 @@ export function getClientServices(): BoundClientServices {
 /** Read the current Session's catalog summary, re-rendering on list updates. */
 export function useSessionSummary(sessionId: string | undefined): SessionSummaryLike | undefined {
   return useSyncExternalStore(
-    sessionSubscribe ?? noSubscribe,
+    subscribeSessionSummary,
     () => {
       if (sessionId === undefined || services.sessions === undefined) return undefined
       return services.sessions.list.getSnapshot().byId[sessionId]
     },
     () => undefined,
   )
-}
-
-function noSubscribe(): () => void {
-  return () => {}
 }

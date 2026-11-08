@@ -17,6 +17,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -61,11 +63,12 @@ jobs:
       - name: Rebuild esbuild binary
         run: pnpm rebuild esbuild
 
-      - name: Verify version, typecheck, build and test
+      - name: Verify version, typecheck, artifacts, build and test
         run: |
           pnpm run verify:version
           pnpm run typecheck
           pnpm run build
+          pnpm run verify:artifacts
           pnpm run test
 
       - name: Package release assets and SHA-256 checksums
@@ -101,12 +104,17 @@ jobs:
           DSH_SMOKE_ROOT: ${{ runner.temp }}/release-install-smoke
           DSH_SMOKE_CLI: ${{ runner.temp }}/qualification/node_modules/@deepseek-ai/dsh/lib/bin.js
           COREPACK_ENABLE_PROJECT_SPEC: '0'
-          PNPM_MANAGE_PACKAGE_MANAGER_VERSIONS: 'false'
+          pnpm_config_pm_on_fail: ignore
         run: |
           set -euo pipefail
           export PATH="$RUNNER_TEMP/qualification/node_modules/.bin:$PATH"
           export DSH_SMOKE_PACKAGE="$PWD/release-assets/dsh-multi-device-v$(tr -d '[:space:]' < VERSION).tgz"
           node scripts/smoke-official-install.mjs
+
+      - name: Attest provenance for the qualified release assets
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
+        with:
+          subject-path: release-assets/*
 
       - name: Generate release notes and metadata
         id: release_meta
@@ -149,6 +157,12 @@ jobs:
           # 或安装至 DSH Web profile
           dsh plugin --profile web add https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/dsh-multi-device-v${version}.tgz
           \`\`\`
+
+          ### 构建溯源与渠道
+          - 精确源码提交：\`${GITHUB_SHA}\`
+          - 验证与打包运行：https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          - 构建 provenance：https://github.com/${GITHUB_REPOSITORY}/attestations
+          - 当前渠道：**${channel_label}**；只有显式 stable 渠道会设为 latest，tag 推送默认为 test prerelease。
           EOF
 
       - name: Publish GitHub Release

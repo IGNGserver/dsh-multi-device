@@ -30,7 +30,8 @@ import {
 } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import type { Duplex } from 'node:stream'
-import { brotliDecompressSync, gunzipSync, inflateSync } from 'node:zlib'
+import { brotliDecompress, gunzip, inflate } from 'node:zlib'
+import { promisify } from 'node:util'
 import { WebSocket, WebSocketServer } from 'ws'
 import type { DeviceConfig, DeviceId, NativePaneState } from '../contract.ts'
 import { DeviceAuthManager, resolveRemoteAuthority } from './auth.ts'
@@ -241,6 +242,7 @@ export class NativeDeviceProxy {
   private readonly bridgeClients = new Map<WebSocket, string>()
   private readonly clientStates = new Map<string, ClientBridgeState>()
   private readonly bridgeVisibility = new Map<WebSocket, boolean>()
+  private readonly readyBridgeClients = new Set<WebSocket>()
   /** Host-owned workspace fold state, applied before the remote page's first render. */
   private groupState: Record<string, boolean> = {}
   /** Host-owned raw Session IDs whose completion is unread. */
@@ -923,37 +925,49 @@ export class NativeDeviceProxy {
       finished = true
       const raw = Buffer.concat(chunks)
       cleanup()
-      const headers = { ...baseHeaders }
-      const encoding = headerValueOf(proxyRes.headers, 'content-encoding')
-      let body = raw
-      let injected = false
-      const decoded = decodeHtmlBody(raw, encoding)
-      if (decoded !== undefined) {
-        body = Buffer.from(injectNativeBridge(decoded.toString('utf8'), { deviceId: this.device.id }), 'utf8')
-        removeHeader(headers, 'content-encoding')
-        injected = true
-      }
-      if (!injected) {
+      void (async (): Promise<void> => {
+        const headers = { ...baseHeaders }
+        const encoding = headerValueOf(proxyRes.headers, 'content-encoding')
+        let body = raw
+        let injected = false
+        const decoded = await decodeHtmlBody(raw, encoding)
+        if (res.destroyed || this.stopped) return
+        if (decoded !== undefined) {
+          body = Buffer.from(injectNativeBridge(decoded.toString('utf8'), { deviceId: this.device.id }), 'utf8')
+          if (body.byteLength > MAX_INJECTABLE_HTML_BYTES) throw new Error('injected HTML exceeded output limit')
+          removeHeader(headers, 'content-encoding')
+          injected = true
+        }
+        if (!injected) {
+          this.clearBridgeTimer(clientId)
+          this.resetBridgeSelection(clientId)
+          this.setBridgeState(
+            'failed',
+            `the remote HTML document used an unsupported content-encoding (${encoding ?? 'unknown'})`,
+            clientId,
+          )
+        }
+        removeHeader(headers, 'content-length')
+        // Node framed the upstream body as chunked; we now own a fixed-length
+        // buffer, and sending both is an HTTP/1.1 protocol violation.
+        removeHeader(headers, 'transfer-encoding')
+        removeHeader(headers, 'connection')
+        removeHeader(headers, 'keep-alive')
+        removeHeader(headers, 'etag')
+        removeHeader(headers, 'last-modified')
+        headers['cache-control'] = 'no-store'
+        headers['content-length'] = String(body.byteLength)
+        res.writeHead(status, headers)
+        res.end(body)
+      })().catch(() => {
         this.clearBridgeTimer(clientId)
         this.resetBridgeSelection(clientId)
-        this.setBridgeState(
-          'failed',
-          `the remote HTML document used an unsupported content-encoding (${encoding ?? 'unknown'})`,
-          clientId,
-        )
-      }
-      removeHeader(headers, 'content-length')
-      // Node framed the upstream body as chunked; we now own a fixed-length
-      // buffer, and sending both is an HTTP/1.1 protocol violation.
-      removeHeader(headers, 'transfer-encoding')
-      removeHeader(headers, 'connection')
-      removeHeader(headers, 'keep-alive')
-      removeHeader(headers, 'etag')
-      removeHeader(headers, 'last-modified')
-      headers['cache-control'] = 'no-store'
-      headers['content-length'] = String(body.byteLength)
-      res.writeHead(status, headers)
-      res.end(body)
+        this.setBridgeState('failed', 'the remote HTML document could not be decoded within its output limit', clientId)
+        if (!res.destroyed && !res.headersSent && !this.stopped) {
+          res.writeHead(502, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+          res.end(renderUnavailableHtml(this.device.name, 'The remote page could not be decoded safely.'))
+        }
+      })
     }
     proxyRes.on('data', onData)
     proxyRes.prependOnceListener('error', onError)
@@ -993,12 +1007,15 @@ export class NativeDeviceProxy {
   /** Own one framed page's bridge socket, its readiness and its selection reports. */
   private attachBridge(ws: WebSocket, clientId: string): void {
     const state = this.clientState(clientId)
-    const first = ![...this.bridgeClients.values()].includes(clientId)
+    const ownerChanged = state.navigationOwner !== ws
     state.navigationOwner = ws
     this.bridgeClients.set(ws, clientId)
     this.bridgeVisibility.set(ws, false)
-    if (first) {
-      this.resetBridgeSelection(clientId)
+    if (ownerChanged) {
+      // Navigation ownership is per socket; selection/title belong to the
+      // logical browser client and survive an overlapping reconnect. The last
+      // socket's close still clears them, while stale owners cannot report it.
+      this.clearBridgeTimer(clientId)
       this.setBridgeState('loading', undefined, clientId)
       this.armBridgeTimer(clientId)
     }
@@ -1019,6 +1036,7 @@ export class NativeDeviceProxy {
       if (state.navigationOwner !== ws &&
           (message.type === 'failed' || message.type === 'navigation' || message.type === 'selection')) return
       if (message.type === 'ready') {
+        this.readyBridgeClients.add(ws)
         if (state.navigationOwner === ws) {
           this.clearBridgeTimer(clientId)
           this.setBridgeState('ready', undefined, clientId)
@@ -1119,17 +1137,31 @@ export class NativeDeviceProxy {
     ws.on('close', () => {
       this.bridgeClients.delete(ws)
       this.bridgeVisibility.delete(ws)
+      this.readyBridgeClients.delete(ws)
       if (this.stopped) return
       const wasOwner = state.navigationOwner === ws
-      if (wasOwner) state.navigationOwner = undefined
+      const remaining = wasOwner
+        ? [...this.bridgeClients].filter(([, owner]) => owner === clientId).map(([socket]) => socket)
+        : []
+      const nextOwner = remaining.at(-1)
+      if (wasOwner) {
+        state.navigationOwner = nextOwner
+        this.clearBridgeTimer(clientId)
+        if (nextOwner !== undefined) {
+          if (this.readyBridgeClients.has(nextOwner)) this.setBridgeState('ready', undefined, clientId)
+          else {
+            this.setBridgeState('loading', undefined, clientId)
+            this.armBridgeTimer(clientId)
+          }
+        }
+      }
       this.trimClientStates(clientId)
       this.reportBridgeVisibility(clientId)
-      if (!wasOwner || [...this.bridgeClients.values()].includes(clientId)) return
+      if (!wasOwner || nextOwner !== undefined) return
       if (state.title !== undefined) {
         state.title = undefined
         this.hooks.onBridgeTitle?.(this.device.id, undefined, clientId)
       }
-      this.clearBridgeTimer(clientId)
       this.resetBridgeSelection(clientId)
       if (state.state === 'ready' || state.state === 'loading') {
         this.setBridgeState('idle', undefined, clientId)
@@ -1450,18 +1482,18 @@ function removeHeader(headers: Record<string, string | string[]>, name: string):
   }
 }
 
-/** Decode a compressed HTML body, or undefined for an encoding we do not own. */
-function decodeHtmlBody(raw: Buffer, encoding: string | undefined): Buffer | undefined {
+const gunzipAsync = promisify(gunzip)
+const inflateAsync = promisify(inflate)
+const brotliDecompressAsync = promisify(brotliDecompress)
+
+/** Decode off the event loop with a hard decompressed-output limit. */
+async function decodeHtmlBody(raw: Buffer, encoding: string | undefined): Promise<Buffer | undefined> {
   const normalized = (encoding ?? '').trim().toLowerCase()
   if (normalized === '' || normalized === 'identity') return raw
-  try {
-    const options = { maxOutputLength: MAX_INJECTABLE_HTML_BYTES }
-    if (normalized === 'gzip' || normalized === 'x-gzip') return gunzipSync(raw, options)
-    if (normalized === 'deflate') return inflateSync(raw, options)
-    if (normalized === 'br') return brotliDecompressSync(raw, options)
-  } catch {
-    return undefined
-  }
+  const options = { maxOutputLength: MAX_INJECTABLE_HTML_BYTES }
+  if (normalized === 'gzip' || normalized === 'x-gzip') return await gunzipAsync(raw, options)
+  if (normalized === 'deflate') return await inflateAsync(raw, options)
+  if (normalized === 'br') return await brotliDecompressAsync(raw, options)
   return undefined
 }
 

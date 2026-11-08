@@ -41,7 +41,6 @@ import React, { useEffect, useId, useState } from 'react'
 import { copyText } from './clipboard.ts'
 import { DshSelect } from './DshSelect.tsx'
 import {
-  decodeSessionId,
   type DeviceId,
   type DeviceView,
   type DisplayMode,
@@ -56,7 +55,7 @@ import type { MultiDeviceDiagnostics } from '../runtime.ts'
 import { attentionUnreadIds } from '../attention.ts'
 import { AttentionDetails } from './AttentionDetails.tsx'
 import { memberTargetsForWorkspace } from './sessionDevice.ts'
-import { countableUnreadIds, unreadCountForDevice } from './unreadCounts.ts'
+import { countableUnreadIds, EMPTY_UNREAD_SESSION_IDS, groupUnreadSessionIds } from './unreadCounts.ts'
 import {
   clientStore,
   deviceStateToDotState,
@@ -656,6 +655,7 @@ export function MultiDeviceHubPanel({
     snapshot.subagentSessionIds,
     sessionId => snapshot.sessionOrigins[sessionId] !== undefined,
   )
+  const unreadByDevice = groupUnreadSessionIds(unread)
   const modeSegId = useId()
 
   const [addingNew, setAddingNew] = useState(false)
@@ -1112,7 +1112,7 @@ export function MultiDeviceHubPanel({
           <ul className="dsh-md-rows">
             {snapshot.devices.map((dev) => {
               const isEditing = editingDeviceId === dev.id
-              const deviceUnread = unreadCountForDevice(unread, dev.id)
+              const deviceUnread = (unreadByDevice.get(dev.id) ?? EMPTY_UNREAD_SESSION_IDS).length
               return (
                 <li key={dev.id} className="dsh-md-card">
                   <div className="dsh-md-row-head">
@@ -1126,7 +1126,7 @@ export function MultiDeviceHubPanel({
                         fallback={{
                           runningCount: snapshot.attentionByDevice === undefined ? dev.runningSessionCount : undefined,
                           pendingCount: snapshot.attentionByDevice === undefined ? dev.pendingApprovalCount : undefined,
-                          unreadSessionIds: [...unread].filter(id => decodeSessionId(id).deviceId === dev.id),
+                          unreadSessionIds: unreadByDevice.get(dev.id) ?? EMPTY_UNREAD_SESSION_IDS,
                           fresh: snapshot.attentionByDevice === undefined && dev.state === 'connected' && dev.catalogStale !== true,
                         }}
                       />

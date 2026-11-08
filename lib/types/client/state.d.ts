@@ -70,8 +70,37 @@ export interface MultiDeviceClientState {
      * the conversation the user was actually looking at.
      */
     readonly pendingAggregatedSessionId?: string;
+    /**
+     * Distilled Session-link repair status. `missing > 0` means at least one
+     * aggregated Workspace references Sessions the browser store has no summary
+     * for — the "expanded but empty" symptom. Surfaced as a banner so a stuck
+     * repair is never silent.
+     */
+    readonly sessionLinkStatus?: SessionLinkStatus;
 }
-declare class MultiDeviceClientStore {
+/** Reactive distillation of {@link SessionLinkReport} for banner rendering. */
+export interface SessionLinkStatus {
+    /** Referenced ids with no summary in the Session store. */
+    readonly missing: number;
+    /** The initial fast-retry budget is spent; retries continue at a slow pace. */
+    readonly exhausted: boolean;
+    /** Owning device id → missing count. */
+    readonly byDevice: Readonly<Record<string, number>>;
+    /** Last `sessions.refresh()` failure, when any. */
+    readonly lastError?: string;
+}
+type ControlPlaneResult<T> = ({
+    ok: true;
+    value: T;
+} | {
+    ok: false;
+    error: string;
+}) & {
+    stale?: true;
+};
+export declare class MultiDeviceClientStore {
+    readonly clientId: string;
+    private mainViewVisible;
     private state;
     private readonly listeners;
     private eventSource;
@@ -79,8 +108,27 @@ declare class MultiDeviceClientStore {
     private sseRetryTimer;
     private sseAttempt;
     private started;
+    private disposed;
+    private lifecycleGeneration;
+    private lifecycleAbort;
+    private snapshotInFlight;
+    private navigationGeneration;
+    private connectionGeneration;
+    private hostGeneration;
+    private requestSequence;
+    private readonly latestRequests;
+    private readonly responseFences;
+    /** Epochs are opaque identities, never lexically or numerically ordered. */
+    private readonly retiredEpochs;
+    private visibilityDocument;
+    private readonly onVisibilityChange;
     /** Latest Session reported to the Host, used to dedupe mount/cleanup races. */
     private reportedSessionId;
+    private hasReportedSession;
+    private observedLocalMainSessionId;
+    /** Ignore the unchanged background main view, not an actual local navigation. */
+    reportLocalMainSession(sessionId: string): Promise<void>;
+    private reportingSessionId;
     private activeSessionInFlight;
     /** Monotonic control-plane sequence so an older HTTP request cannot win. */
     private activeSessionSeq;
@@ -91,15 +139,31 @@ declare class MultiDeviceClientStore {
     getSnapshot: () => MultiDeviceClientState;
     subscribe: (listener: () => void) => (() => void);
     private setState;
+    /**
+     * Publish the Session-link repair status. Diffs against the previous value
+     * so the per-change `check()` does not churn React renders.
+     */
+    updateSessionLinkStatus(status: SessionLinkStatus | undefined): void;
+    private resetActiveSessionReport;
+    private isFenceCurrent;
+    private isResponseCurrent;
     start(): () => void;
+    private stop;
+    /** Final teardown (including HMR): a disposed store cannot be restarted. */
+    dispose(): void;
     private connectSse;
     private applyIncomingSnapshot;
     /**
      * A completion can arrive while its conversation is already the main view.
-     * The Host has no reliable cross-client presence signal, so every viewing
-     * client clears the marker as soon as it sees it. The next snapshot removes
-     * the dot everywhere; the round-trip is short enough to avoid a lingering
-     * reminder and keeps the "main view is read" rule identical to DSH's.
+     * The Host has no reliable cross-client presence signal, so every *visible*
+     * viewing client clears the marker as soon as it sees it. The next snapshot
+     * removes the dot everywhere; the round-trip is short enough to avoid a
+     * lingering reminder and keeps the "main view is read" rule identical to
+     * DSH's.
+     *
+     * A hidden tab must NOT clear: nobody is looking at it, so consuming the
+     * unread marker would silently drop the only reminder the user had. The
+     * visibilitychange handler clears it immediately when the tab becomes visible.
      */
     private clearUnreadForActiveSession;
     private activateNativeDevice;
@@ -128,6 +192,8 @@ declare class MultiDeviceClientStore {
     }>;
     /** Return to the 本机 tab while staying in Native Mode. */
     selectLocalNativeTab(): void;
+    /** Clear the remote scope before restoring a real local Session, even when none exists. */
+    private enterLocalScope;
     releaseKeepAliveDevice(deviceId: DeviceId): void;
     reloadNativeDevice(deviceId: DeviceId): void;
     setActiveHubTab(tab: HubTabId): void;
@@ -138,10 +204,14 @@ declare class MultiDeviceClientStore {
      * Session owner's catalog, so a remote conversation never mixes in local
      * models (and vice versa).
      */
+    /** The local mirror remains mounted behind native tabs/global panels. */
+    effectiveSessionId(): string | undefined;
+    setMainViewVisible(visible: boolean): void;
     setActiveSession(sessionId: string | undefined): Promise<void>;
     /** Clear the scope only when the unmounting Session is still the reported one. */
     clearActiveSession(sessionId: string): void;
-    /** Ask the Host to clear one Session's unread marker. */
+    private readCompletionId;
+    /** Ask the Host to clear only the completion this browser actually observed. */
     markSessionRead(sessionId: string): Promise<boolean>;
     /**
      * Clear every unread marker owned by one device (本机 included).
@@ -155,13 +225,28 @@ declare class MultiDeviceClientStore {
         changed: number;
         error?: string;
     }>;
-    callControlPlane<T = unknown>(request: ControlPlaneRequest): Promise<{
-        ok: true;
-        value: T;
-    } | {
-        ok: false;
-        error: string;
+    retryCatalogNavigation(): Promise<void>;
+    /** Open navigation metadata without retaining a foreign Session in the local Controller. */
+    openCatalogSession(sessionId: string): Promise<{
+        ok: boolean;
+        error?: string;
     }>;
+    catalogSessionAction(sessionId: string, action: import('../contract.ts').CatalogSessionAction, title?: string, stopActivity?: boolean): Promise<{
+        ok: boolean;
+        error?: string;
+        sessionId?: string;
+    }>;
+    searchCatalogSessions(query: string): Promise<{
+        ok: boolean;
+        error?: string;
+        sessionIds?: readonly string[];
+        errors?: Readonly<Record<string, string>>;
+    }>;
+    startSessionOnDevice(logicalWorkspaceId: string, deviceId: DeviceId): Promise<{
+        ok: boolean;
+        error?: string;
+    }>;
+    callControlPlane<T = unknown>(request: ControlPlaneRequest): Promise<ControlPlaneResult<T>>;
     refreshSnapshot(): Promise<void>;
     /**
      * Ask the Host for a support report. The browser contributes the geometry it

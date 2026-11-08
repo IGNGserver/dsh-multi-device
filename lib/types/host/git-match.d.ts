@@ -17,7 +17,7 @@
  * @module dsh-multi-device/host/git-match
  */
 import { type DeviceConnectionState, type DeviceId, type GitMatchRun } from '../contract.ts';
-import { type ScannedRepository } from './git-scan.ts';
+import { type GitRepoScanResult, type ScannedRepository } from './git-scan.ts';
 /** One device the run may read from or register a workspace on. */
 export interface GitMatchDeviceTarget {
     readonly deviceId: DeviceId;
@@ -32,16 +32,11 @@ export interface GitMatchDeviceTarget {
 export interface GitMatchContext {
     readonly devices: () => readonly GitMatchDeviceTarget[];
     /** Read `origin` for registered workspaces on a remote device, in one round-trip. */
-    readonly discoverRemoteOrigins: (deviceId: DeviceId, paths: readonly string[]) => Promise<Map<string, string>>;
+    readonly discoverRemoteOrigins: (deviceId: DeviceId, paths: readonly string[], signal?: AbortSignal) => Promise<Map<string, string>>;
     /** Scan one remote device; resolves to an error string instead of throwing. */
-    readonly scanRemoteRepos: (deviceId: DeviceId, roots: readonly string[]) => Promise<{
-        ok: true;
-        repos: ScannedRepository[];
-    } | {
-        ok: false;
-        error: string;
-    }>;
+    readonly scanRemoteRepos: (deviceId: DeviceId, roots: readonly string[], signal?: AbortSignal) => Promise<GitRepoScanResult>;
     readonly scanLocalRepos: (roots: readonly string[]) => ScannedRepository[];
+    readonly scanLocalReposAsync?: (roots: readonly string[], signal?: AbortSignal) => Promise<GitRepoScanResult>;
     readonly createLocalWorkspace: (path: string) => Promise<{
         ok: true;
     } | {
@@ -66,10 +61,11 @@ export declare class GitMatchRunner {
     private current;
     private cancelled;
     private active;
+    private abortController;
     constructor(ctx: GitMatchContext);
     get state(): GitMatchRun;
     get running(): boolean;
-    /** Ask a running task to stop at the next safe point. */
+    /** Abort the active scan/process; workspace creation finishes at its next safe point. */
     cancel(): boolean;
     private now;
     private emit;

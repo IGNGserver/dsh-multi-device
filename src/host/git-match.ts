@@ -24,9 +24,10 @@ import {
   type GitMatchRun,
   normalizeGitRemote,
 } from '../contract.ts'
-import { discoverLocalGitRemote } from './git-aggregator.ts'
+import { discoverLocalGitRemoteAsync } from './git-aggregator.ts'
 import {
   deriveScanRoots,
+  type GitRepoScanResult,
   type ScannedRepository,
   primaryRepoByOrigin,
 } from './git-scan.ts'
@@ -49,13 +50,16 @@ export interface GitMatchContext {
   readonly discoverRemoteOrigins: (
     deviceId: DeviceId,
     paths: readonly string[],
+    signal?: AbortSignal,
   ) => Promise<Map<string, string>>
   /** Scan one remote device; resolves to an error string instead of throwing. */
   readonly scanRemoteRepos: (
     deviceId: DeviceId,
     roots: readonly string[],
-  ) => Promise<{ ok: true; repos: ScannedRepository[] } | { ok: false; error: string }>
+    signal?: AbortSignal,
+  ) => Promise<GitRepoScanResult>
   readonly scanLocalRepos: (roots: readonly string[]) => ScannedRepository[]
+  readonly scanLocalReposAsync?: (roots: readonly string[], signal?: AbortSignal) => Promise<GitRepoScanResult>
   readonly createLocalWorkspace: (path: string) => Promise<{ ok: true } | { ok: false; error: string }>
   readonly createRemoteWorkspace: (
     deviceId: DeviceId,
@@ -104,6 +108,7 @@ export class GitMatchRunner {
   private current: GitMatchRun = createIdleGitMatch()
   private cancelled = false
   private active = false
+  private abortController = new AbortController()
 
   constructor(private readonly ctx: GitMatchContext) {}
 
@@ -115,10 +120,11 @@ export class GitMatchRunner {
     return this.active
   }
 
-  /** Ask a running task to stop at the next safe point. */
+  /** Abort the active scan/process; workspace creation finishes at its next safe point. */
   cancel(): boolean {
     if (!this.active) return false
     this.cancelled = true
+    this.abortController.abort()
     return true
   }
 
@@ -136,6 +142,7 @@ export class GitMatchRunner {
     if (this.active) return this.current
     this.active = true
     this.cancelled = false
+    this.abortController = new AbortController()
 
     const devices = [...this.ctx.devices()].sort((a, b) => {
       if (a.local !== b.local) return a.local ? -1 : 1
@@ -174,6 +181,7 @@ export class GitMatchRunner {
       })
 
       const scannedByDevice = new Map<DeviceId, Map<string, ScannedRepository>>()
+      const completeScans = new Set<DeviceId>()
       let processedDevices = 0
       for (const device of devices) {
         if (this.cancelled) return this.finish('cancelled', reports)
@@ -192,22 +200,27 @@ export class GitMatchRunner {
         }
 
         const roots = [...new Set([...deriveScanRoots(device.home, device.workspacePaths), ...device.workspacePaths])]
-        let scan: { ok: true; repos: ScannedRepository[] } | { ok: false; error: string }
+        let scan: GitRepoScanResult
         try {
-          scan = device.local
-            ? { ok: true, repos: this.ctx.scanLocalRepos(roots) }
-            : await this.ctx.scanRemoteRepos(device.deviceId, roots)
+          if (device.local) {
+            scan = this.ctx.scanLocalReposAsync !== undefined
+              ? await this.ctx.scanLocalReposAsync(roots, this.abortController.signal)
+              : { ok: true, repos: this.ctx.scanLocalRepos(roots) }
+          } else {
+            scan = await this.ctx.scanRemoteRepos(device.deviceId, roots, this.abortController.signal)
+          }
         } catch (error) {
           scan = { ok: false, error: error instanceof Error ? error.message : String(error) }
         }
 
-        if (!scan.ok) {
-          reportOf.get(device.deviceId)?.errors.push(scan.error)
-        } else {
-          const report = reportOf.get(device.deviceId)
-          if (report !== undefined) report.scanned = scan.repos.length
-          scannedByDevice.set(device.deviceId, primaryRepoByOrigin(scan.repos))
-        }
+        const repos = scan.repos ?? []
+        const report = reportOf.get(device.deviceId)
+        if (report !== undefined) report.scanned = repos.length
+        if (scan.ok || scan.repos !== undefined) scannedByDevice.set(device.deviceId, primaryRepoByOrigin(repos))
+        if (!scan.ok) report?.errors.push(scan.error)
+        if (scan.ok && scan.truncated === true) report?.errors.push('Scan reached its repository limit; unmatched projects were not classified as missing')
+        if (scan.ok && scan.truncated !== true) completeScans.add(device.deviceId)
+        if (this.cancelled) return this.finish('cancelled', reports)
 
         processedDevices += 1
         this.emit({ processedDevices })
@@ -235,7 +248,7 @@ export class GitMatchRunner {
           if (scanned === undefined) continue
           const repo = scanned.get(seed.gitRemote)
           if (repo === undefined) {
-            report.notFound += 1
+            if (completeScans.has(device.deviceId)) report.notFound += 1
             continue
           }
 
@@ -300,7 +313,7 @@ export class GitMatchRunner {
       try {
         origins = device.local
           ? await this.discoverLocalOrigins(device.workspacePaths)
-          : await this.ctx.discoverRemoteOrigins(device.deviceId, device.workspacePaths)
+          : await this.ctx.discoverRemoteOrigins(device.deviceId, device.workspacePaths, this.abortController.signal)
       } catch (error) {
         reportOf.get(device.deviceId)?.errors.push(error instanceof Error ? error.message : String(error))
         continue
@@ -330,8 +343,14 @@ export class GitMatchRunner {
   private async discoverLocalOrigins(paths: readonly string[]): Promise<Map<string, string>> {
     const found = new Map<string, string>()
     for (const path of paths) {
-      const raw = discoverLocalGitRemote(path, { originOnly: true })
-      if (raw !== undefined && raw.trim() !== '') found.set(path, raw)
+      if (this.abortController.signal.aborted) throw new Error('Git origin discovery cancelled')
+      try {
+        const raw = await discoverLocalGitRemoteAsync(path, this.abortController.signal)
+        if (raw !== undefined && raw.trim() !== '') found.set(path, raw)
+      } catch (error) {
+        if (this.abortController.signal.aborted) throw error
+        // Discovery is best-effort; the strict scan reports broken metadata later.
+      }
     }
     return found
   }

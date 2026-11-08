@@ -39,7 +39,7 @@ import {
   Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { decodeSessionId, LOCAL_DEVICE_ID, type DeviceId, type DeviceView } from '../contract.ts'
+import { LOCAL_DEVICE_ID, type DeviceId, type DeviceView } from '../contract.ts'
 import { AuthRequiredPanel } from './AuthPanel.tsx'
 import {
   type NativeBarMetrics,
@@ -54,7 +54,7 @@ import { SessionDeviceChip } from './SessionDeviceChip.tsx'
 import { assessBrowserNativeAccess } from '../host/browser-relay.ts'
 import { nativePaneTarget, shouldShowNativePane } from './nativePane.ts'
 import { clientStore, deviceStateToDotState, useMultiDeviceState } from './state.ts'
-import { countableUnreadIds } from './unreadCounts.ts'
+import { countableUnreadIds, EMPTY_UNREAD_SESSION_IDS, groupUnreadSessionIds } from './unreadCounts.ts'
 
 interface DesktopBrowserBridgeLike {
   acquire(workspace: string): Promise<{ lease: string; partition: string }>
@@ -372,6 +372,7 @@ export function NativeTabBar({
     state.snapshot.subagentSessionIds,
     sessionId => state.snapshot.sessionOrigins[sessionId] !== undefined,
   )
+  const unreadByDevice = groupUnreadSessionIds(unread)
 
   const activeDevice = devices.find(device => device.id === state.activeNativeDeviceId)
   const localActive = activeDevice === undefined
@@ -463,7 +464,7 @@ export function NativeTabBar({
             deviceName={t('nativeLocalTab')}
             t={t}
             nativeBar
-            fallback={{ unreadSessionIds: [...unread].filter(id => decodeSessionId(id).deviceId === LOCAL_DEVICE_ID), fresh: attentionByDevice === undefined }}
+            fallback={{ unreadSessionIds: unreadByDevice.get(LOCAL_DEVICE_ID) ?? EMPTY_UNREAD_SESSION_IDS, fresh: attentionByDevice === undefined }}
           />
         </div>
 
@@ -495,7 +496,7 @@ export function NativeTabBar({
                 fallback={{
                   runningCount: attentionByDevice === undefined ? dev.runningSessionCount : undefined,
                   pendingCount: attentionByDevice === undefined ? dev.pendingApprovalCount : undefined,
-                  unreadSessionIds: [...unread].filter(id => decodeSessionId(id).deviceId === dev.id),
+                  unreadSessionIds: unreadByDevice.get(dev.id) ?? EMPTY_UNREAD_SESSION_IDS,
                   fresh: attentionByDevice === undefined && dev.state === 'connected' && dev.catalogStale !== true,
                 }}
               />

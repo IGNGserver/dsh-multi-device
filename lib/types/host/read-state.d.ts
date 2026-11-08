@@ -1,97 +1,83 @@
-/**
- * Host-owned remote Session read/unread state.
- *
- * DSH's own `completionUnread` set lives in each browser page's memory, so it
- * cannot answer "was this completion already read on another device?" The
- * registry keeps the authoritative copy here and publishes it in the snapshot;
- * native pages and the aggregated local page then overlay the same set.
- *
- * The tracker is deliberately transport- and UI-agnostic: it only understands
- * Session IDs and running transitions. The registry maps those to namespaced
- * remote IDs, persists them, and forwards changes to the native bridge.
- *
- * @module dsh-multi-device/host/read-state
- */
-/** One Session's last read/unread transition. */
 export interface SessionReadState {
     readonly unread: boolean;
-    /** Epoch ms of the last transition; used to merge Hosts deterministically. */
+    /** Legacy merge/retention timestamp, never a completion identity or ordering. */
     readonly at: number;
+    readonly completionId?: string;
+    readonly readCompletionId?: string;
+    readonly deleted?: true;
 }
-/** Called after a state transition; `unreadChanged` is false for a plain read touch. */
+export interface ReadCompletionResult {
+    readonly accepted: boolean;
+    readonly currentCompletionId?: string;
+    readonly unread: boolean;
+}
+/** The third flag requests snapshot publication (unread or completion identity changed). */
 export type ReadStateChangeListener = (sessionId: string, state: SessionReadState, unreadChanged: boolean) => void;
-/** Upper bound for remembered Session entries in one Host. */
 export declare const READ_STATE_ENTRY_LIMIT = 2000;
+/** Validate optional cursors without rejecting legacy version-1 entries. */
+export declare function parseSessionReadState(value: unknown): SessionReadState | undefined;
 /**
- * Tracks running transitions and read marks for namespaced remote Sessions.
- *
- * The tracker intentionally does not decide whether a Session is currently
- * visible; the registry and clients clear the set when a Session becomes the
- * main view. A completion that is already being watched is therefore cleared
- * on the next client snapshot, matching DSH's "main Session is read" rule.
+ * Local-first cursor merge, shared by the tracker and shared-file projection.
+ * A retained tombstone is terminal. Different UUIDs cannot be compared by at.
+ * Legacy LWW applies only until a Session acquires a completion cursor.
+ */
+export declare function mergeSessionReadState(current: SessionReadState | undefined, incoming: SessionReadState): SessionReadState;
+/**
+ * Every retained map is bounded, including running-only baselines and tombstones.
+ * Eviction necessarily ends deduplication for that Session; callers must also
+ * filter shared replay against an authoritative catalog when one is available.
  */
 export declare class ReadStateTracker {
     private readonly onChange?;
     private readonly entries;
+    /** Only true baselines need retention; absent and false are equivalent. */
     private readonly running;
     constructor(onChange?: ReadStateChangeListener | undefined);
-    /**
-     * Observe one authoritative running-status transition.
-     *
-     * Only a real `true -> false` transition creates unread state. A first
-     * `false` (for example a catalog row that was already finished at startup)
-     * must not manufacture an unread reminder.
-     */
+    /** First false and duplicate false observations never mint a completion. */
     observeRunning(sessionId: string, running: boolean, now?: number): boolean;
-    /** Mark a Session read; returns true when an unread marker was removed. */
-    markRead(sessionId: string, now?: number): boolean;
+    /** Optional expected token prevents an old page read from clearing a new run. */
+    markRead(sessionId: string, now?: number, expectedCompletionId?: string): boolean;
+    /** ACK acceptance is independent of whether an idempotent read changed a dot. */
+    readCompletion(sessionId: string, expectedCompletionId: string, now?: number): ReadCompletionResult;
     /**
-     * Mark every matching Session read in one transition.
-     *
-     * The explicit "clear unread" action must not emit one snapshot revision per
-     * reminder: read state is published as a set, so one unread change is enough
-     * for every client and framed page to pick up the new state.
-     *
-     * @param predicate - return true to mark the Session read.
-     * @returns the IDs whose unread marker was removed.
+     * Rebind this exact finished completion to a caller-verified shared identity.
+     * The registry must derive the identity from the same real terminal turn/end,
+     * never from updatedAt. A racing run, deletion, or replacement rejects it.
      */
+    promoteCompletion(sessionId: string, expectedCompletionId: string, sharedCompletionId: string): boolean;
+    /**
+     * Finish a legacy shared merge batch before publishing to token-aware clients.
+     * Keeps low-level legacy LWW until explicitly called; emits one publication
+     * for all migrations. Persist the returned ids' new metadata before restart.
+     */
+    migrateLegacyIds(): string[];
+    /** One unread notification/revision, while preserving every per-Session cursor. */
     markManyRead(predicate: (sessionId: string) => boolean, now?: number): string[];
-    /**
-     * Merge one entry from another Host's shared file. The newest timestamp wins;
-     * a read at the same instant wins over unread so a cleared dot cannot come
-     * back merely because two Hosts replayed the same completion.
-     */
     mergeEntry(sessionId: string, entry: SessionReadState): boolean;
-    /** Mark a Session unread; returns true when it was not already unread. */
+    /** Legacy/manual API: it cannot reopen an already cursorized completion. */
     markUnread(sessionId: string, now?: number): boolean;
     isUnread(sessionId: string): boolean;
-    /** Sorted read state for the snapshot; deterministic for clients and tests. */
     unreadIds(): string[];
-    /** Serializable durable representation. */
+    /** Includes already-read completions; clients need the identity for read ACKs. */
+    completionIds(): Record<string, string>;
+    /** Tombstones and both cursor fields survive persistence and shared replay. */
     entriesSnapshot(): Record<string, SessionReadState>;
     /**
-     * Restore durable state. Invalid entries are ignored instead of crashing a
-     * Host restart, and the result is capped like a live set.
+     * Upgrade legacy unread once so token-aware native pages can acknowledge it.
+     * The caller must persist entriesSnapshot after hydration: the `legacy:` UUID
+     * is a compatibility read cursor, not a newly observed completion. Already-read
+     * legacy entries stay legacy and keep their original LWW behavior.
      */
     hydrate(value: unknown): void;
-    /** Forget one Session; a removed unread marker notifies like a read. */
-    remove(sessionId: string): void;
+    /** Keep a terminal tombstone so old shared unread cannot revive this id. */
+    remove(sessionId: string, now?: number): void;
     /**
-     * Drop entries the caller can no longer observe.
-     *
-     * A deleted Session, a device that was removed, or a catalog that no longer
-     * lists an id must not leave a badge behind: the unread count is a projection
-     * of this set, and an orphaned entry can never be read again. Pruned unread
-     * markers notify like a read so every client and framed page stops counting
-     * them in the same revision.
-     *
-     * @param predicate - return true to keep the entry.
-     * @returns number of unread markers that were dropped.
+     * Only call with authoritative existence information. Offline/unknown/empty
+     * catalogs are NOT evidence of deletion; the registry must guard that boundary.
      */
     prune(predicate: (sessionId: string, state: SessionReadState) => boolean): number;
-    /** Drop entries whose Session no longer belongs to a configured device. */
+    /** Config removal is deletion, not permission for stale shared replay. */
     retain(predicate: (sessionId: string) => boolean): void;
-    /** Keep the most recently touched entries bounded. */
     trim(limit?: number): void;
     private setEntry;
 }

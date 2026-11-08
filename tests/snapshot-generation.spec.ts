@@ -60,7 +60,8 @@ describe('snapshot generation fences', () => {
     vi.useFakeTimers()
     vi.stubGlobal('EventSource', EventSourceMock)
     const value = store()
-    const { calls } = transport(() => new Promise(() => {}))
+    const initial = deferred<unknown>()
+    const { calls } = transport(() => initial.promise)
     value.start()
     const es = EventSourceMock.instances[0]
     es.emit(snapshot(value, 800, 'zzzz'))
@@ -68,7 +69,9 @@ describe('snapshot generation fences', () => {
     expect(value.getSnapshot().snapshot.hostEpoch).toBe('aaaa')
     es.emit(snapshot(value, 999, 'zzzz'))
     expect(value.getSnapshot().snapshot.hostEpoch).toBe('aaaa')
-    vi.stubGlobal('fetch', vi.fn(async () => response(snapshot(value, 1000, 'zzzz'))))
+    initial.resolve(response(snapshot(value, 1000, 'zzzz')))
+    await flush()
+    vi.stubGlobal('fetch', vi.fn(async () => response(snapshot(value, 1001, 'zzzz'))))
     await value.refreshSnapshot()
     expect(value.getSnapshot().snapshot.hostEpoch).toBe('aaaa')
     expect(calls.filter(call => call.action === 'setActiveSession')).toHaveLength(2)
@@ -86,20 +89,21 @@ describe('snapshot generation fences', () => {
     expect(value.getSnapshot().snapshot.hostEpoch).toBe('restart')
   })
 
-  it('fences overlapping HTTP successes and failures by request order', async () => {
+  it('coalesces overlapping HTTP requests and starts a fresh request after settlement', async () => {
     const value = store()
     const first = deferred<unknown>()
-    const second = deferred<unknown>()
     let count = 0
-    transport(() => ++count === 1 ? first.promise : second.promise)
+    const { calls } = transport(() => ++count === 1 ? first.promise : response(snapshot(value, 2, 'next')))
     const a = value.refreshSnapshot()
     const b = value.refreshSnapshot()
-    second.resolve(response(snapshot(value, 1, 'new')))
-    await b
-    first.reject(new Error('old network failure'))
-    await a
+    first.resolve(response(snapshot(value, 1, 'new')))
+    await Promise.all([a, b])
+    expect(calls.filter(call => call.action === 'snapshot')).toHaveLength(1)
     expect(value.getSnapshot()).toMatchObject({ loading: false, error: undefined })
     expect(value.getSnapshot().snapshot.hostEpoch).toBe('new')
+    await value.refreshSnapshot()
+    expect(calls.filter(call => call.action === 'snapshot')).toHaveLength(2)
+    expect(value.getSnapshot().snapshot.hostEpoch).toBe('next')
   })
 
   it.each(['success', 'failure'])('ignores a pending %s after stop without emitting state', async outcome => {

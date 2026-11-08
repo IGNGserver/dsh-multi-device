@@ -11,6 +11,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
 import {
   type DeviceAuthState,
   type DeviceCatalogCache,
@@ -38,6 +39,7 @@ import { emptyDeviceAttention, selectDeviceAttention, type SessionAttentionFact 
 import { readRemoteCompletionIdentity } from './completion-identity.ts'
 import { buildAggregatedCatalog, catalogRow, type CatalogSummaryInput } from './aggregated-catalog.ts'
 import { DeviceAuthManager } from './auth.ts'
+import { decodeCatalogDocument, decodeLegacyCatalogs, encodeCatalogDocument } from './catalog-codec.ts'
 import { JsonSnapshotFile } from './storage.ts'
 import {
   DEFAULT_AGGREGATION_CONFIG,
@@ -50,7 +52,7 @@ import {
   GitMatchRunner,
   type GitMatchDeviceTarget,
 } from './git-match.ts'
-import { scanLocalGitRepos, scanRemoteGitRepos, type ScannedRepository } from './git-scan.ts'
+import { scanLocalGitRepos, scanLocalGitReposAsync, scanRemoteGitRepos, type GitRepoScanResult } from './git-scan.ts'
 import { requestRemote } from './http-request.ts'
 import { sanitizeGroupState } from './native-bridge.ts'
 import { NativeProxyManager, sanitizeBridgeTitle } from './native-proxy.ts'
@@ -236,6 +238,8 @@ export class DeviceRegistry {
 
   private readonly configs = new Map<DeviceId, DeviceConfig>()
   private readonly clients = new Map<DeviceId, RemoteDeviceClient>()
+  /** Invalidates asynchronous proxy mounts when a device is updated, removed or disposed. */
+  private readonly mountGenerations = new Map<DeviceId, number>()
   private readonly listeners = new Set<() => void>()
   private readonly eventListeners = new Set<
     (
@@ -258,6 +262,8 @@ export class DeviceRegistry {
   private readonly paneEmbeddedDevices = new Map<string, DeviceId>()
 
   private revision = 1
+
+  private readonly snapshotCache = new Map<string, { readonly revision: number; readonly value: MultiDeviceSnapshot }>()
   private disposed = false
   private readonly lifetime = new AbortController()
   private localCatalog: readonly SessionAttentionFact[] | undefined
@@ -272,11 +278,11 @@ export class DeviceRegistry {
   private localWorkspaceCreator: ((path: string) => Promise<void>) | undefined
   private localSessionCreator: ((cwd: string) => Promise<string>) | undefined
   private localCatalogAction: ((sessionId: string, action: import('../contract.ts').CatalogSessionAction, title?: string, stopActivity?: boolean) => Promise<{ sessionId?: string }>) | undefined
-  private localCatalogSearch: ((query: string) => Promise<readonly string[]>) | undefined
+  private localCatalogSearch: ((query: string, signal?: AbortSignal) => Promise<readonly string[]>) | undefined
 
   setLocalCatalogAdapters(
     action: (sessionId: string, action: import('../contract.ts').CatalogSessionAction, title?: string, stopActivity?: boolean) => Promise<{ sessionId?: string }>,
-    search: (query: string) => Promise<readonly string[]>,
+    search: (query: string, signal?: AbortSignal) => Promise<readonly string[]>,
   ): void {
     this.localCatalogAction = action
     this.localCatalogSearch = search
@@ -314,16 +320,37 @@ export class DeviceRegistry {
     return action === 'fork' && created?.sessionId ? { sessionId: encodeRemoteSessionId(client.id, created.sessionId) } : {}
   }
 
-  async searchCatalogSessions(query: string): Promise<readonly string[]> {
-    const groups = await Promise.all([
-      this.localCatalogSearch ? this.localCatalogSearch(query) : Promise.resolve([]),
-      ...this.clientList().map(async client => {
-        if (!client.isConnected()) throw new Error(`${client.deviceConfig.name}: search unavailable while offline`)
-        const value = await client.invokeUnary('session', 'search', { request: { query } }) as { items?: { sessionId: string }[] }
-        return (value.items ?? []).map(item => encodeRemoteSessionId(client.id, item.sessionId))
-      }),
-    ])
-    return [...new Set(groups.flat())]
+  async searchCatalogSessions(query: string, signal?: AbortSignal): Promise<{
+    readonly sessionIds: readonly string[]
+    readonly errors: Readonly<Record<string, string>>
+  }> {
+    const throwIfAborted = (): void => {
+      if (signal?.aborted === true) throw new Error('Catalog search aborted')
+    }
+    throwIfAborted()
+    const sources: Array<{ readonly id: string; readonly search: () => Promise<readonly string[]> }> = [
+      { id: LOCAL_DEVICE_ID, search: async () => this.localCatalogSearch?.(query, signal) ?? [] },
+      ...this.clientList().map(client => ({
+        id: client.id as string,
+        search: async (): Promise<readonly string[]> => {
+          if (!client.isConnected()) throw new Error(`${client.deviceConfig.name}: search unavailable while offline`)
+          const value = await client.invokeUnary('session', 'search', { request: { query } }, signal) as { items?: { sessionId: string }[] }
+          throwIfAborted()
+          return (value.items ?? []).map(item => encodeRemoteSessionId(client.id, item.sessionId))
+        },
+      })),
+    ]
+    const errors: Record<string, string> = {}
+    const groups = await Promise.all(sources.map(async source => {
+      try { return await source.search() }
+      catch (error) {
+        if (signal?.aborted === true) throwIfAborted()
+        errors[source.id] = error instanceof Error ? error.message : String(error)
+        return []
+      }
+    }))
+    throwIfAborted()
+    return { sessionIds: [...new Set(groups.flat())], errors }
   }
   private aggregatedGatewayActive = false
   private aggregatedGatewayError: string | undefined
@@ -355,6 +382,8 @@ export class DeviceRegistry {
   private readonly completionBindings = new Map<string, { completionId: string; generation: number }>()
   private readonly completionBindingOffsets = new Map<DeviceId, number>()
   private readonly sharedReadStateDirty = new Set<DeviceId>()
+
+  private readonly sharedReadStateFailures = new Map<DeviceId, number>()
   /** Host-owned read/unread state for namespaced remote Sessions. */
   private readonly readTracker = new ReadStateTracker((sessionId, state, unreadChanged) => {
     const decoded = decodeSessionId(sessionId)
@@ -383,6 +412,13 @@ export class DeviceRegistry {
   private readonly sharedReadStatePushTimers = new Map<DeviceId, ReturnType<typeof setTimeout>>()
 
   private readonly storage: JsonSnapshotFile
+  private readonly catalogStorage: JsonSnapshotFile
+  private catalogWrite: Promise<void> | undefined
+  private catalogWriteAgain = false
+  private catalogDirty = false
+  private catalogMigrationPending = false
+  private catalogPersistFailures = 0
+  private catalogPersistenceError: string | undefined
 
   constructor(
     private readonly dataFilePath: string,
@@ -396,6 +432,8 @@ export class DeviceRegistry {
     } = {},
   ) {
     this.storage = new JsonSnapshotFile(dataFilePath, value => value.version === 1 && Array.isArray(value.devices))
+    this.catalogStorage = new JsonSnapshotFile(join(dirname(dataFilePath), 'catalogs.json'),
+      value => value.version === 2 && typeof value.catalogs === 'object' && value.catalogs !== null && !Array.isArray(value.catalogs))
     this.authManager = new DeviceAuthManager(secretsFilePath)
     this.nativeProxyManager = new NativeProxyManager(
       this.authManager,
@@ -448,6 +486,10 @@ export class DeviceRegistry {
     } })
     this.nativeProxyActive = options.enableNativeProxy !== false
     this.loadFromDisk()
+    if (this.catalogMigrationPending) {
+      this.catalogDirty = true
+      void this.persistCatalogsAsync().catch(() => {})
+    }
     this.syncSharedReadStateTimer()
   }
 
@@ -575,6 +617,7 @@ export class DeviceRegistry {
     if (requestSeq > 0 && previous !== undefined && requestSeq <= previous.seq) return false
     const next = sessionId || undefined
     const changed = previous?.sessionId !== next
+    const navigationChanged = changed || previous?.seq !== requestSeq
     // Bound untrusted browser-instance ids. Eviction loses navigation, not data.
     if (!this.activeSessions.has(key) && this.activeSessions.size >= 256) {
       const oldest = this.activeSessions.keys().next().value
@@ -587,9 +630,11 @@ export class DeviceRegistry {
       const previousPane = this.nativePanes.get(paneKey)
       this.nativePanes.set(paneKey, { ...previousPane, state: previousPane?.state ?? 'idle', navigation: { sessionId: decoded.rawSessionId, requestSeq, openState: 'loading' } })
       this.publishNativePaneSession(decoded.deviceId, key)
-      this.bumpRevision()
     }
     this.syncNativePaneEmbedding(key)
+    // Snapshot caching is revision-based: local selection and same-session
+    // sequence retries must invalidate it just like remote selection.
+    if (navigationChanged) this.bumpRevision()
     // Selection is not presence. Only a visible viewing client explicitly marks read.
     return changed
   }
@@ -961,6 +1006,7 @@ export class DeviceRegistry {
         target.transport,
         buildReadSharedStateCommand(target.path),
         8_000,
+        this.lifetime.signal,
       )
       if (!read.ok || this.disposed || this.clients.get(deviceId) !== client || client?.connectionGeneration !== generation) return
       const doc = parseSharedReadDocument(read.stdout)
@@ -984,6 +1030,8 @@ export class DeviceRegistry {
     const generation = client?.connectionGeneration
     if (this.disposed || target === undefined || this.sharedReadStateInFlight.has(deviceId)) return
     this.sharedReadStateInFlight.add(deviceId)
+    let committed = false
+    let failed = false
     try {
       await this.promoteSharedCompletions(deviceId)
       if (this.disposed || this.clients.get(deviceId) !== client || client?.connectionGeneration !== generation) return
@@ -991,8 +1039,10 @@ export class DeviceRegistry {
         target.transport,
         buildReadSharedStateCommand(target.path),
         8_000,
+        this.lifetime.signal,
       )
-      if (!read.ok || this.disposed || this.clients.get(deviceId) !== client || client?.connectionGeneration !== generation) return
+      if (!read.ok) throw new Error(read.error)
+      if (this.disposed || this.clients.get(deviceId) !== client || client?.connectionGeneration !== generation) return
       const existing = parseSharedReadDocument(read.stdout)
       if (existing !== undefined) this.mergeSharedReadDocument(deviceId, existing)
 
@@ -1004,16 +1054,32 @@ export class DeviceRegistry {
         sessions[decoded.rawSessionId] = entry
       }
       const doc = buildSharedReadDocument(existing, this.hostId, sessions, Date.now())
-      await execSshCommand(
+      const write = await execSshCommand(
         target.transport,
         buildWriteSharedStateCommand(target.path, doc, this.hostId),
         15_000,
+        this.lifetime.signal,
       )
+      if (!write.ok) throw new Error(write.error)
+      if (this.disposed || this.clients.get(deviceId) !== client || client?.connectionGeneration !== generation) return
+      committed = true
+      this.sharedReadStateFailures.delete(deviceId)
     } catch {
-      // Best-effort, like the pull path.
+      failed = true
+      if (!this.disposed && this.clients.get(deviceId) === client) {
+        this.sharedReadStateFailures.set(deviceId, (this.sharedReadStateFailures.get(deviceId) ?? 0) + 1)
+      }
+      // A failed write must remain pending even when no new unread event arrives.
     } finally {
       this.sharedReadStateInFlight.delete(deviceId)
-      if (this.sharedReadStateDirty.delete(deviceId) && !this.disposed) this.scheduleSharedReadStatePush(deviceId, 0)
+      if (!committed && !this.disposed && this.sharedReadStateTarget(deviceId) !== undefined) {
+        this.sharedReadStateDirty.add(deviceId)
+      }
+      if (this.sharedReadStateDirty.delete(deviceId) && !this.disposed) {
+        const failures = this.sharedReadStateFailures.get(deviceId) ?? 0
+        const delay = failed ? Math.min(30_000, 1_000 * 2 ** Math.min(failures - 1, 5)) : 0
+        this.scheduleSharedReadStatePush(deviceId, delay)
+      }
     }
   }
 
@@ -1304,6 +1370,10 @@ export class DeviceRegistry {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.gitMatchRunner?.cancel()
+    for (const deviceId of this.mountGenerations.keys()) {
+      this.mountGenerations.set(deviceId, (this.mountGenerations.get(deviceId) ?? 0) + 1)
+    }
     this.lifetime.abort()
     this.localCatalogMutations = undefined
     this.localCatalogInflight = undefined
@@ -1316,8 +1386,11 @@ export class DeviceRegistry {
     } catch {
       // Shutdown must stay best-effort.
     }
+    // The lifecycle owner explicitly awaits flushPersistence() after this
+    // synchronous teardown. Do not start an unawaited write here: embedders
+    // and tests may release the data directory immediately after dispose().
     for (const client of this.clients.values()) {
-      client.stop()
+      try { client.stop() } catch { /* Continue disposing the remaining clients. */ }
     }
     this.clients.clear()
     if (this.catalogPersistTimer !== undefined) {
@@ -1434,6 +1507,7 @@ export class DeviceRegistry {
   removeDevice(deviceId: DeviceId): boolean {
     const existing = this.configs.get(deviceId)
     if (existing === undefined) return false
+    this.mountGenerations.set(deviceId, (this.mountGenerations.get(deviceId) ?? 0) + 1)
     this.storage.assertWritable()
     this.authManager.assertWritable()
     // Compensate ordinary IO failures; independent files are not crash-atomic.
@@ -1459,6 +1533,7 @@ export class DeviceRegistry {
     this.nativeProxyManager.removeProxy(deviceId)
     this.authStates.delete(deviceId)
     this.catalogs.delete(deviceId)
+    this.scheduleCatalogPersist()
     this.aggregator.invalidateGitRemote(deviceId)
     for (const [clientId, selection] of this.activeSessions) {
       const owner = decodeSessionId(selection.sessionId ?? '')
@@ -1469,6 +1544,8 @@ export class DeviceRegistry {
     }
     this.nativeGroups.delete(deviceId)
     this.sharedReadStateInitialized.delete(deviceId)
+    this.sharedReadStateDirty.delete(deviceId)
+    this.sharedReadStateFailures.delete(deviceId)
     const pendingPush = this.sharedReadStatePushTimers.get(deviceId)
     if (pendingPush !== undefined) {
       clearTimeout(pendingPush)
@@ -1730,8 +1807,9 @@ export class DeviceRegistry {
       baseUrl = effectiveTransport.baseUrl.replace(/\/+$/, '')
     }
 
+    const probeAuth = new DeviceAuthManager(undefined)
     const tempConfig: DeviceConfig = {
-      id: DeviceId('probe-temp'),
+      id: DeviceId(`probe-${randomUUID()}`),
       name: input.name || 'probe',
       enabled: true,
       transport: effectiveTransport,
@@ -1745,11 +1823,11 @@ export class DeviceRegistry {
 
     try {
       const t0 = Date.now()
-      const authRes = await this.authManager.ensureAuthenticated(tempConfig, baseUrl, true)
+      const authRes = await probeAuth.ensureAuthenticated(tempConfig, baseUrl, true)
       if (!authRes.ok) return authRes
 
       const headers: Record<string, string> = {
-        ...this.authManager.getAuthHeaders(tempConfig),
+        ...probeAuth.getAuthHeaders(tempConfig),
         'content-type': 'application/json',
       }
 
@@ -1826,7 +1904,7 @@ export class DeviceRegistry {
         error: describeProbeFailure(res02?.status, input),
       }
     } finally {
-      this.authManager.removeDevice(tempConfig.id)
+      probeAuth.removeDevice(tempConfig.id)
       cleanup?.()
     }
   }
@@ -1870,6 +1948,7 @@ export class DeviceRegistry {
    * device/session streams starts a scan or registers a workspace.
    */
   startGitMatch(): { ok: true } | { ok: false; error: string } {
+    if (this.disposed) return { ok: false, error: 'Registry is disposed' }
     if (this.gitMatchRunner?.running === true) {
       return { ok: false, error: 'A Git match run is already in progress' }
     }
@@ -1879,9 +1958,10 @@ export class DeviceRegistry {
     }
     const runner = new GitMatchRunner({
       devices: () => this.gitMatchTargets(),
-      discoverRemoteOrigins: (deviceId, paths) => this.discoverRemoteOrigins(deviceId, paths),
-      scanRemoteRepos: (deviceId, roots) => this.scanRemoteRepos(deviceId, roots),
+      discoverRemoteOrigins: (deviceId, paths, signal) => this.discoverRemoteOrigins(deviceId, paths, signal),
+      scanRemoteRepos: (deviceId, roots, signal) => this.scanRemoteRepos(deviceId, roots, signal),
       scanLocalRepos: roots => scanLocalGitRepos(roots),
+      scanLocalReposAsync: (roots, signal) => scanLocalGitReposAsync(roots, { ...(signal !== undefined ? { signal } : {}) }),
       createLocalWorkspace: async (path) => {
         if (this.localWorkspaceCreator === undefined) {
           return { ok: false as const, error: 'Local workspace creation is unavailable' }
@@ -1902,6 +1982,7 @@ export class DeviceRegistry {
       },
       localHome: () => homedir(),
       onProgress: (run) => {
+        if (this.disposed) return
         this.gitMatchRun = run
         this.bumpRevision()
         // Persist the outcome, not every progress tick.
@@ -1947,13 +2028,14 @@ export class DeviceRegistry {
   private async discoverRemoteOrigins(
     deviceId: DeviceId,
     paths: readonly string[],
+    signal?: AbortSignal,
   ): Promise<Map<string, string>> {
     if (paths.length === 0) return new Map()
     const storedConfig = this.configs.get(deviceId)
     if (storedConfig === undefined || storedConfig.transport.kind !== 'ssh') return new Map()
     const config = this.hydrateConfig(storedConfig)
     if (config.transport.kind !== 'ssh') return new Map()
-    const found = await discoverRemoteGitRemotesViaSsh(config.transport, paths)
+    const found = await discoverRemoteGitRemotesViaSsh(config.transport, paths, signal)
     for (const [path, rawUrl] of found) this.aggregator.noteGitRemote(deviceId, path, rawUrl)
     return found
   }
@@ -1961,14 +2043,15 @@ export class DeviceRegistry {
   private async scanRemoteRepos(
     deviceId: DeviceId,
     roots: readonly string[],
-  ): Promise<{ ok: true; repos: ScannedRepository[] } | { ok: false; error: string }> {
+    signal?: AbortSignal,
+  ): Promise<GitRepoScanResult> {
     const storedConfig = this.configs.get(deviceId)
     if (storedConfig === undefined) return { ok: false, error: 'Device is not configured' }
     const config = this.hydrateConfig(storedConfig)
     if (config.transport.kind !== 'ssh') {
       return { ok: false, error: 'Scanning requires an SSH transport' }
     }
-    return scanRemoteGitRepos(config.transport, roots)
+    return scanRemoteGitRepos(config.transport, roots, { ...(signal !== undefined ? { signal } : {}) })
   }
 
   /**
@@ -1995,6 +2078,8 @@ export class DeviceRegistry {
 
   /** Build the complete snapshot for the Client UI and Aggregated Gateway. */
   snapshot(clientId = 'legacy'): MultiDeviceSnapshot {
+    const cached = this.snapshotCache.get(clientId)
+    if (cached?.revision === this.revision) return cached.value
     const physicalInputs: PhysicalWorkspaceInput[] = [...this.localHost.localWorkspaces()]
     const updatedAtMap = this.localHost.localSessionUpdatedAt()
     const sessionOrigins: Record<string, SessionOriginMetadata> = Object.create(null)
@@ -2150,7 +2235,7 @@ export class DeviceRegistry {
       attentionByDevice[client.id] = projected[client.id] ?? emptyDeviceAttention(fresh)
     }
 
-    return {
+    const result: MultiDeviceSnapshot = {
       revision: this.revision,
       hostId: this.hostId,
       hostEpoch: this.hostEpoch,
@@ -2159,6 +2244,7 @@ export class DeviceRegistry {
         aggregatedGatewayActive: this.aggregatedGatewayActive,
         ...(this.aggregatedGatewayError !== undefined ? { aggregatedGatewayError: this.aggregatedGatewayError } : {}),
         nativeProxyActive: this.nativeProxyActive,
+        ...(this.catalogPersistenceError !== undefined ? { catalogPersistenceError: this.catalogPersistenceError } : {}),
       },
       devices: [...this.clients.values()].map(c => {
         const base = c.toView()
@@ -2193,6 +2279,14 @@ export class DeviceRegistry {
         ? { catalogTruncated: true }
         : {}),
     }
+    this.snapshotCache.delete(clientId)
+    this.snapshotCache.set(clientId, { revision: this.revision, value: result })
+    while (this.snapshotCache.size > 16) {
+      const oldest = this.snapshotCache.keys().next().value
+      if (oldest === undefined) break
+      this.snapshotCache.delete(oldest)
+    }
+    return result
   }
 
   /** Persisted display preferences (Snapshot also carries them under `ui`). */
@@ -2270,6 +2364,12 @@ export class DeviceRegistry {
   }
 
   private async mountClient(storedConfig: DeviceConfig): Promise<RemoteDeviceClient> {
+    if (this.disposed) throw new Error('Device registry is disposed')
+    const mountGeneration = (this.mountGenerations.get(storedConfig.id) ?? 0) + 1
+    this.mountGenerations.set(storedConfig.id, mountGeneration)
+    const isMountCurrent = (client: RemoteDeviceClient): boolean =>
+      !this.disposed && this.mountGenerations.get(storedConfig.id) === mountGeneration &&
+      this.clients.get(storedConfig.id) === client
     const config = this.hydrateConfig(storedConfig)
     let client = this.clients.get(config.id)
     const callbacks: RemoteDeviceCallbacks = {
@@ -2342,10 +2442,12 @@ export class DeviceRegistry {
 
     if (this.nativeProxyActive) {
       const proxyUrl = await this.nativeProxyManager.ensureProxy(config, () => client.effectiveBaseUrl())
+      if (!isMountCurrent(client)) return client
       client.setNativeProxyUrl(proxyUrl)
       if (proxyUrl !== undefined) this.bumpRevision()
     }
 
+    if (!isMountCurrent(client)) return client
     if (config.enabled) {
       client.start()
     }
@@ -2394,6 +2496,7 @@ export class DeviceRegistry {
 
   private bumpRevision(): void {
     this.revision += 1
+    this.snapshotCache.clear()
     for (const listener of this.listeners) {
       try { listener() } catch { /* ignore */ }
     }
@@ -2445,12 +2548,13 @@ export class DeviceRegistry {
       }
       if (raw.displayMode === 'native') this.displayMode = 'native'
       else if (raw.displayMode === 'aggregated') this.displayMode = 'aggregated'
-      if (raw.catalogs && typeof raw.catalogs === 'object') {
-        for (const [deviceId, catalog] of Object.entries(raw.catalogs)) {
-          if (this.configs.has(DeviceId(deviceId))) {
-            this.catalogs.set(DeviceId(deviceId), catalog)
-          }
-        }
+      const persistedCatalogDocument = this.catalogStorage.read<Parameters<typeof decodeCatalogDocument>[0]>()
+      const restoredCatalogs = persistedCatalogDocument !== undefined
+        ? decodeCatalogDocument(persistedCatalogDocument)
+        : raw.catalogs && typeof raw.catalogs === 'object' ? decodeLegacyCatalogs(raw.catalogs) : undefined
+      if (persistedCatalogDocument === undefined && restoredCatalogs !== undefined) this.catalogMigrationPending = true
+      for (const [deviceId, cache] of restoredCatalogs ?? []) {
+        if (this.configs.has(deviceId)) this.catalogs.set(deviceId, cache)
       }
       for (const [deviceId, groups] of Object.entries(sanitizeNativeGroups(raw.nativeGroups))) {
         if (this.configs.has(deviceId)) this.nativeGroups.set(deviceId, groups)
@@ -2494,6 +2598,7 @@ export class DeviceRegistry {
    */
   setDeviceCatalog(cache: DeviceCatalogCache): void {
     this.catalogs.set(cache.deviceId, trimCatalog(cache))
+    this.catalogDirty = true
   }
 
   /**
@@ -2502,21 +2607,69 @@ export class DeviceRegistry {
    * rewritten atomically on each save.
    */
   private scheduleCatalogPersist(): void {
-    if (this.catalogPersistTimer !== undefined) return
+    this.catalogDirty = true
+    if (this.catalogPersistTimer !== undefined || this.disposed) return
+    const delay = Math.min(30_000, 3_000 * 2 ** Math.min(this.catalogPersistFailures, 3))
     this.catalogPersistTimer = setTimeout(() => {
       this.catalogPersistTimer = undefined
       try {
         this.flushCatalogCache()
-        this.saveToDisk()
+        void this.persistCatalogsAsync().catch(() => {})
       } catch {
-        // Persisting the catalog must never break the live aggregation.
+        // Capturing a live catalog must never break aggregation.
       }
-    }, 3_000)
+    }, delay)
     // Do not keep the Host process alive just for this timer.
     if (typeof this.catalogPersistTimer === 'object' && this.catalogPersistTimer !== null) {
       const timer = this.catalogPersistTimer as { unref?: () => void }
       timer.unref?.()
     }
+  }
+
+  /** Coalesce bursts into the newest document while one async write is active. */
+  private persistCatalogsAsync(): Promise<void> {
+    if (!this.catalogDirty && !this.catalogMigrationPending) return this.catalogWrite ?? Promise.resolve()
+    this.catalogWriteAgain = true
+    if (this.catalogWrite !== undefined) return this.catalogWrite
+    const operation = (async () => {
+      try {
+        do {
+          this.catalogWriteAgain = false
+          this.catalogDirty = false
+          await this.catalogStorage.writeAsync(encodeCatalogDocument(this.catalogs))
+          if (this.catalogMigrationPending) {
+            // The new file is durable before legacy embedded catalogs are removed.
+            this.catalogMigrationPending = false
+            try { this.saveToDisk() } catch (error) { this.catalogMigrationPending = true; throw error }
+          }
+        } while (this.catalogWriteAgain || this.catalogDirty || this.catalogMigrationPending)
+        this.catalogPersistFailures = 0
+        const recovered = this.catalogPersistenceError !== undefined
+        this.catalogPersistenceError = undefined
+        if (recovered) this.bumpRevision()
+      } catch (error) {
+        this.catalogDirty = true
+        this.catalogPersistFailures += 1
+        this.catalogPersistenceError = error instanceof Error ? error.message : String(error)
+        this.bumpRevision()
+        if (!this.disposed) this.scheduleCatalogPersist()
+        throw error
+      } finally {
+        this.catalogWrite = undefined
+      }
+    })()
+    this.catalogWrite = operation
+    return operation
+  }
+
+  /** Wait for the final asynchronous catalog write during Host shutdown. */
+  async flushPersistence(): Promise<void> {
+    if (this.catalogPersistTimer !== undefined) {
+      clearTimeout(this.catalogPersistTimer)
+      this.catalogPersistTimer = undefined
+    }
+    this.flushCatalogCache()
+    await this.persistCatalogsAsync()
   }
 
   /** Copy each client's current catalog into the durable map. */
@@ -2525,6 +2678,7 @@ export class DeviceRegistry {
       const snapshot = client.catalogSnapshot()
       if (snapshot.syncedAt === 0 && snapshot.sessions.length === 0 && snapshot.workspaces.length === 0) continue
       this.catalogs.set(deviceId, trimCatalog(snapshot))
+      this.catalogDirty = true
     }
   }
 
@@ -2538,7 +2692,7 @@ export class DeviceRegistry {
       gitMatch: this.gitMatchRun,
       ui: this.uiPreferences,
       hostId: this.hostId,
-      ...(this.catalogs.size > 0
+      ...(this.catalogMigrationPending && this.catalogs.size > 0
         ? { catalogs: Object.fromEntries(this.catalogs) }
         : {}),
       ...(this.nativeGroups.size > 0

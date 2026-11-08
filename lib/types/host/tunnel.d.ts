@@ -1,11 +1,11 @@
 /**
- * Dual-engine SSH local port-forwarding manager (`system-ssh` + `ssh2` fallback).
+ * System SSH local port-forwarding manager with an explicitly installed `ssh2` compatibility engine.
  *
  * - Default `system-ssh` spawns the OS `ssh` client (`ssh -N -L 127.0.0.1:<localPort>:<remoteBindHost>:<remotePort>`),
  *   which natively honors 100% of `~/.ssh/config` (`Host`, `ProxyJump`, `ProxyCommand`, `ControlMaster`,
  *   macOS Keychain `UseKeychain`, `IdentityAgent`, 1Password SSH Agent, `SSH_AUTH_SOCK`).
- * - Fallback `ssh2` uses the pure-JS/native `ssh2` library in-process when `passphrase` is provided
- *   or when `engine: 'ssh2'` is explicitly selected.
+ * - `ssh2` is used only when `engine: 'ssh2'` is explicitly selected and the user
+ *   installed that optional peer. A stored passphrase never changes engines.
  * - Automatically allocates a free local loopback port, verifies TCP forwarding readiness,
  *   supervises connection health, and reconnects with exponential backoff + jitter.
  *
@@ -15,6 +15,7 @@ import { type ChildProcess, type SpawnOptions } from 'node:child_process';
 import type { SshTransportConfig } from '../contract.ts';
 import { type ResolvedSshParameters } from './ssh-config.ts';
 export type TunnelState = 'connecting' | 'up' | 'error' | 'stopped';
+export declare const SSH2_MISSING_MESSAGE = "The optional ssh2 engine is not installed. Use system-ssh with an SSH agent, or explicitly install ssh2 in this DSH Profile through dsh plugin and approve only its reported build scripts.";
 export interface TunnelStatus {
     readonly state: TunnelState;
     readonly localPort?: number;
@@ -48,7 +49,7 @@ export declare function buildSystemSshArgs(transport: SshTransportConfig, resolv
  * Execute a quick non-interactive command on the remote host over SSH (`system-ssh` or `ssh2`).
  * Used only for read-only discovery (e.g. `.git/config` remote URLs and `.credentials.yaml` bootstrap).
  */
-export declare function execSshCommand(transport: SshTransportConfig, command: string, timeoutMs?: number): Promise<{
+export declare function execSshCommand(transport: SshTransportConfig, command: string, timeoutMs?: number, signal?: AbortSignal): Promise<{
     ok: true;
     stdout: string;
 } | {

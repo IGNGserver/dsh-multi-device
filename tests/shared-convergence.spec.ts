@@ -139,4 +139,25 @@ describe('shared completion causal binding and delivery', () => {
     const section = Object.values(document.hosts)[0] as { sessions: Record<string, { unread: boolean; completionId?: string; readCompletionId?: string }> }
     expect(section.sessions.s0).toMatchObject({ unread: false, completionId: 'turn:9:1', readCompletionId: 'turn:9:1' })
   })
+
+  it('retries a failed shared write even when no new read-state event arrives', async () => {
+    vi.useFakeTimers()
+    const { internal } = setup()
+    for (const timer of internal.sharedReadStatePushTimers.values()) clearTimeout(timer as ReturnType<typeof setTimeout>)
+    internal.sharedReadStatePushTimers.clear()
+    mocks.exec
+      .mockResolvedValueOnce({ ok: true, stdout: '' })
+      .mockResolvedValueOnce({ ok: false, error: 'remote disk full' })
+    await internal.pushSharedReadState('dev')
+    expect(internal.sharedReadStateInFlight.has('dev')).toBe(false)
+    expect(internal.sharedReadStatePushTimers.has('dev')).toBe(true)
+    expect(mocks.exec).toHaveBeenCalledTimes(2)
+    mocks.exec.mockResolvedValue({ ok: true, stdout: '' })
+    await vi.advanceTimersByTimeAsync(999)
+    expect(mocks.exec).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(mocks.exec).toHaveBeenCalledTimes(4)
+    expect(internal.sharedReadStatePushTimers.has('dev')).toBe(false)
+    expect(internal.sharedReadStateDirty.has('dev')).toBe(false)
+  })
 })

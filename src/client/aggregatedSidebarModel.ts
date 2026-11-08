@@ -99,14 +99,21 @@ export function buildAggregatedSidebarModel(
     (rows[b]?.updatedAt ?? 0) - (rows[a]?.updatedAt ?? 0) || a.localeCompare(b))
 
   const claimed = new Set<string>()
+  const localIdsByCwd = new Map<string, string[]>()
+  for (const localId of options.local?.ids ?? []) {
+    const row = rows[localId]
+    if (row?.deviceId !== LOCAL_DEVICE_ID || row.cwd === undefined) continue
+    const ids = localIdsByCwd.get(row.cwd) ?? []
+    ids.push(row.id)
+    localIdsByCwd.set(row.cwd, ids)
+  }
   const buckets: { id: string; title: string; workspace?: LogicalWorkspaceView; ids: string[] }[] = []
   for (const workspace of snapshot.logicalWorkspaces) {
     const ids = [...workspace.sessionIds]
-    // A local summary may precede the next Host directory snapshot.
-    for (const localId of options.local?.ids ?? []) {
-      const row = rows[localId]
-      if (row?.deviceId === LOCAL_DEVICE_ID && row.cwd !== undefined && workspace.members.some(member =>
-        member.deviceId === LOCAL_DEVICE_ID && member.path === row.cwd)) ids.push(row.id)
+    // A local summary may precede the next Host directory snapshot. Index by
+    // cwd once instead of rescanning every local Session for every Workspace.
+    for (const member of workspace.members) {
+      if (member.deviceId === LOCAL_DEVICE_ID) ids.push(...localIdsByCwd.get(member.path) ?? [])
     }
     const unique = ids.filter(id => !claimed.has(id) && (claimed.add(id), true))
     buckets.push({ id: workspace.logicalWorkspaceId, title: workspace.title, workspace, ids: unique })
@@ -119,13 +126,19 @@ export function buildAggregatedSidebarModel(
   for (const bucket of buckets) {
     const ids = sorted(bucket.ids)
     const idSet = new Set(ids)
+    const byRawId = new Map<DeviceId, Map<string, string>>()
+    for (const id of ids) {
+      const row = rows[id]!
+      const byDevice = byRawId.get(row.deviceId) ?? new Map<string, string>()
+      byDevice.set(row.rawSessionId, id)
+      byRawId.set(row.deviceId, byDevice)
+    }
     const parentById = new Map<string, string>()
     for (const id of ids) {
       const row = rows[id]!
       let parent = row.parentSessionId
       // Resolve raw parent ids only within the same owning device.
-      if (parent && !idSet.has(parent)) parent = ids.find(candidate =>
-        rows[candidate]?.deviceId === row.deviceId && rows[candidate]?.rawSessionId === parent)
+      if (parent && !idSet.has(parent)) parent = byRawId.get(row.deviceId)?.get(parent)
       if (!parent || parent === id || !idSet.has(parent) || rows[parent]?.deviceId !== row.deviceId) continue
       let ancestor: string | undefined = parent
       const visited = new Set([id])

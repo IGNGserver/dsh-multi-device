@@ -297,6 +297,9 @@ export class MultiDeviceClientStore {
   private started = false
   private disposed = false
   private lifecycleGeneration = 0
+  private lifecycleAbort = new AbortController()
+  private snapshotInFlight: Promise<void> | undefined
+  private navigationGeneration = 0
   private connectionGeneration = 0
   private hostGeneration = 0
   private requestSequence = 0
@@ -404,6 +407,7 @@ export class MultiDeviceClientStore {
   start(): () => void {
     if (this.started || this.disposed) return () => {}
     this.started = true
+    this.lifecycleAbort = new AbortController()
     const lifecycle = ++this.lifecycleGeneration
     this.resetActiveSessionReport()
     this.sseAttempt = 0
@@ -419,8 +423,9 @@ export class MultiDeviceClientStore {
     this.pollTimer = setInterval(() => {
       if (!this.started || lifecycle !== this.lifecycleGeneration) return
       const sseOpen = typeof EventSource !== 'undefined' && this.eventSource?.readyState === EventSource.OPEN
+      if (sseOpen) return
       const now = Date.now()
-      if (sseOpen && now - this.lastPollAt < 30_000) return
+      if (now - this.lastPollAt < 4_000) return
       this.lastPollAt = now
       void this.refreshSnapshot()
     }, 5_000)
@@ -432,8 +437,11 @@ export class MultiDeviceClientStore {
   private stop(): void {
     this.started = false
     this.lifecycleGeneration += 1
+    this.navigationGeneration += 1
+    this.lifecycleAbort.abort()
     this.connectionGeneration += 1
     this.latestRequests.clear()
+    this.snapshotInFlight = undefined
     this.resetActiveSessionReport()
     this.unreadClearInFlight.clear()
     if (this.pollTimer !== undefined) clearInterval(this.pollTimer)
@@ -529,8 +537,10 @@ export class MultiDeviceClientStore {
     const selectedOwner = decodeSessionId(this.state.activeSessionId ?? '')
     if (snap.catalog && selectedOwner.isRemote && !configuredIds.has(selectedOwner.deviceId)) {
       this.hasReportedSession = false
-      this.state = { ...this.state, activeSessionId: this.observedLocalMainSessionId }
-      void this.setActiveSession(this.observedLocalMainSessionId)
+      const observed = this.observedLocalMainSessionId
+      const localSessionId = observed !== undefined && !decodeSessionId(observed).isRemote ? observed : undefined
+      this.state = { ...this.state, activeSessionId: localSessionId }
+      void this.setActiveSession(localSessionId)
     }
     const keepAliveEligible = new Set(
       snap.devices.filter(device => device.keepNativeAlive !== false).map(device => device.id),
@@ -599,6 +609,10 @@ export class MultiDeviceClientStore {
       activeNativeDeviceId: activeNative,
       keepAliveDeviceIds: keepAlive,
     })
+    if (nextDisplayMode === 'native' && activeNative === undefined &&
+      this.state.activeSessionId !== undefined && decodeSessionId(this.state.activeSessionId).isRemote) {
+      this.enterLocalScope()
+    }
     this.clearUnreadForActiveSession(snap)
     if (epochChanged) void this.setActiveSession(this.state.activeSessionId)
   }
@@ -743,9 +757,17 @@ export class MultiDeviceClientStore {
   /** Return to the 本机 tab while staying in Native Mode. */
   selectLocalNativeTab(): void {
     if (this.state.displayMode !== 'native') return
+    this.navigationGeneration += 1
+    this.enterLocalScope()
+  }
+
+  /** Clear the remote scope before restoring a real local Session, even when none exists. */
+  private enterLocalScope(): void {
+    const observed = this.observedLocalMainSessionId
+    const localSessionId = observed !== undefined && !decodeSessionId(observed).isRemote ? observed : undefined
     storeActiveNativeDevice(undefined)
-    this.setState({ activeNativeDeviceId: undefined })
-    if (this.observedLocalMainSessionId !== undefined) void this.setActiveSession(this.observedLocalMainSessionId)
+    this.setState({ activeNativeDeviceId: undefined, activeSessionId: localSessionId })
+    void this.setActiveSession(localSessionId)
     this.clearUnreadForActiveSession(this.state.snapshot)
   }
 
@@ -760,6 +782,7 @@ export class MultiDeviceClientStore {
       keepAliveDeviceIds: nextKeepAlive,
       activeNativeDeviceId: nextActive,
     })
+    if (this.state.displayMode === 'native' && nextActive === undefined) this.enterLocalScope()
   }
 
   reloadNativeDevice(deviceId: DeviceId): void {
@@ -789,7 +812,11 @@ export class MultiDeviceClientStore {
   /** The local mirror remains mounted behind native tabs/global panels. */
   effectiveSessionId(): string | undefined {
     if (!this.mainViewVisible) return undefined
-    if (this.state.displayMode === 'native' && this.state.activeNativeDeviceId !== undefined) return undefined
+    if (this.state.displayMode === 'native') {
+      if (this.state.activeNativeDeviceId !== undefined) return undefined
+      const active = this.state.activeSessionId
+      return active !== undefined && decodeSessionId(active).isRemote ? undefined : active
+    }
     return this.state.activeSessionId
   }
 
@@ -877,6 +904,8 @@ export class MultiDeviceClientStore {
 
   /** Open navigation metadata without retaining a foreign Session in the local Controller. */
   async openCatalogSession(sessionId: string): Promise<{ ok: boolean; error?: string }> {
+    const navigation = ++this.navigationGeneration
+    const isCurrent = (): boolean => !this.disposed && navigation === this.navigationGeneration
     const owner = decodeSessionId(sessionId)
     if (owner.isRemote) {
       if (!this.state.snapshot.devices.some(device => device.id === owner.deviceId)) return { ok: false, error: 'The owning device was removed' }
@@ -884,17 +913,20 @@ export class MultiDeviceClientStore {
       this.setMainViewVisible(true)
       this.hasReportedSession = false
       await this.setActiveSession(sessionId)
+      if (!isCurrent()) return { ok: false, error: 'stale-navigation', }
       return this.hasReportedSession && this.reportedSessionId === sessionId ? { ok: true } : { ok: false, error: 'The Host did not accept this navigation; retry or check the connection.' }
     }
     try {
       const services = getClientServices()
       if (!services.uiWorkspace || typeof services.uiWorkspace.openSession !== 'function') return { ok: false, error: 'Local DSH navigation is not ready' }
       await services.sessions?.refresh?.()
+      if (!isCurrent()) return { ok: false, error: 'stale-navigation' }
       services.revealMain?.()
       this.setMainViewVisible(true)
+      if (!isCurrent()) return { ok: false, error: 'stale-navigation' }
       services.uiWorkspace.openSession(sessionId)
       await this.setActiveSession(sessionId)
-      return { ok: true }
+      return isCurrent() ? { ok: true } : { ok: false, error: 'stale-navigation' }
     } catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) } }
   }
 
@@ -906,9 +938,9 @@ export class MultiDeviceClientStore {
     return { ok: true, sessionId: result.value.sessionId }
   }
 
-  async searchCatalogSessions(query: string): Promise<{ ok: boolean; error?: string; sessionIds?: readonly string[] }> {
-    const result = await this.callControlPlane<{ sessionIds: readonly string[] }>({ action: 'searchCatalogSessions', payload: { query } })
-    return result.ok ? { ok: true, sessionIds: result.value.sessionIds } : result
+  async searchCatalogSessions(query: string): Promise<{ ok: boolean; error?: string; sessionIds?: readonly string[]; errors?: Readonly<Record<string, string>> }> {
+    const result = await this.callControlPlane<{ sessionIds: readonly string[]; errors?: Readonly<Record<string, string>> }>({ action: 'searchCatalogSessions', payload: { query } })
+    return result.ok ? { ok: true, sessionIds: result.value.sessionIds, errors: result.value.errors } : result
   }
 
   async startSessionOnDevice(logicalWorkspaceId: string, deviceId: DeviceId): Promise<{ ok: boolean; error?: string }> {
@@ -937,6 +969,7 @@ export class MultiDeviceClientStore {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ ...request, payload: { ...request.payload, clientId: this.clientId } }),
+        signal: AbortSignal.any([this.lifecycleAbort.signal, AbortSignal.timeout(30_000)]),
       })
       const data = (await response.json()) as ControlPlaneResult<T>
       if (!this.isFenceCurrent(fence)) return stale()
@@ -968,13 +1001,23 @@ export class MultiDeviceClientStore {
   }
 
   async refreshSnapshot(): Promise<void> {
-    const res = await this.callControlPlane<MultiDeviceSnapshot>({ action: 'snapshot' })
-    if (!this.isResponseCurrent(res)) return
-    if (res.ok) {
-      this.applyIncomingSnapshot(res.value)
-      if (this.isResponseCurrent(res)) void this.setActiveSession(this.state.activeSessionId)
-    } else {
-      this.setState({ loading: false, error: res.error })
+    if (this.disposed) return
+    if (this.snapshotInFlight !== undefined) return this.snapshotInFlight
+    const pending = this.callControlPlane<MultiDeviceSnapshot>({ action: 'snapshot' })
+      .then(async res => {
+        if (!this.isResponseCurrent(res)) return
+        if (res.ok) {
+          this.applyIncomingSnapshot(res.value)
+          if (this.isResponseCurrent(res)) await this.setActiveSession(this.state.activeSessionId)
+        } else if (!res.stale) {
+          this.setState({ loading: false, error: res.error })
+        }
+      })
+    this.snapshotInFlight = pending
+    try {
+      await pending
+    } finally {
+      if (this.snapshotInFlight === pending) this.snapshotInFlight = undefined
     }
   }
 

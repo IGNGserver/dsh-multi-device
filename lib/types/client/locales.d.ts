@@ -123,6 +123,16 @@ export declare const zh: {
     readonly offlineBannerError: "错误：{error}";
     readonly offlineBannerRetry: "立即重连";
     readonly offlineBannerSettings: "设备设置";
+    readonly sessionLinkBannerTitle: "有 {count} 个远程会话未能加载";
+    readonly sessionLinkBannerRetrying: "正在自动修复，稍后显示到项目列表…";
+    readonly sessionLinkBannerExhausted: "持续重试仍未成功，可立即手动修复。";
+    readonly sessionLinkBannerError: "错误：{error}";
+    readonly sessionLinkBannerRetry: "立即修复";
+    readonly sessionLinkBannerSettings: "设备状态";
+    readonly nativeEmbeddingUnsupported: "当前访问方式无法嵌入 Host 本机的 HTTP 原生代理（IPv6、远程浏览器或 HTTPS 限制）。请在 Host 本地通过 http://127.0.0.1 或 http://localhost 使用，或使用聚合镜像。";
+    readonly bridgeFailedTitle: "设备 {name} 的页面桥接失败";
+    readonly bridgeFailedError: "原因：{error}";
+    readonly bridgeFailedReload: "重新加载";
     readonly deviceChipOfflineHint: "该设备当前不可达；展示的是上次同步的数据。";
     readonly deviceChipSwitchHint: "可在下方重新连接，或切换到在线设备新建会话。";
     readonly deviceHeroChipLabel: "新建于";

@@ -167,6 +167,11 @@ function isConnectedState(state: DeviceConnectionState): boolean {
 
 const BACKOFF_BASE_MS = 600
 const BACKOFF_MAX_MS = 12_000
+const MAX_MUX_PAYLOAD_BYTES = 16 * 1024 * 1024
+
+type RawRpcResult =
+  | { ok: true; value: unknown; httpStatus: number }
+  | { ok: false; httpStatus: number; error: { code: string; message: string; details?: object } }
 
 export class RemoteDeviceClient {
   private config: DeviceConfig
@@ -197,6 +202,7 @@ export class RemoteDeviceClient {
     return this.catalog.controlProjections
   }
   private baselineFlight: { epoch: number; promise: Promise<void> } | undefined
+  private authRecovery: { epoch: number; promise: Promise<boolean> } | undefined
   private gitDiscoveryError: string | undefined
   private readonly pendingInteractions = new Map<string, RemotePendingInteraction>()
   private readonly discoveredGitPaths = new Map<string, number>()
@@ -522,6 +528,7 @@ export class RemoteDeviceClient {
     this.generationAbort = new AbortController()
     this.catalog.beginEpoch()
     this.baselineFlight = undefined
+    this.authRecovery = undefined
     this.baselineGeneration = undefined
     this.refreshHealthy = true
     this.remoteEventsClientId = undefined
@@ -923,6 +930,7 @@ export class RemoteDeviceClient {
 
     const socket = new WebSocket(wsUrl.href, {
       headers,
+      maxPayload: MAX_MUX_PAYLOAD_BYTES,
       rejectUnauthorized:
         this.config.transport.kind === 'direct'
           ? this.config.transport.rejectUnauthorized !== false
@@ -1404,10 +1412,65 @@ export class RemoteDeviceClient {
     payload: unknown,
     signal?: AbortSignal,
     methodField = endpointPath,
-  ): Promise<
-    | { ok: true; value: unknown; httpStatus: number }
-    | { ok: false; httpStatus: number; error: { code: string; message: string; details?: object } }
-  > {
+  ): Promise<RawRpcResult> {
+    const epoch = this.generation
+    let result = await this.rawRpcPostOnce(endpointPath, payload, signal, methodField)
+    // The handshake owns its legacy retry path. Once 0.2 is established, an
+    // HTTP auth rejection happens before the RPC handler and is safe to retry
+    // once after refreshing the cookie; structured application errors are not.
+    if (this.protocolVersion === '0.2' && !result.ok &&
+      (result.httpStatus === 401 || result.httpStatus === 403)) {
+      const recovered = await this.recoverAuthentication(epoch, signal)
+      if (recovered && epoch === this.generation) {
+        result = await this.rawRpcPostOnce(endpointPath, payload, signal, methodField)
+      }
+    }
+    if (!result.ok && (result.httpStatus === 401 || result.httpStatus === 403)) {
+      this.callbacks.onAuthState?.(this.id, 'required', result.error.message)
+    }
+    return result
+  }
+
+  private recoverAuthentication(epoch: number, signal?: AbortSignal): Promise<boolean> {
+    if (this.authRecovery?.epoch === epoch) return this.authRecovery.promise
+    if (this.config.auth.mode === 'none' || this.config.auth.mode === 'cookie' || this.config.auth.mode === 'bearer') {
+      return Promise.resolve(false)
+    }
+    const promise = (async (): Promise<boolean> => {
+      const isAborted = (): boolean => signal?.aborted === true
+      const baseUrl = this.effectiveBaseUrl()
+      if (baseUrl === undefined || isAborted()) return false
+      this.callbacks.onAuthState?.(this.id, 'unknown')
+      this.authManager.invalidate(this.id)
+      const result = await this.authManager.ensureAuthenticated(this.config, baseUrl, true)
+      if (epoch !== this.generation || isAborted()) return false
+      if (result.ok) {
+        this.callbacks.onAuthState?.(this.id, 'ok')
+        return true
+      }
+      this.lastError = result.error
+      this.state = 'error'
+      this.callbacks.onAuthState?.(this.id, 'required', result.error)
+      this.callbacks.onStateChanged(this.id)
+      // Wake the supervision loop instead of remaining falsely "connected"
+      // with a dead cookie. The epoch fence prevents late writes on success.
+      this.closeMuxSocket()
+      return false
+    })()
+    this.authRecovery = { epoch, promise }
+    const clearRecovery = (): void => {
+      if (this.authRecovery?.promise === promise) this.authRecovery = undefined
+    }
+    void promise.then(clearRecovery, clearRecovery)
+    return promise
+  }
+
+  private async rawRpcPostOnce(
+    endpointPath: string,
+    payload: unknown,
+    signal?: AbortSignal,
+    methodField = endpointPath,
+  ): Promise<RawRpcResult> {
     signal = AbortSignal.any([this.generationAbort.signal, ...(signal !== undefined ? [signal] : [])])
     const baseUrl = this.effectiveBaseUrl()
     if (baseUrl === undefined) {
@@ -1463,7 +1526,10 @@ export class RemoteDeviceClient {
             result: { ok: boolean; value?: unknown; error?: { code: string; message: string; details?: object } }
           }
           if (parsed.result.ok) {
-            return { ok: true, value: parsed.result.value, httpStatus: 200 }
+            return { ok: true, value: parsed.result.value, httpStatus: response.status }
+          }
+          if (parsed.result.ok === false && parsed.result.error !== undefined) {
+            return { ok: false, httpStatus: response.status, error: parsed.result.error }
           }
         }
       }

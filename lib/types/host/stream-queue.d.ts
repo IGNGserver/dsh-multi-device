@@ -13,7 +13,9 @@
 export declare const DEFAULT_STREAM_BACKLOG = 2048;
 export declare class BoundedStreamQueue<T> {
     private readonly limit;
-    private readonly items;
+    private items;
+    private head;
+    private size;
     private overflowed;
     private wake;
     constructor(limit?: number);

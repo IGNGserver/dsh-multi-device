@@ -99,15 +99,21 @@ export declare class RemoteDeviceClient {
     private lastError;
     private reconnectAttempt;
     private nativeProxyUrl;
-    /** Epoch ms of the last successful catalog sync (live or hydrated from disk). */
-    private lastSyncedAt;
-    /** True while the catalog rows predate a live baseline (hydrated cache). */
-    private catalogStale;
-    private summaries;
-    private workspaces;
-    private archivedSessionIds;
-    private pinnedSessionIds;
-    private readonly projectionsBySession;
+    private readonly catalog;
+    private refreshHealthy;
+    private generationAbort;
+    private baselineGeneration;
+    private get generation();
+    private get lastSyncedAt();
+    private get catalogStale();
+    private get summaries();
+    private get workspaces();
+    private get archivedSessionIds();
+    private get pinnedSessionIds();
+    private get projectionsBySession();
+    private baselineFlight;
+    private authRecovery;
+    private gitDiscoveryError;
     private readonly pendingInteractions;
     private readonly discoveredGitPaths;
     private readonly gitProbeAttemptedAt;
@@ -126,6 +132,10 @@ export declare class RemoteDeviceClient {
     toView(): DeviceView;
     /** Current lifecycle state, read through a getter so callers never narrow a stale value. */
     get connectionState(): DeviceConnectionState;
+    /** Monotonic transport epoch; asynchronous work must never cross this fence. */
+    get connectionGeneration(): number;
+    /** A live, events-ready baseline (never merely an open socket or cached rows). */
+    get catalogFresh(): boolean;
     /** True while this device has a live baseline and can answer RPCs. */
     isConnected(): boolean;
     /**
@@ -153,6 +163,9 @@ export declare class RemoteDeviceClient {
      * listeners of any newly created or updated remote Sessions.
      */
     refreshSessionCatalog(signal?: AbortSignal): Promise<void>;
+    private setRefreshHealthy;
+    private loadSessionBaseline;
+    private prunePendingInteractions;
     controlProjections(): ReadonlyMap<string, {
         asOfSeq: number;
         values: Record<string, unknown>;
@@ -160,18 +173,12 @@ export declare class RemoteDeviceClient {
     pendingInteractionList(): readonly RemotePendingInteraction[];
     start(): void;
     stop(): void;
-    /**
-     * A transport generation ended. The last catalog remains visible, but a
-     * Session that was running cannot still be running on an unreachable Host:
-     * report the transition so the sidebar spinner stops and completion becomes
-     * detectable. Pending waterfalls are cancelled in the local UI but kept so a
-     * reconnect can replay them (the remote may still be waiting for an answer).
-     */
+    /** Fence every async operation before a transport/configuration can change. */
+    private invalidateGeneration;
+    /** Preserve offline rows, but never claim live execution or pending requests. */
     private markDisconnected;
-    /** Drop every pending waterfall and close its local card (device removed/disabled). */
+    /** Drop every pending waterfall and close its local card. */
     private clearPendingInteractions;
-    /** Re-deliver still-pending waterfalls after the `$events` stream comes back. */
-    private replayPendingInteractions;
     updateConfig(next: DeviceConfig): void;
     reconnectNow(): void;
     /**
@@ -209,7 +216,6 @@ export declare class RemoteDeviceClient {
     private runProtocol02Streams;
     private pump02RemoteEvents;
     private handle02EmitEvent;
-    private sanitizeRemoteWorkspace;
     private pump02WorkspaceFollow;
     private pump02SessionControl;
     /**
@@ -240,6 +246,8 @@ export declare class RemoteDeviceClient {
     namespaceSummary(summary: RemoteSessionSummary): RemoteSessionSummary;
     private closeMuxSocket;
     private rawRpcPost;
+    private recoverAuthentication;
+    private rawRpcPostOnce;
 }
 /** Major generation of a DSH version string. `0.1.x` is list-only. */
 export declare function protocolGeneration(version: string | undefined): '0.2' | '0.1' | 'unknown';
