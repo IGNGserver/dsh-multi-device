@@ -308,7 +308,11 @@ describe('0b. Host-owned read state and native page state', () => {
         transport: { kind: 'direct', baseUrl: 'http://127.0.0.1:9' },
         auth: { mode: 'none' },
       }],
+      // Keys from the retired Aggregated Mode: old documents must still load,
+      // and none of them may come back to life.
+      displayMode: 'aggregated',
       aggregation: { autoGitAggregate: true },
+      gitMatch: { lastResult: { status: 'ok', matches: [] } },
       nativeGroups: { 'dev-a': { 'ws-1': true, 'ws-2': false } },
       readState: {
         entries: {
@@ -369,6 +373,8 @@ describe('0b. Host-owned read state and native page state', () => {
         { id: 'dev-a', name: 'A', enabled: false, transport: { kind: 'direct', baseUrl: 'http://127.0.0.1:9' }, auth: { mode: 'none' } },
         { id: 'dev-b', name: 'B', enabled: false, transport: { kind: 'direct', baseUrl: 'http://127.0.0.1:9' }, auth: { mode: 'none' } },
       ],
+      // Retired Aggregated Mode keys: still readable, never revived.
+      displayMode: 'aggregated',
       aggregation: { autoGitAggregate: true },
       readState: {
         entries: {
@@ -1540,8 +1546,8 @@ describe('8. Native Settings UI & Streamlined Client State Helpers', () => {
       expect(injectedSlots).not.toContain('sidebar.panellist')
       expect(injectedSlots).not.toContain('main')
       expect(injectedSlots).not.toContain('settings.plugins.tab')
-      // Aggregated Mode has no device navigation: neither a sidebar footer
-      // entry nor a Session context-menu jump into Native Mode.
+      // The device UI owns no official-sidebar entry points: no footer action
+      // and no Session context-menu jump into a device tab.
       expect(injectedSlots).not.toContain('sidebar.footer.action')
       expect(injectedSlots).not.toContain('sidebar.workspaces.session.menu.item')
 
@@ -1627,8 +1633,7 @@ describe('8. Native Settings UI & Streamlined Client State Helpers', () => {
       )
       expect(selectHtml).toContain('dsh-md-select-container')
       expect(selectHtml).toContain('Item 1')
-      // Locale dictionaries must stay in lockstep after the aggregated keys
-      // were removed.
+      // Locale dictionaries must stay in lockstep: every key exists in both.
       expect(Object.keys(zh).sort()).toEqual(Object.keys(en).sort())
     } finally {
       for (const dispose of disposers) dispose()
@@ -2808,7 +2813,11 @@ describe('0c. Native bar geometry & diagnostics', () => {
       if (!result.ok) return
       const value = result.value as MultiDeviceDiagnostics
       expect(value.kind).toBe('dsh-multi-device/diagnostics')
-      expect(value.displayMode).toBe(registry.snapshot().displayMode)
+      // Aggregated Mode is gone: diagnostics reports devices and client state,
+      // never a display mode or a merged workspace view.
+      expect(value.devices).toHaveLength(0)
+      expect(value).not.toHaveProperty('displayMode')
+      expect(value).not.toHaveProperty('logicalWorkspaces')
       expect(value.client?.innerWidth).toBe(1240)
       expect(value.client?.compact).toBe(true)
     } finally {
