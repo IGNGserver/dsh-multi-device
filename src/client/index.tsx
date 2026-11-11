@@ -31,6 +31,7 @@ import {
   type SessionStatusSource,
 } from './readState.ts'
 import { clientStore } from './state.ts'
+import { installLocalUiStateSync } from './uiState.ts'
 import { adoptMultiDeviceStyles } from './styles.ts'
 import { installWindowTitle } from './windowTitle.ts'
 
@@ -214,6 +215,15 @@ function applyClient(ctx: ClientContextLike): void {
         ...(serviceCtx.uiWorkspace !== undefined ? { uiWorkspace: serviceCtx.uiWorkspace } : {}),
       }),
       'dsh-multi-device: client services',
+    )
+    serviceCtx.effect(
+      () => installLocalUiStateSync({
+        ...(serviceCtx.uiWorkspace === undefined ? {} : { uiWorkspace: serviceCtx.uiWorkspace }),
+        getHostState: () => clientStore.getSnapshot().snapshot.uiState,
+        subscribeHostState: listener => clientStore.subscribe(listener),
+        report: state => { void clientStore.patchUiState(state).catch(() => {}) },
+      }),
+      'dsh-multi-device: local view state',
     )
   })
 

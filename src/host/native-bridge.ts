@@ -19,6 +19,9 @@
  *
  * @module dsh-multi-device/host/native-bridge
  */
+import type { WorkspaceViewState } from '../contract.ts'
+import { sanitizeWorkspaceViewState } from '../contract.ts'
+
 
 /** Path the proxy serves the bridge script from (root-relative inside the frame). */
 export const NATIVE_BRIDGE_SCRIPT_PATH = '/__md/bridge.js'
@@ -47,11 +50,15 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
   try { clientId = new URLSearchParams(location.search || '').get('md_client') || ''; } catch (error) {}
 
   var initialGroups = {};
+  var initialUiState = null;
   var initialUnread = [];
   var initialReadCompletions;
   try {
     if (window.__DSH_MD_GROUPS__ && typeof window.__DSH_MD_GROUPS__ === 'object' && !Array.isArray(window.__DSH_MD_GROUPS__)) {
       initialGroups = window.__DSH_MD_GROUPS__;
+    }
+    if (window.__DSH_MD_UI_STATE__ && typeof window.__DSH_MD_UI_STATE__ === 'object' && !Array.isArray(window.__DSH_MD_UI_STATE__)) {
+      initialUiState = window.__DSH_MD_UI_STATE__;
     }
     if (Array.isArray(window.__DSH_MD_UNREAD__)) initialUnread = window.__DSH_MD_UNREAD__;
     initialReadCompletions = window.__DSH_MD_READ_COMPLETIONS__;
@@ -85,8 +92,11 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
   // applied before the workspace browser first renders, so there is no
   // collapsed-then-expanded flash.
   var groups = normalizeGroups(initialGroups);
+  var groupBy = normalizeGroupBy(initialUiState && initialUiState.groupBy);
+  var orderBy = normalizeOrderBy(initialUiState && initialUiState.orderBy);
+  var archivedFilter = normalizeArchivedFilter(initialUiState && initialUiState.archivedFilter);
   var groupSyncInstalled = false;
-  var groupSendTimer = null;
+  var uiSendTimer = null;
   var groupEchoGuard = false;
 
   // Session completion reminders are owned by the local Host too; the tab strip
@@ -467,6 +477,33 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
     return out;
   }
 
+  function normalizeGroupBy(value) {
+    return value === 'workspace' || value === 'flat' || value === 'workspace-tree' ? value : null;
+  }
+
+  function normalizeOrderBy(value) {
+    return value === 'updated' || value === 'manual' ? value : null;
+  }
+
+  function normalizeArchivedFilter(value) {
+    return value === 'default' || value === 'show' || value === 'only' ? value : null;
+  }
+
+  function viewState() {
+    var next = { groups: groups };
+    if (groupBy !== null) next.groupBy = groupBy;
+    if (orderBy !== null) next.orderBy = orderBy;
+    if (archivedFilter !== null) next.archivedFilter = archivedFilter;
+    return next;
+  }
+
+  function sameViewState(left, right) {
+    if (!left || !right) return false;
+    if (left.groupBy !== right.groupBy || left.orderBy !== right.orderBy ||
+        left.archivedFilter !== right.archivedFilter) return false;
+    return sameGroups(left.groups || {}, right.groups || {});
+  }
+
   function sameGroups(left, right) {
     var leftKeys = Object.keys(left);
     var rightKeys = Object.keys(right);
@@ -477,16 +514,32 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
     return true;
   }
 
-  function sendGroups() {
-    if (groupSendTimer !== null) return;
-    groupSendTimer = setTimeout(function () {
-      groupSendTimer = null;
-      send({ type: 'group-expansion', groups: groups });
+  function sendUiState() {
+    if (uiSendTimer !== null) return;
+    uiSendTimer = setTimeout(function () {
+      uiSendTimer = null;
+      send({ type: 'ui-state', state: viewState() });
     }, 120);
   }
 
-  function applyGroupState(next) {
-    var incoming = normalizeGroups(next);
+  function currentOrders() {
+    try {
+      var raw = window.localStorage && window.localStorage.getItem('dsh.workspace.view.v5');
+      if (!raw) return {};
+      var parsed = JSON.parse(raw);
+      return parsed && parsed.sessionOrderByAccount && typeof parsed.sessionOrderByAccount === 'object'
+        ? parsed.sessionOrderByAccount : {};
+    } catch (error) { return {}; }
+  }
+
+  function applyUiState(next, force) {
+    if (!next || typeof next !== 'object') return;
+    var incomingGroups = normalizeGroups(next.groups);
+    var incomingGroupBy = normalizeGroupBy(next.groupBy);
+    var incomingOrderBy = normalizeOrderBy(next.orderBy);
+    var incomingArchivedFilter = normalizeArchivedFilter(next.archivedFilter);
+    var changed = false;
+
     // Keep locally observed keys the Host has not reported yet: a fold click
     // may be mid-debounce when another client broadcasts its map. DSH's own
     // retainAccountKeys prunes deleted workspaces on both sides.
@@ -495,23 +548,50 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
     for (var existingIndex = 0; existingIndex < existing.length; existingIndex += 1) {
       merged[existing[existingIndex]] = groups[existing[existingIndex]];
     }
-    var incomingKeys = Object.keys(incoming);
+    var incomingKeys = Object.keys(incomingGroups);
     for (var incomingIndex = 0; incomingIndex < incomingKeys.length; incomingIndex += 1) {
-      merged[incomingKeys[incomingIndex]] = incoming[incomingKeys[incomingIndex]];
+      var incomingKey = incomingKeys[incomingIndex];
+      if (merged[incomingKey] !== incomingGroups[incomingKey]) {
+        merged[incomingKey] = incomingGroups[incomingKey];
+        changed = true;
+      }
     }
     groups = merged;
-    if (!captured) return;
+
+    if (incomingGroupBy !== null && incomingGroupBy !== groupBy) { groupBy = incomingGroupBy; changed = true; }
+    if (incomingOrderBy !== null && incomingOrderBy !== orderBy) { orderBy = incomingOrderBy; changed = true; }
+    if (incomingArchivedFilter !== null && incomingArchivedFilter !== archivedFilter) {
+      archivedFilter = incomingArchivedFilter;
+      changed = true;
+    }
+    if ((!changed && force !== true) || !captured) return;
     var workspace = captured.uiWorkspace;
     var view = workspace && workspace.view;
-    if (!view || typeof view.setGroupExpanded !== 'function') return;
+    if (!view) return;
     groupEchoGuard = true;
     try {
-      for (var i = 0; i < incomingKeys.length; i += 1) {
-        try { view.setGroupExpanded(incomingKeys[i], merged[incomingKeys[i]]); } catch (error) {}
+      if (typeof view.setGroupExpanded === 'function') {
+        for (var i = 0; i < incomingKeys.length; i += 1) {
+          try { view.setGroupExpanded(incomingKeys[i], merged[incomingKeys[i]]); } catch (error) {}
+        }
+      }
+      if (incomingGroupBy !== null && typeof view.setGroupBy === 'function') {
+        try { view.setGroupBy(incomingGroupBy); } catch (error) {}
+      }
+      if (incomingOrderBy !== null && typeof view.setOrderBy === 'function') {
+        try { view.setOrderBy(incomingOrderBy, currentOrders()); } catch (error) {}
+      }
+      if (incomingArchivedFilter !== null && typeof view.setArchivedFilter === 'function') {
+        try { view.setArchivedFilter(incomingArchivedFilter); } catch (error) {}
       }
     } finally {
       groupEchoGuard = false;
     }
+  }
+
+  // Older Hosts sent only the fold map; keep accepting that frame.
+  function applyGroupState(next) {
+    applyUiState({ groups: next });
   }
 
   function installGroupSync(context) {
@@ -526,7 +606,7 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
       if (!groupEchoGuard) {
         try {
           groups[String(key)] = expanded === true;
-          sendGroups();
+          sendUiState();
         } catch (error) {}
       }
       return result;
@@ -543,13 +623,30 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
               if (Object.prototype.hasOwnProperty.call(groups, key)) retained[key] = groups[key];
             }
             groups = retained;
-            sendGroups();
+            sendUiState();
           } catch (error) {}
         }
         return result;
       };
     }
-    applyGroupState(groups);
+    function wrapMode(name) {
+      var original = view[name];
+      if (typeof original !== 'function') return;
+      view[name] = function (value) {
+        var result = original.apply(this, arguments);
+        if (!groupEchoGuard) {
+          if (name === 'setGroupBy') groupBy = normalizeGroupBy(value);
+          else if (name === 'setOrderBy') orderBy = normalizeOrderBy(value);
+          else if (name === 'setArchivedFilter') archivedFilter = normalizeArchivedFilter(value);
+          sendUiState();
+        }
+        return result;
+      };
+    }
+    wrapMode('setGroupBy');
+    wrapMode('setOrderBy');
+    wrapMode('setArchivedFilter');
+    applyUiState(viewState(), true);
     return true;
   }
 
@@ -567,11 +664,23 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
         try {
           if (!groupEchoGuard && typeof key === 'string' && key.indexOf('dsh.workspace.view.') === 0) {
             var parsed = JSON.parse(String(value));
-            if (parsed && parsed.groupExpansion && typeof parsed.groupExpansion === 'object') {
-              var next = normalizeGroups(parsed.groupExpansion);
-              if (!sameGroups(groups, next)) {
-                groups = next;
-                sendGroups();
+            if (parsed && typeof parsed === 'object') {
+              var nextState = viewState();
+              if (parsed.groupExpansion && typeof parsed.groupExpansion === 'object') {
+                nextState.groups = normalizeGroups(parsed.groupExpansion);
+              }
+              var parsedGroupBy = normalizeGroupBy(parsed.groupBy);
+              var parsedOrderBy = normalizeOrderBy(parsed.orderBy);
+              var parsedArchivedFilter = normalizeArchivedFilter(parsed.archivedFilter);
+              if (parsedGroupBy !== null) nextState.groupBy = parsedGroupBy; else delete nextState.groupBy;
+              if (parsedOrderBy !== null) nextState.orderBy = parsedOrderBy; else delete nextState.orderBy;
+              if (parsedArchivedFilter !== null) nextState.archivedFilter = parsedArchivedFilter; else delete nextState.archivedFilter;
+              if (!sameViewState(viewState(), nextState)) {
+                groups = nextState.groups;
+                groupBy = nextState.groupBy;
+                orderBy = nextState.orderBy;
+                archivedFilter = nextState.archivedFilter;
+                sendUiState();
               }
             }
           }
@@ -1041,7 +1150,7 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
       reportTitle();
       sendTitle(true);
       sendVisibility(true);
-      if (groupSyncInstalled) sendGroups();
+      if (groupSyncInstalled) sendUiState();
     });
     socket.addEventListener('message', function (event) {
       if (socket !== connectedSocket) return;
@@ -1052,6 +1161,7 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
       else if (data.type === 'refresh') refreshSessions();
       else if (data.type === 'set-embedded') setEmbedded(data.enabled === true);
       else if (data.type === 'group-expansion') applyGroupState(data.groups);
+      else if (data.type === 'ui-state') applyUiState(data.state);
       else if (data.type === 'read-state') setUnreadState(data.unreadSessionIds, data.readCompletions);
       else if (data.type === 'read-ack') applyReadAck(data);
     });
@@ -1241,6 +1351,8 @@ function jsonForInlineScript(value: unknown): string {
 export interface NativeBridgeScriptState {
   /** Explicit workspace fold state last observed by the Host. */
   readonly groups?: Readonly<Record<string, boolean>>
+  /** Full Host-owned sidebar view state; preferred over `groups` when present. */
+  readonly uiState?: WorkspaceViewState
   /** Raw remote Session IDs whose completion is currently unread. */
   readonly unread?: readonly string[]
   /** All current completion tokens, including already-read completions. */
@@ -1253,7 +1365,8 @@ export interface NativeBridgeScriptState {
  * has the Host's fold state.
  */
 export function buildNativeBridgeScript(state: NativeBridgeScriptState = {}): string {
-  const groups = sanitizeGroupState(state.groups)
+  const uiState = sanitizeWorkspaceViewState(state.uiState ?? { groups: state.groups ?? {} })
+  const groups = uiState.groups
   const unread = Array.isArray(state.unread)
     ? state.unread
         .filter((id): id is string => typeof id === 'string' && id !== '' && id.length <= 512)
@@ -1261,6 +1374,7 @@ export function buildNativeBridgeScript(state: NativeBridgeScriptState = {}): st
     : []
   return [
     `window.__DSH_MD_GROUPS__ = ${jsonForInlineScript(groups)};`,
+    `window.__DSH_MD_UI_STATE__ = ${jsonForInlineScript(uiState)};`,
     `window.__DSH_MD_UNREAD__ = ${jsonForInlineScript(unread)};`,
     ...(state.readCompletions !== undefined
       ? [`window.__DSH_MD_READ_COMPLETIONS__ = ${jsonForInlineScript(sanitizeReadCompletions(state.readCompletions))};`]

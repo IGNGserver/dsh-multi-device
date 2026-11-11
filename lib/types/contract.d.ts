@@ -282,6 +282,34 @@ export interface SshConfigHostEntry {
     readonly forwardAgent?: boolean;
     readonly sourceFile: string;
 }
+/** Workspace tree grouping modes understood by DSH 0.2.x. */
+export type WorkspaceGroupBy = 'workspace' | 'flat' | 'workspace-tree';
+/** Workspace/session ordering modes understood by DSH 0.2.x. */
+export type WorkspaceOrderBy = 'updated' | 'manual';
+/** Archived-row visibility modes understood by DSH 0.2.x. */
+export type WorkspaceArchivedFilter = 'default' | 'show' | 'only';
+/**
+ * Persisted sidebar view state for one scope.
+ *
+ * A scope is either this Host's own page (`local`) or one remote device page,
+ * keyed by its stable transport identity rather than the per-Controller device
+ * ID. Workspace keys come from DSH's own view store and are opaque here.
+ *
+ * Only presentation state belongs in this record: no Session bodies, no
+ * workspace paths, no credentials. Optional fields let older Hosts and newer
+ * Clients coexist.
+ */
+export interface WorkspaceViewState {
+    /** Workspace-tree fold map: workspace/group key -> expanded. */
+    readonly groups: Readonly<Record<string, boolean>>;
+    readonly groupBy?: WorkspaceGroupBy;
+    readonly orderBy?: WorkspaceOrderBy;
+    readonly archivedFilter?: WorkspaceArchivedFilter;
+}
+/** Bound and validate one wire/snapshot view state without throwing. */
+export declare function sanitizeWorkspaceViewState(value: unknown): WorkspaceViewState;
+/** True when two view states carry the same presentation fields. */
+export declare function sameWorkspaceViewState(left: WorkspaceViewState | undefined, right: WorkspaceViewState | undefined): boolean;
 /** Display preferences persisted by the Host. */
 export interface MultiDeviceUiPreferences {
     /**
@@ -291,6 +319,14 @@ export interface MultiDeviceUiPreferences {
      * remote Sessions.
      */
     readonly crossHostReadState: boolean;
+    /**
+     * Publish this Controller's remote-page view state (fold/group/sort/filter)
+     * into each SSH device's DSH home so other Controllers viewing the same
+     * device converge. Off by default: it writes one small, non-secret file on
+     * the remote and needs at least two Controllers to be useful. The remote
+     * itself never installs the plugin or reads the file.
+     */
+    readonly crossHostUiState: boolean;
     /**
      * Replace the window/taskbar title with the aggregate of every device's
      * Session status, using exactly the three categories the tab capsule shows
@@ -354,6 +390,15 @@ export interface MultiDeviceSnapshot {
     readonly subagentSessionIds?: readonly string[];
     /** Persisted display preferences; optional so older Hosts still parse. */
     readonly ui?: MultiDeviceUiPreferences;
+    /**
+     * This Host's own sidebar view state (`local` scope).
+     *
+     * Remote-device scopes travel only to that device's framed page, because the
+     * local shell never renders a remote tree. A client that receives this field
+     * applies it to the same-origin DSH workspace store, so every browser tab
+     * attached to this Host shows one fold/group/sort state.
+     */
+    readonly uiState?: WorkspaceViewState;
 }
 /** True when a Session ID is already namespaced by `dsh-multi-device`. */
 export declare function isNamespacedSessionId(sessionId: string): boolean;

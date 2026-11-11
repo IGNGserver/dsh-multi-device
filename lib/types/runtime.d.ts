@@ -55,7 +55,7 @@ export declare function connectionRequestRejection(ctx: Context, headers: Incomi
  */
 export declare function admitMultiDeviceRequest(ctx: Context, req: IncomingMessage): boolean;
 export interface ControlPlaneRequest {
-    readonly action: 'snapshot' | 'diagnostics' | 'upsertDevice' | 'removeDevice' | 'reconnectDevice' | 'authenticateDevice' | 'testDevice' | 'listSshKeys' | 'setActiveSession' | 'markSessionRead' | 'markDeviceRead' | 'setUiPreferences';
+    readonly action: 'snapshot' | 'diagnostics' | 'upsertDevice' | 'removeDevice' | 'reconnectDevice' | 'authenticateDevice' | 'testDevice' | 'listSshKeys' | 'setActiveSession' | 'markSessionRead' | 'markDeviceRead' | 'setUiPreferences' | 'patchUiState';
     readonly payload?: Record<string, unknown>;
 }
 /** Validate the transport envelope before TypeScript erases its runtime types. */

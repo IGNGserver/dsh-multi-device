@@ -9,7 +9,7 @@
  * @module dsh-multi-device/client/state
  */
 import type { StateDotState } from '@deepseek-ai/dsh-client-ui-primitives';
-import { type DeviceConnectionState, DeviceId, type MultiDeviceSnapshot, type MultiDeviceUiPreferences, type SshKeyEntry, type UpsertDeviceInput } from '../contract.ts';
+import { type DeviceConnectionState, DeviceId, type MultiDeviceSnapshot, type MultiDeviceUiPreferences, type SshKeyEntry, type UpsertDeviceInput, type WorkspaceViewState } from '../contract.ts';
 import type { ControlPlaneRequest, DiagnosticsClientReport, MultiDeviceDiagnostics } from '../runtime.ts';
 /**
  * Decide whether an incoming Host snapshot may replace the current one.
@@ -213,6 +213,16 @@ export declare class MultiDeviceClientStore {
         error: string;
     }>;
     listSshKeys(): Promise<SshKeyEntry[]>;
+    /**
+     * Report this browser's DSH workspace view state to the Host.
+     *
+     * The Host stamps and republishes it to every attached browser; the page that
+     * reported it also receives the snapshot, so applying it must be idempotent.
+     */
+    patchUiState(state: WorkspaceViewState): Promise<{
+        ok: boolean;
+        error?: string;
+    }>;
     setUiPreferences(patch: Partial<MultiDeviceUiPreferences>): Promise<{
         ok: boolean;
         error?: string;

@@ -19,6 +19,7 @@ import {
   type MultiDeviceUiPreferences,
   type SshKeyEntry,
   type UpsertDeviceInput,
+  type WorkspaceViewState,
 } from '../contract.ts'
 import type { ControlPlaneRequest, DiagnosticsClientReport, MultiDeviceDiagnostics } from '../runtime.ts'
 import { readNativeBarMetrics, readNativeBarObstruction } from './barMetrics.ts'
@@ -198,7 +199,7 @@ const EMPTY_SNAPSHOT: MultiDeviceSnapshot = {
   devices: [],
   sshConfigHosts: [],
   unreadSessionIds: [],
-  ui: { crossHostReadState: false, taskbarSummary: false },
+  ui: { crossHostReadState: false, crossHostUiState: false, taskbarSummary: false },
 }
 
 interface ResponseFence {
@@ -843,6 +844,25 @@ export class MultiDeviceClientStore {
   async listSshKeys(): Promise<SshKeyEntry[]> {
     const res = await this.callControlPlane<{ keys: SshKeyEntry[] }>({ action: 'listSshKeys' })
     return res.ok ? res.value.keys : []
+  }
+
+  /**
+   * Report this browser's DSH workspace view state to the Host.
+   *
+   * The Host stamps and republishes it to every attached browser; the page that
+   * reported it also receives the snapshot, so applying it must be idempotent.
+   */
+  async patchUiState(state: WorkspaceViewState): Promise<{ ok: boolean; error?: string }> {
+    const res = await this.callControlPlane<MultiDeviceSnapshot>({
+      action: 'patchUiState',
+      payload: { state: state as unknown as Record<string, unknown> },
+    })
+    if (!this.isResponseCurrent(res)) return { ok: false, error: 'stale-response' }
+    if (res.ok) {
+      this.applyIncomingSnapshot(res.value)
+      return { ok: true }
+    }
+    return { ok: false, error: res.error }
   }
 
   async setUiPreferences(patch: Partial<MultiDeviceUiPreferences>): Promise<{ ok: boolean; error?: string }> {

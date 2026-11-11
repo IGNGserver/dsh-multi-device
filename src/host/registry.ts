@@ -27,6 +27,7 @@ import {
   type MultiDeviceUiPreferences,
   type SshKeyEntry,
   type UpsertDeviceInput,
+  type WorkspaceViewState,
 } from '../contract.ts'
 import {
   type DeviceAttentionView,
@@ -51,6 +52,24 @@ import {
   sharedReadStatePath,
   type SharedReadEntry,
 } from './shared-state.ts'
+import {
+  HlcClock,
+  mergeUiScope,
+  parseUiStateDocument,
+  parseUiStatePatch,
+  patchUiScope,
+  remoteUiScopeKey,
+  uiScopeState,
+  type UiScopeRecord,
+  type UiStateDocument,
+} from './ui-state.ts'
+import {
+  buildReadUiSyncCommand,
+  buildWriteUiSyncCommand,
+  collectRemoteScopes,
+  parseUiSyncDocument,
+  uiSyncDir,
+} from './ui-sync.ts'
 import {
   classifyRemoteProtocol,
   RemoteDeviceClient,
@@ -159,10 +178,13 @@ interface PersistedRegistryDocument {
   }
   /** Stable identity for this Host, used by the optional cross-Host state file. */
   readonly hostId?: string
+  /** Host-owned sidebar view state per scope (`local`, `remote:<transport>`). */
+  readonly workspaceViews?: UiStateDocument
 }
 
 const DEFAULT_UI_PREFERENCES: MultiDeviceUiPreferences = {
   crossHostReadState: false,
+  crossHostUiState: false,
   taskbarSummary: false,
 }
 
@@ -275,6 +297,9 @@ export class DeviceRegistry {
   private readonly lastDeviceStates = new Map<DeviceId, DeviceConnectionState>()
   /** Host-owned fold state per device, restored into the framed page before its first render. */
   private readonly nativeGroups = new Map<DeviceId, Record<string, boolean>>()
+  /** Host-owned sidebar view state per scope; `local` plus one record per remote transport. */
+  private readonly uiScopes = new Map<string, UiScopeRecord>()
+  private uiClock: HlcClock = new HlcClock('host')
   private readonly remoteRunningEvidence = new Map<string, number>()
   private readonly completionBindings = new Map<string, { completionId: string; generation: number }>()
   private readonly completionBindingOffsets = new Map<DeviceId, number>()
@@ -307,6 +332,13 @@ export class DeviceRegistry {
   private readonly sharedReadStateInFlight = new Set<DeviceId>()
   private readonly sharedReadStateInitialized = new Set<DeviceId>()
   private readonly sharedReadStatePushTimers = new Map<DeviceId, ReturnType<typeof setTimeout>>()
+  /** Optional Controller-to-Controller view-state files on passive SSH remotes. */
+  private uiSyncTimer: ReturnType<typeof setInterval> | undefined
+  private readonly uiSyncInFlight = new Set<DeviceId>()
+  private readonly uiSyncDirty = new Set<DeviceId>()
+  private readonly uiSyncInitialized = new Set<DeviceId>()
+  private readonly uiSyncPushTimers = new Map<DeviceId, ReturnType<typeof setTimeout>>()
+  private readonly uiSyncFailures = new Map<DeviceId, number>()
 
   private readonly storage: JsonSnapshotFile
   private readonly catalogStorage: JsonSnapshotFile
@@ -357,6 +389,10 @@ export class DeviceRegistry {
         onGroupState: (deviceId, groups) => {
           this.setNativeGroupState(deviceId, groups)
         },
+        getUiState: deviceId => this.uiStateForDevice(deviceId),
+        onUiState: (deviceId, state) => {
+          this.setDeviceUiState(deviceId, state)
+        },
         getUnreadState: deviceId => this.unreadForDevice(deviceId),
         getReadCompletions: deviceId => this.completionsForDevice(deviceId),
         onBridgeRead: (deviceId, sessionId, expectedCompletionId) => {
@@ -372,6 +408,7 @@ export class DeviceRegistry {
       void this.persistCatalogsAsync().catch(() => {})
     }
     this.syncSharedReadStateTimer()
+    this.syncUiSyncTimer()
   }
 
   onSnapshotChanged(listener: () => void): () => void {
@@ -656,8 +693,67 @@ export class DeviceRegistry {
     if (previous !== undefined && sameGroupState(previous, next)) return
     if (Object.keys(next).length === 0) this.nativeGroups.delete(deviceId)
     else this.nativeGroups.set(deviceId, next)
+    const config = this.configs.get(deviceId)
+    if (config !== undefined) {
+      const scope = this.uiScopeKey(config)
+      this.uiScopes.set(scope, patchUiScope(this.uiScopes.get(scope), { groups: next }, this.uiClock))
+    }
     this.schedulePersist()
     this.nativeProxyManager.setGroupState(deviceId, next)
+    this.scheduleUiSyncPush(deviceId)
+  }
+
+  /**
+   * This Host's own sidebar view state, applied by the client entry.
+   *
+   * Remote scopes are deliberately not part of the shell snapshot: they belong
+   * to a cross-origin framed page and travel through its bridge instead.
+   */
+  localUiState(): WorkspaceViewState | undefined {
+    return uiScopeState(this.uiScopes.get('local'))
+  }
+
+  /**
+   * Accept a view-state report from this Host's own page.
+   *
+   * The browser is the only place that can observe DSH's workspace actions, so
+   * it reports the resulting state here; the Host stamps fields with an HLC and
+   * republishes one snapshot to every attached browser tab.
+   */
+  patchLocalUiState(patch: WorkspaceViewState): { ok: true; state?: WorkspaceViewState } | { ok: false; error: string } {
+    const parsed = parseUiStatePatch(patch)
+    if (parsed === undefined) return { ok: false, error: 'Invalid workspace view state' }
+    const next = patchUiScope(this.uiScopes.get('local'), parsed, this.uiClock)
+    this.uiScopes.set('local', next)
+    this.schedulePersist()
+    this.bumpRevision()
+    return { ok: true, state: uiScopeState(next) }
+  }
+
+  /** Scope key for one configured device; transport identity, not local id. */
+  private uiScopeKey(config: DeviceConfig): string {
+    return remoteUiScopeKey(config.transport)
+  }
+
+  /** View state sent into one framed page before its first render. */
+  uiStateForDevice(deviceId: DeviceId): WorkspaceViewState | undefined {
+    const config = this.configs.get(deviceId)
+    return config === undefined ? undefined : uiScopeState(this.uiScopes.get(this.uiScopeKey(config)))
+  }
+
+  /** Accept a view-state report from one framed page and mirror it to peers. */
+  private setDeviceUiState(deviceId: DeviceId, state: WorkspaceViewState): void {
+    const config = this.configs.get(deviceId)
+    if (config === undefined || this.disposed) return
+    const parsed = parseUiStatePatch(state)
+    if (parsed === undefined) return
+    const key = this.uiScopeKey(config)
+    const next = patchUiScope(this.uiScopes.get(key), parsed, this.uiClock)
+    this.uiScopes.set(key, next)
+    this.nativeGroups.set(deviceId, uiScopeState(next)!.groups)
+    this.schedulePersist()
+    this.nativeProxyManager.setUiState(deviceId, uiScopeState(next)!)
+    this.scheduleUiSyncPush(deviceId)
   }
 
   /** Raw remote Session IDs that are unread on one device. */
@@ -799,13 +895,32 @@ export class DeviceRegistry {
     }
   }
 
+  /**
+   * Resolve the remote DSH home without assuming the OS home is `$DSH_HOME`.
+   *
+   * `host.home` from DSH's ready frame is `homedir()`, not the DSH data
+   * directory. Prefer the device's explicit `remoteDshHome`, then the default
+   * `~/.dsh`. Non-POSIX remotes are unsupported by the SSH file transport.
+   */
+  private remoteDshHomeFor(client: RemoteDeviceClient): string | undefined {
+    const transport = client.deviceConfig.transport
+    if (transport.kind !== 'ssh') return undefined
+    const configured = transport.remoteDshHome?.trim()
+    if (configured !== undefined && configured !== '' && isPosixRemoteHome(configured)) {
+      return configured.replace(/\/+$/, '')
+    }
+    const home = client.toView().remoteHome
+    if (!isPosixRemoteHome(home)) return undefined
+    return `${home!.trim().replace(/\/+$/, '')}/.dsh`
+  }
+
   /** One pull+push per connection once the remote home is known. */
   private maybeInitializeSharedReadState(deviceId: DeviceId): void {
     if (!this.uiPreferences.crossHostReadState) return
     if (this.sharedReadStateInitialized.has(deviceId)) return
     const client = this.clients.get(deviceId)
     if (client === undefined || !client.isConnected()) return
-    if (!isPosixRemoteHome(client.toView().remoteHome)) return
+    if (this.remoteDshHomeFor(client) === undefined) return
     this.sharedReadStateInitialized.add(deviceId)
     void this.pullSharedReadState(deviceId).then(() => {
       this.scheduleSharedReadStatePush(deviceId, 0)
@@ -820,9 +935,9 @@ export class DeviceRegistry {
     if (client === undefined || !client.isConnected()) return undefined
     const transport = client.deviceConfig.transport
     if (transport.kind !== 'ssh') return undefined
-    const remoteHome = client.toView().remoteHome
-    if (!isPosixRemoteHome(remoteHome)) return undefined
-    return { transport, path: sharedReadStatePath(remoteHome!) }
+    const dshHome = this.remoteDshHomeFor(client)
+    if (dshHome === undefined) return undefined
+    return { transport, path: sharedReadStatePath(dshHome) }
   }
 
   private scheduleSharedReadStatePush(deviceId: DeviceId, delayMs = 1_500): void {
@@ -978,6 +1093,170 @@ export class DeviceRegistry {
       }
     }
     this.readTracker.migrateLegacyIds()
+  }
+
+  /**
+   * Optional Controller-to-Controller view-state sync.
+   *
+   * The remote only stores files; it never runs this plugin. Each Controller
+   * owns one file, so no read-modify-write race can erase a peer's fold. The
+   * files are only written when the user opts in.
+   */
+  private uiSyncTarget(deviceId: DeviceId):
+    | { readonly transport: Extract<DeviceConfig['transport'], { kind: 'ssh' }>; readonly dir: string }
+    | undefined {
+    if (!this.uiPreferences.crossHostUiState) return undefined
+    const client = this.clients.get(deviceId)
+    if (client === undefined || !client.isConnected()) return undefined
+    const transport = client.deviceConfig.transport
+    if (transport.kind !== 'ssh') return undefined
+    const dshHome = this.remoteDshHomeFor(client)
+    if (dshHome === undefined) return undefined
+    return { transport, dir: uiSyncDir(dshHome) }
+  }
+
+  private maybeInitializeUiSync(deviceId: DeviceId): void {
+    if (!this.uiPreferences.crossHostUiState) return
+    if (this.uiSyncInitialized.has(deviceId)) return
+    if (this.uiSyncTarget(deviceId) === undefined) return
+    this.uiSyncInitialized.add(deviceId)
+    void this.pullUiSync(deviceId).then(() => this.scheduleUiSyncPush(deviceId, 0))
+  }
+
+  private scheduleUiSyncPush(deviceId: DeviceId, delayMs = 1_500): void {
+    if (!this.uiPreferences.crossHostUiState || this.disposed) return
+    if (this.uiSyncInFlight.has(deviceId)) {
+      this.uiSyncDirty.add(deviceId)
+      return
+    }
+    if (this.uiSyncPushTimers.has(deviceId)) return
+    const timer = setTimeout(() => {
+      this.uiSyncPushTimers.delete(deviceId)
+      void this.pushUiSync(deviceId)
+    }, delayMs)
+    timer.unref?.()
+    this.uiSyncPushTimers.set(deviceId, timer)
+  }
+
+  /** Merge every peer Controller document found on one remote. */
+  private async pullUiSync(deviceId: DeviceId): Promise<void> {
+    const target = this.uiSyncTarget(deviceId)
+    const client = this.clients.get(deviceId)
+    const generation = client?.connectionGeneration
+    if (this.disposed || target === undefined || this.uiSyncInFlight.has(deviceId)) return
+    this.uiSyncInFlight.add(deviceId)
+    try {
+      const read = await execSshCommand(
+        target.transport,
+        buildReadUiSyncCommand(target.dir),
+        8_000,
+        this.lifetime.signal,
+      )
+      if (!read.ok || this.disposed || this.clients.get(deviceId) !== client ||
+          client?.connectionGeneration !== generation) return
+      let changed = false
+      for (const part of read.stdout.split('\u001e')) {
+        if (part.trim() === '') continue
+        let raw: unknown
+        try { raw = JSON.parse(part) } catch { continue }
+        const document = parseUiSyncDocument(raw)
+        if (document === undefined || document.hostId === this.hostId) continue
+        changed = this.mergeUiSyncScopes(document.scopes) || changed
+      }
+      if (changed) {
+        this.schedulePersist()
+        this.applyUiScopesToDevices()
+      }
+      this.uiSyncFailures.delete(deviceId)
+    } catch {
+      if (!this.disposed) this.uiSyncFailures.set(deviceId, (this.uiSyncFailures.get(deviceId) ?? 0) + 1)
+    } finally {
+      this.uiSyncInFlight.delete(deviceId)
+      if (this.uiSyncDirty.delete(deviceId) && !this.disposed) this.scheduleUiSyncPush(deviceId, 0)
+    }
+  }
+
+  /** Write this Controller's remote scopes into one remote; never peers' files. */
+  private async pushUiSync(deviceId: DeviceId): Promise<void> {
+    const target = this.uiSyncTarget(deviceId)
+    const client = this.clients.get(deviceId)
+    const generation = client?.connectionGeneration
+    if (this.disposed || target === undefined || this.uiSyncInFlight.has(deviceId)) return
+    this.uiSyncInFlight.add(deviceId)
+    let committed = false
+    try {
+      const scopes = collectRemoteScopes(this.uiScopes)
+      const write = await execSshCommand(
+        target.transport,
+        buildWriteUiSyncCommand(target.dir, this.hostId, scopes),
+        15_000,
+        this.lifetime.signal,
+      )
+      if (!write.ok) throw new Error(write.error)
+      if (this.disposed || this.clients.get(deviceId) !== client ||
+          client?.connectionGeneration !== generation) return
+      committed = true
+      this.uiSyncFailures.delete(deviceId)
+    } catch {
+      if (!this.disposed && this.clients.get(deviceId) === client) {
+        this.uiSyncFailures.set(deviceId, (this.uiSyncFailures.get(deviceId) ?? 0) + 1)
+      }
+    } finally {
+      this.uiSyncInFlight.delete(deviceId)
+      if (!committed && !this.disposed && this.uiSyncTarget(deviceId) !== undefined) {
+        this.uiSyncDirty.add(deviceId)
+      }
+      if (this.uiSyncDirty.delete(deviceId) && !this.disposed) {
+        const failures = this.uiSyncFailures.get(deviceId) ?? 0
+        this.scheduleUiSyncPush(deviceId, Math.min(30_000, 1_000 * 2 ** Math.min(failures, 5)))
+      }
+    }
+  }
+
+  /** Per-field merge of peer documents; returns whether anything moved. */
+  private mergeUiSyncScopes(scopes: Record<string, UiScopeRecord>): boolean {
+    let changed = false
+    for (const [scope, remote] of Object.entries(scopes)) {
+      if (!scope.startsWith('remote:')) continue
+      const local = this.uiScopes.get(scope)
+      const merged = mergeUiScope(local, remote)
+      if (merged === undefined) continue
+      if (JSON.stringify(merged) === JSON.stringify(local)) continue
+      this.uiScopes.set(scope, merged)
+      changed = true
+    }
+    return changed
+  }
+
+  private applyUiScopesToDevices(): void {
+    for (const deviceId of this.configs.keys()) {
+      const state = this.uiStateForDevice(deviceId)
+      if (state !== undefined) this.nativeProxyManager.setUiState(deviceId, state)
+    }
+  }
+
+  /** Start/stop the optional 15s Controller scan when the preference changes. */
+  private syncUiSyncTimer(): void {
+    if (!this.uiPreferences.crossHostUiState) {
+      if (this.uiSyncTimer !== undefined) {
+        clearInterval(this.uiSyncTimer)
+        this.uiSyncTimer = undefined
+      }
+      this.uiSyncInitialized.clear()
+      for (const timer of this.uiSyncPushTimers.values()) clearTimeout(timer)
+      this.uiSyncPushTimers.clear()
+      return
+    }
+    if (this.uiSyncTimer !== undefined) return
+    const timer = setInterval(() => {
+      for (const deviceId of this.clients.keys()) void this.pullUiSync(deviceId)
+    }, 15_000)
+    timer.unref?.()
+    this.uiSyncTimer = timer
+    for (const deviceId of this.clients.keys()) {
+      this.maybeInitializeUiSync(deviceId)
+      this.scheduleUiSyncPush(deviceId, 0)
+    }
   }
 
   /** Start/stop the 30s remote scan when the preference changes. */
@@ -1181,6 +1460,12 @@ export class DeviceRegistry {
       clearInterval(this.sharedReadStateTimer)
       this.sharedReadStateTimer = undefined
     }
+    if (this.uiSyncTimer !== undefined) {
+      clearInterval(this.uiSyncTimer)
+      this.uiSyncTimer = undefined
+    }
+    for (const timer of this.uiSyncPushTimers.values()) clearTimeout(timer)
+    this.uiSyncPushTimers.clear()
     if (this.runningReconcileTimer !== undefined) {
       clearInterval(this.runningReconcileTimer)
       this.runningReconcileTimer = undefined
@@ -1667,6 +1952,7 @@ export class DeviceRegistry {
       return titles
     })
 
+    const localUiState = this.localUiState()
     const result: MultiDeviceSnapshot = {
       revision: this.revision,
       hostId: this.hostId,
@@ -1689,6 +1975,7 @@ export class DeviceRegistry {
       archivedSessionIds: [...archivedSessionIds].sort(),
       subagentSessionIds: [...subagentSessionIds].sort(),
       ui: { ...this.uiPreferences },
+      ...(localUiState === undefined ? {} : { uiState: localUiState }),
     }
     this.snapshotCache.delete(clientId)
     this.snapshotCache.set(clientId, { revision: this.revision, value: result })
@@ -1713,6 +2000,9 @@ export class DeviceRegistry {
       crossHostReadState: patch.crossHostReadState === undefined
         ? this.uiPreferences.crossHostReadState
         : patch.crossHostReadState === true,
+      crossHostUiState: patch.crossHostUiState === undefined
+        ? this.uiPreferences.crossHostUiState
+        : patch.crossHostUiState === true,
       taskbarSummary: patch.taskbarSummary === undefined
         ? this.uiPreferences.taskbarSummary
         : patch.taskbarSummary === true,
@@ -1721,6 +2011,7 @@ export class DeviceRegistry {
     catch (error) { this.uiPreferences = previous; throw error }
     this.bumpRevision()
     this.syncSharedReadStateTimer()
+    this.syncUiSyncTimer()
     return this.uiPreferences
   }
 
@@ -1792,8 +2083,10 @@ export class DeviceRegistry {
         if (state === 'connected') {
           this.reconcileRunningForDevice(deviceId)
           this.maybeInitializeSharedReadState(deviceId)
+          this.maybeInitializeUiSync(deviceId)
         } else {
           this.sharedReadStateInitialized.delete(deviceId)
+          this.uiSyncInitialized.delete(deviceId)
         }
         if (state !== undefined && this.lastDeviceStates.get(deviceId) !== state) {
           this.lastDeviceStates.set(deviceId, state)
@@ -1885,6 +2178,7 @@ export class DeviceRegistry {
   private loadFromDisk(): void {
     let migratedSecrets = false
     try {
+      this.uiClock = new HlcClock(this.hostId)
       const raw = this.storage.read<Partial<PersistedRegistryDocument>>()
       if (raw === undefined) return
       if (typeof raw.hostId === 'string' && /^[A-Za-z0-9-]{8,80}$/.test(raw.hostId)) {
@@ -1912,6 +2206,7 @@ export class DeviceRegistry {
       if (raw.ui && typeof raw.ui === 'object') {
         this.uiPreferences = {
           crossHostReadState: raw.ui.crossHostReadState === true,
+          crossHostUiState: raw.ui.crossHostUiState === true,
           taskbarSummary: raw.ui.taskbarSummary === true,
         }
       }
@@ -1925,6 +2220,17 @@ export class DeviceRegistry {
       }
       for (const [deviceId, groups] of Object.entries(sanitizeNativeGroups(raw.nativeGroups))) {
         if (this.configs.has(deviceId)) this.nativeGroups.set(deviceId, groups)
+      }
+      // The persisted clock must never be older than the fields it protects;
+      // otherwise a restart could mint an HLC below an already-applied value.
+      this.uiClock = new HlcClock(this.hostId)
+      const persistedViews = parseUiStateDocument(raw.workspaceViews)
+      for (const [scope, record] of Object.entries(persistedViews?.scopes ?? {})) {
+        this.uiScopes.set(scope, record)
+        for (const field of Object.values(record.groups)) this.uiClock.observe(field.at)
+        this.uiClock.observe(record.groupBy?.at)
+        this.uiClock.observe(record.orderBy?.at)
+        this.uiClock.observe(record.archivedFilter?.at)
       }
       if (raw.readState && typeof raw.readState === 'object') {
         this.readTracker.hydrate(raw.readState.entries)
@@ -2049,6 +2355,9 @@ export class DeviceRegistry {
         : {}),
       ...(Object.keys(readEntries).length > 0
         ? { readState: { entries: readEntries } }
+        : {}),
+      ...(this.uiScopes.size > 0
+        ? { workspaceViews: { version: 1, scopes: Object.fromEntries(this.uiScopes) } }
         : {}),
     }
     this.storage.write(doc)

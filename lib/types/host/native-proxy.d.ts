@@ -1,5 +1,5 @@
 import { type IncomingMessage } from 'node:http';
-import type { DeviceConfig, DeviceId, NativePaneState } from '../contract.ts';
+import type { DeviceConfig, DeviceId, NativePaneState, WorkspaceViewState } from '../contract.ts';
 import { DeviceAuthManager } from './auth.ts';
 /**
  * Copy a client request onto the upstream connection.
@@ -47,6 +47,10 @@ export interface NativeProxyHooks {
     readonly getGroupState?: (deviceId: DeviceId) => Readonly<Record<string, boolean>> | undefined;
     /** The framed page reported a fold change the Host should persist. */
     readonly onGroupState?: (deviceId: DeviceId, groups: Record<string, boolean>) => void;
+    /** Last Host-owned sidebar view state (fold + modes) for the bridge's first render. */
+    readonly getUiState?: (deviceId: DeviceId) => WorkspaceViewState | undefined;
+    /** The framed page reported a full view-state change the Host should persist. */
+    readonly onUiState?: (deviceId: DeviceId, state: WorkspaceViewState) => void;
     /** Raw remote Session IDs whose completion is unread on the Host. */
     readonly getUnreadState?: (deviceId: DeviceId) => readonly string[] | undefined;
     /** Current completion tokens, including completions already read. */
@@ -89,6 +93,8 @@ export declare class NativeDeviceProxy {
     private readonly readyBridgeClients;
     /** Host-owned workspace fold state, applied before the remote page's first render. */
     private groupState;
+    /** Host-owned sidebar view state, applied before the remote page's first render. */
+    private uiState;
     /** Host-owned raw Session IDs whose completion is unread. */
     private unreadState;
     private readCompletions;
@@ -115,6 +121,8 @@ export declare class NativeDeviceProxy {
     setEmbedded(enabled: boolean, clientId?: string): void;
     /** Apply Host-owned fold state to the framed page and every open client. */
     setGroupState(groups: Readonly<Record<string, boolean>>): void;
+    /** Apply Host-owned fold/group/sort/filter state to the framed page. */
+    setUiState(state: WorkspaceViewState): void;
     /** Apply Host-owned unread state to the framed page. */
     setUnreadState(unreadSessionIds: readonly string[], readCompletions?: Readonly<Record<string, string>>): void;
     /** Reset only this client's cached command target (device switched away). */
@@ -165,6 +173,8 @@ export declare class NativeProxyManager {
     requestRefresh(deviceId: DeviceId): boolean;
     /** Push Host-owned fold state to the device's framed page(s). */
     setGroupState(deviceId: DeviceId, groups: Readonly<Record<string, boolean>>): void;
+    /** Push the full Host-owned view state to the device's framed page(s). */
+    setUiState(deviceId: DeviceId, state: WorkspaceViewState): void;
     /** Push Host-owned unread Session IDs to the device's framed page(s). */
     setUnreadState(deviceId: DeviceId, unreadSessionIds: readonly string[], readCompletions?: Readonly<Record<string, string>>): void;
     removeProxy(deviceId: DeviceId): void;

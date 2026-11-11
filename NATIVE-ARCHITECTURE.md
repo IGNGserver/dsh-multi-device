@@ -31,6 +31,7 @@
 - 注意力投影（`attention.ts`）是标签徽标的唯一来源：**需回复 → 自身/子代理运行 → 完成未读**，主分类互斥；需回复按会话数统计，展开后另列请求数。
 - 标签只呈现一个状态胶囊（`dsh-md-tab-status`），按上述顺序排列**黄色＝待回复、蓝色＝运行中、绿色＝完成未读**的纯数字；空类别不渲染、不占位，缓存态用半透明虚线与空圈表达，颜色从不作为唯一通道（位置、计数、`title`、`aria-label`、菜单分组标题同时给出语义）。
 - 折叠工作区、归档与独立子代理行不改变设备计数；离线设备显示"上次已知"而不是精确当前值。
+- 界面状态分 `local` 与 `remote:<transport>` 两个 scope：本机由 client 入口包 `uiWorkspace.view` 的 action 上报/回灌；远端由注入桥接上报/回灌。Host 用 HLC 按字段合并并持久化，同一 Host 的所有浏览器共享；跨控制机时只复制 `remote:` scope，写入被动远端文件，远端零插件。
 - 一个 ResizeObserver 与 latest-value rAF 限制标签栏测量工作量；裁剪宽度保证设置入口始终可见。
 - 快照缓存以 Host revision 为键；任何有效本地/远端选择、清选或 requestSeq 提升都必须 bump revision。
 
