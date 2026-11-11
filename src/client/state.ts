@@ -198,7 +198,7 @@ const EMPTY_SNAPSHOT: MultiDeviceSnapshot = {
   devices: [],
   sshConfigHosts: [],
   unreadSessionIds: [],
-  ui: { crossHostReadState: false },
+  ui: { crossHostReadState: false, taskbarSummary: false },
 }
 
 interface ResponseFence {

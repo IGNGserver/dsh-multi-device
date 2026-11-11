@@ -47,6 +47,7 @@ import { AttentionDetails } from './AttentionDetails.tsx'
 import type { MultiDeviceLocaleKey } from './locales.ts'
 import { assessBrowserNativeAccess } from '../host/browser-relay.ts'
 import { clientStore, deviceStateToDotState, useMultiDeviceState } from './state.ts'
+import { TabScrollbar } from './TabScrollbar.tsx'
 import { countableUnreadIds, EMPTY_UNREAD_SESSION_IDS, groupUnreadSessionIds } from './unreadCounts.ts'
 
 /** Layout effect in the browser, plain effect during a server render. */
@@ -327,6 +328,7 @@ export function NativeTabBar({
   const [layout, setLayout] = useState<BarLayout | undefined>(undefined)
   const [obstructed, setObstructed] = useState<string | undefined>(undefined)
   const barRef = useRef<HTMLDivElement | null>(null)
+  const tabsRef = useRef<HTMLDivElement | null>(null)
   const trailingRef = useRef<HTMLDivElement | null>(null)
 
   // Measure the frame (and only the frame). The result depends solely on the
@@ -481,7 +483,7 @@ export function NativeTabBar({
           width is clamped to the visible viewport, so the trailing cluster stays
           on screen at any size. */}
 
-      <div className="dsh-md-native-tabs" role="tablist" aria-label={t('nativeTabsLabel')}>
+      <div className="dsh-md-native-tabs" role="tablist" aria-label={t('nativeTabsLabel')} ref={tabsRef}>
         <div className="dsh-md-native-tab-item">
           <Pill
             active={localActive}
@@ -596,6 +598,11 @@ export function NativeTabBar({
 
         {settingsButton}
       </div>
+
+      {/* Overlay scrollbar for the strip. Absolute inside the bar (which is the
+          fixed containing block), so it adds a paint layer and no layout: the
+          pills keep the exact box they had before. Hidden until hovered. */}
+      <TabScrollbar scrollerRef={tabsRef} barRef={barRef} />
     </div>
   )
 

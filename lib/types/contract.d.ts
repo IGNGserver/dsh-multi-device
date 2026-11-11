@@ -291,6 +291,15 @@ export interface MultiDeviceUiPreferences {
      * remote Sessions.
      */
     readonly crossHostReadState: boolean;
+    /**
+     * Replace the window/taskbar title with the aggregate of every device's
+     * Session status, using exactly the three categories the tab capsule shows
+     * (needs reply, running, finished-unread). Off by default: the title then
+     * keeps naming the conversation on screen, which is what a single-window
+     * desktop expects. A category with no members is omitted, and an all-zero
+     * aggregate leaves the title to DSH.
+     */
+    readonly taskbarSummary: boolean;
 }
 /** Complete Hub snapshot returned to the Client UI. */
 export interface MultiDeviceSnapshot {

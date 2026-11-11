@@ -163,6 +163,7 @@ interface PersistedRegistryDocument {
 
 const DEFAULT_UI_PREFERENCES: MultiDeviceUiPreferences = {
   crossHostReadState: false,
+  taskbarSummary: false,
 }
 
 /**
@@ -1712,6 +1713,9 @@ export class DeviceRegistry {
       crossHostReadState: patch.crossHostReadState === undefined
         ? this.uiPreferences.crossHostReadState
         : patch.crossHostReadState === true,
+      taskbarSummary: patch.taskbarSummary === undefined
+        ? this.uiPreferences.taskbarSummary
+        : patch.taskbarSummary === true,
     }
     try { this.saveToDisk() }
     catch (error) { this.uiPreferences = previous; throw error }
@@ -1906,7 +1910,10 @@ export class DeviceRegistry {
         }
       }
       if (raw.ui && typeof raw.ui === 'object') {
-        this.uiPreferences = { crossHostReadState: raw.ui.crossHostReadState === true }
+        this.uiPreferences = {
+          crossHostReadState: raw.ui.crossHostReadState === true,
+          taskbarSummary: raw.ui.taskbarSummary === true,
+        }
       }
       const persistedCatalogDocument = this.catalogStorage.read<Parameters<typeof decodeCatalogDocument>[0]>()
       const restoredCatalogs = persistedCatalogDocument !== undefined

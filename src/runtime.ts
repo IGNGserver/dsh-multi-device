@@ -231,7 +231,7 @@ export function validateControlPlanePayload(request: ControlPlaneRequest): void 
     case 'markDeviceRead': case 'removeDevice': case 'reconnectDevice': payloadString(payload, 'deviceId', true, 512); break
     case 'authenticateDevice': payloadString(payload, 'deviceId', true, 512); payloadString(payload, 'credential', false, 1024 * 1024, true); break
     case 'upsertDevice': case 'testDevice': validateDeviceInput(payload); break
-    case 'setUiPreferences': payloadBoolean(payload, 'crossHostReadState'); break
+    case 'setUiPreferences': payloadBoolean(payload, 'crossHostReadState'); payloadBoolean(payload, 'taskbarSummary'); break
     default: break
   }
 }
@@ -497,6 +497,9 @@ export class MultiDeviceControlPlane {
           this.registry.updateUiPreferences({
             ...(typeof payload.crossHostReadState === 'boolean'
               ? { crossHostReadState: payload.crossHostReadState }
+              : {}),
+            ...(typeof payload.taskbarSummary === 'boolean'
+              ? { taskbarSummary: payload.taskbarSummary }
               : {}),
           })
           return { ok: true, value: this.registry.snapshot(clientId) }

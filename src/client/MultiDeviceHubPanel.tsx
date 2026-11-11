@@ -682,6 +682,21 @@ export function MultiDeviceHubPanel({
       <div className="dsh-md-pref-list">
         <div className="dsh-md-pref-row">
           <div>
+            <div className="dsh-md-pref-title">{t('taskbarSummaryTitle')}</div>
+            <div className="dsh-md-pref-desc">{t('taskbarSummaryDesc')}</div>
+          </div>
+          <Switch
+            checked={snapshot.ui?.taskbarSummary === true}
+            label={t('taskbarSummaryTitle')}
+            onChange={(enabled) => {
+              void clientStore.setUiPreferences({ taskbarSummary: enabled }).then((res) => {
+                if (!res.ok) pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
+              })
+            }}
+          />
+        </div>
+        <div className="dsh-md-pref-row">
+          <div>
             <div className="dsh-md-pref-title">{t('crossHostReadStateTitle')}</div>
             <div className="dsh-md-pref-desc">{t('crossHostReadStateDesc')}</div>
           </div>

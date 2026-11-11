@@ -1,5 +1,14 @@
 /**
- * Window/taskbar title while a remote device tab is active.
+ * Window/taskbar title for the local shell window.
+ *
+ * Three owners, in priority order:
+ *
+ * 1. The opt-in taskbar summary (`ui.taskbarSummary`): one aggregate of every
+ *    device's Session status, e.g. `1跑 2结`, using the same categories as the
+ *    tab capsule. It deliberately carries no product name — the strip's own
+ *    counts are the whole message, and the taskbar already shows the app icon.
+ * 2. A remote device tab: that device's own page title, reported by the bridge.
+ * 3. Nothing: DSH keeps `document.title` naming the local conversation.
  *
  * DSH's layout owns `document.title` and derives it from the *local* Session
  * list. A remote page lives in a cross-origin frame, so its title never reaches
@@ -9,8 +18,10 @@
  *
  * @module dsh-multi-device/client/windowTitle
  */
-import type { DeviceId, DeviceView } from '../contract.ts'
+import type { DeviceId, DeviceView, MultiDeviceSnapshot } from '../contract.ts'
+import type { MultiDeviceLocaleKey } from './locales.ts'
 import { clientStore, type MultiDeviceClientState } from './state.ts'
+import { formatTaskbarSummary, tallyTaskbarSessions, type TaskbarTranslate } from './taskbarSummary.ts'
 
 /** Shortest useful title; longer values are bounded to keep taskbars sane. */
 const MAX_TITLE_LENGTH = 300
@@ -29,19 +40,40 @@ function cleanTitle(value: string | undefined): string | undefined {
 export interface WindowTitleInput {
   readonly activeNativeDeviceId?: DeviceId
   readonly devices: readonly DeviceView[]
+  /**
+   * Aggregate task line when the taskbar-summary preference is on. `undefined`
+   * means the preference is off, or nothing is running/waiting/unread.
+   */
+  readonly summary?: string
 }
 
 /**
  * Pick the title the local window should show, or `undefined` to leave DSH in
- * charge. A missing bridge title falls back to the device name so the window
- * never shows the local conversation's title while a remote tab is active.
+ * charge. The aggregate wins over the remote page title: it already covers
+ * every device, including the one on screen.
  */
 export function resolveWindowTitle(input: WindowTitleInput): string | undefined {
+  const summary = cleanTitle(input.summary)
+  if (summary !== undefined) return summary
   if (input.activeNativeDeviceId === undefined) return undefined
   const device = input.devices.find(candidate => candidate.id === input.activeNativeDeviceId)
   if (device === undefined) return undefined
   const remoteTitle = device.state === 'connected' ? cleanTitle(device.nativePaneTitle) : undefined
   return remoteTitle ?? cleanTitle(device.name)
+}
+
+/**
+ * The aggregate line for one snapshot, or `undefined` to leave the title alone.
+ *
+ * Reads only the Host-published projection, so a toggle flip or a device count
+ * change repaints the title without any extra request.
+ */
+export function resolveTaskbarSummary(
+  snapshot: MultiDeviceSnapshot,
+  t: TaskbarTranslate,
+): string | undefined {
+  if (snapshot.ui?.taskbarSummary !== true) return undefined
+  return formatTaskbarSummary(tallyTaskbarSessions(snapshot), t)
 }
 
 /**
@@ -145,18 +177,25 @@ export class DocumentTitleController {
   }
 }
 
-/** Install the Host/bridge-aware window title and return its cleanup. */
-export function installWindowTitle(): () => void {
+/**
+ * Install the Host/bridge-aware window title and return its cleanup.
+ *
+ * `t` is needed for the opt-in aggregate: the title is localized copy, not a
+ * fixed string, and the same dictionary the tab strip uses.
+ */
+export function installWindowTitle(t: (key: MultiDeviceLocaleKey) => string): () => void {
   const controller = new DocumentTitleController()
   if (!controller.install()) return () => {}
   const sync = (): void => {
     const state: MultiDeviceClientState = clientStore.getSnapshot()
     try {
+      const summary = resolveTaskbarSummary(state.snapshot, t)
       controller.apply(resolveWindowTitle({
         ...(state.activeNativeDeviceId !== undefined
           ? { activeNativeDeviceId: state.activeNativeDeviceId }
           : {}),
         devices: state.snapshot.devices,
+        ...(summary !== undefined ? { summary } : {}),
       }))
     } catch {
       // A title must never break the rest of the plugin.
