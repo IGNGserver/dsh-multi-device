@@ -36,10 +36,21 @@ export interface SessionsServiceLike {
   refresh?(): Promise<void>
 }
 
-/** The `uiWorkspace` operations used by the device picker. */
+/** The workspace view actions DSH 0.2.x exposes on `uiWorkspace.view`. */
+export interface WorkspaceViewActionsLike {
+  setGroupExpanded?(key: string, expanded: boolean): void
+  retainAccountKeys?(keys: readonly string[]): void
+  setGroupBy?(mode: string): void
+  setOrderBy?(mode: string, initialOrders?: Readonly<Record<string, readonly string[]>>): void
+  setArchivedFilter?(filter: string): void
+}
+
+/** The `uiWorkspace` operations used by the device picker and view-state sync. */
 export interface UiWorkspaceServiceLike {
   openSession(sessionId: string): void
   startSession?(workspaceId?: string): void
+  /** DSH's sidebar viewing store; absent on incompatible versions. */
+  readonly view?: WorkspaceViewActionsLike
 }
 
 export interface BoundClientServices {

@@ -1,4 +1,4 @@
-import { type DeviceAuthState, type DeviceCatalogCache, type DeviceConfig, DeviceId, type DeviceView, type MultiDeviceSnapshot, type MultiDeviceUiPreferences, type SshKeyEntry, type UpsertDeviceInput } from '../contract.ts';
+import { type DeviceAuthState, type DeviceCatalogCache, type DeviceConfig, DeviceId, type DeviceView, type MultiDeviceSnapshot, type MultiDeviceUiPreferences, type SshKeyEntry, type UpsertDeviceInput, type WorkspaceViewState } from '../contract.ts';
 import { type DeviceAttentionView, type SessionAttentionFact } from '../attention.ts';
 import { DeviceAuthManager } from './auth.ts';
 import { NativeProxyManager } from './native-proxy.ts';
@@ -77,6 +77,9 @@ export declare class DeviceRegistry {
     private readonly lastDeviceStates;
     /** Host-owned fold state per device, restored into the framed page before its first render. */
     private readonly nativeGroups;
+    /** Host-owned sidebar view state per scope; `local` plus one record per remote transport. */
+    private readonly uiScopes;
+    private uiClock;
     private readonly remoteRunningEvidence;
     private readonly completionBindings;
     private readonly completionBindingOffsets;
@@ -98,6 +101,13 @@ export declare class DeviceRegistry {
     private readonly sharedReadStateInFlight;
     private readonly sharedReadStateInitialized;
     private readonly sharedReadStatePushTimers;
+    /** Optional Controller-to-Controller view-state files on passive SSH remotes. */
+    private uiSyncTimer;
+    private readonly uiSyncInFlight;
+    private readonly uiSyncDirty;
+    private readonly uiSyncInitialized;
+    private readonly uiSyncPushTimers;
+    private readonly uiSyncFailures;
     private readonly storage;
     private readonly catalogStorage;
     private catalogWrite;
@@ -220,6 +230,33 @@ export declare class DeviceRegistry {
      * through revisions would re-render every sidebar row on each fold click.
      */
     private setNativeGroupState;
+    /**
+     * This Host's own sidebar view state, applied by the client entry.
+     *
+     * Remote scopes are deliberately not part of the shell snapshot: they belong
+     * to a cross-origin framed page and travel through its bridge instead.
+     */
+    localUiState(): WorkspaceViewState | undefined;
+    /**
+     * Accept a view-state report from this Host's own page.
+     *
+     * The browser is the only place that can observe DSH's workspace actions, so
+     * it reports the resulting state here; the Host stamps fields with an HLC and
+     * republishes one snapshot to every attached browser tab.
+     */
+    patchLocalUiState(patch: WorkspaceViewState): {
+        ok: true;
+        state?: WorkspaceViewState;
+    } | {
+        ok: false;
+        error: string;
+    };
+    /** Scope key for one configured device; transport identity, not local id. */
+    private uiScopeKey;
+    /** View state sent into one framed page before its first render. */
+    uiStateForDevice(deviceId: DeviceId): WorkspaceViewState | undefined;
+    /** Accept a view-state report from one framed page and mirror it to peers. */
+    private setDeviceUiState;
     /** Raw remote Session IDs that are unread on one device. */
     private unreadForDevice;
     private completionsForDevice;
@@ -257,6 +294,14 @@ export declare class DeviceRegistry {
      */
     /** Seed the transition baseline from a cached catalog without marking it unread. */
     private seedRunningFromCatalog;
+    /**
+     * Resolve the remote DSH home without assuming the OS home is `$DSH_HOME`.
+     *
+     * `host.home` from DSH's ready frame is `homedir()`, not the DSH data
+     * directory. Prefer the device's explicit `remoteDshHome`, then the default
+     * `~/.dsh`. Non-POSIX remotes are unsupported by the SSH file transport.
+     */
+    private remoteDshHomeFor;
     /** One pull+push per connection once the remote home is known. */
     private maybeInitializeSharedReadState;
     private sharedReadStateTarget;
@@ -272,6 +317,25 @@ export declare class DeviceRegistry {
      */
     private pushSharedReadState;
     private mergeSharedReadDocument;
+    /**
+     * Optional Controller-to-Controller view-state sync.
+     *
+     * The remote only stores files; it never runs this plugin. Each Controller
+     * owns one file, so no read-modify-write race can erase a peer's fold. The
+     * files are only written when the user opts in.
+     */
+    private uiSyncTarget;
+    private maybeInitializeUiSync;
+    private scheduleUiSyncPush;
+    /** Merge every peer Controller document found on one remote. */
+    private pullUiSync;
+    /** Write this Controller's remote scopes into one remote; never peers' files. */
+    private pushUiSync;
+    /** Per-field merge of peer documents; returns whether anything moved. */
+    private mergeUiSyncScopes;
+    private applyUiScopesToDevices;
+    /** Start/stop the optional 15s Controller scan when the preference changes. */
+    private syncUiSyncTimer;
     /** Start/stop the 30s remote scan when the preference changes. */
     private syncSharedReadStateTimer;
     private schedulePersist;

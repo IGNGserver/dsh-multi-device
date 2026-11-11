@@ -19,6 +19,7 @@
  *
  * @module dsh-multi-device/host/native-bridge
  */
+import type { WorkspaceViewState } from '../contract.ts';
 /** Path the proxy serves the bridge script from (root-relative inside the frame). */
 export declare const NATIVE_BRIDGE_SCRIPT_PATH = "/__md/bridge.js";
 /** Same-origin WebSocket the bridge opens to receive commands. */
@@ -42,6 +43,8 @@ export declare function sanitizeReadCompletions(value: unknown): Record<string, 
 export interface NativeBridgeScriptState {
     /** Explicit workspace fold state last observed by the Host. */
     readonly groups?: Readonly<Record<string, boolean>>;
+    /** Full Host-owned sidebar view state; preferred over `groups` when present. */
+    readonly uiState?: WorkspaceViewState;
     /** Raw remote Session IDs whose completion is currently unread. */
     readonly unread?: readonly string[];
     /** All current completion tokens, including already-read completions. */

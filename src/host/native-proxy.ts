@@ -33,7 +33,8 @@ import type { Duplex } from 'node:stream'
 import { brotliDecompress, gunzip, inflate } from 'node:zlib'
 import { promisify } from 'node:util'
 import { WebSocket, WebSocketServer } from 'ws'
-import type { DeviceConfig, DeviceId, NativePaneState } from '../contract.ts'
+import type { DeviceConfig, DeviceId, NativePaneState, WorkspaceViewState } from '../contract.ts'
+import { sanitizeWorkspaceViewState, sameWorkspaceViewState } from '../contract.ts'
 import { DeviceAuthManager, resolveRemoteAuthority } from './auth.ts'
 import {
   buildNativeBridgeScript,
@@ -140,6 +141,7 @@ type NativeBridgeInbound =
   | ({ readonly type: 'navigation' } & NativeBridgeNavigation)
   | { readonly type: 'selection'; readonly sessionId?: string | null }
   | { readonly type: 'group-expansion'; readonly groups?: unknown }
+  | { readonly type: 'ui-state'; readonly state?: unknown }
   | { readonly type: 'read'; readonly sessionId?: string; readonly completionId?: string; readonly requestId?: string }
   | { readonly type: 'title'; readonly title?: string }
   | { readonly type: 'visibility'; readonly visible?: boolean }
@@ -150,6 +152,7 @@ type NativeBridgeOutbound =
   | { readonly type: 'refresh' }
   | { readonly type: 'set-embedded'; readonly enabled: boolean }
   | { readonly type: 'group-expansion'; readonly groups: Record<string, boolean> }
+  | { readonly type: 'ui-state'; readonly state: WorkspaceViewState }
   | { readonly type: 'read-state'; readonly unreadSessionIds: readonly string[]; readonly readCompletions?: Readonly<Record<string, string>> }
   | ({ readonly type: 'read-ack'; readonly sessionId: string; readonly requestId?: string; readonly completionId?: string } & NativeBridgeReadResult)
 
@@ -188,6 +191,10 @@ export interface NativeProxyHooks {
   readonly getGroupState?: (deviceId: DeviceId) => Readonly<Record<string, boolean>> | undefined
   /** The framed page reported a fold change the Host should persist. */
   readonly onGroupState?: (deviceId: DeviceId, groups: Record<string, boolean>) => void
+  /** Last Host-owned sidebar view state (fold + modes) for the bridge's first render. */
+  readonly getUiState?: (deviceId: DeviceId) => WorkspaceViewState | undefined
+  /** The framed page reported a full view-state change the Host should persist. */
+  readonly onUiState?: (deviceId: DeviceId, state: WorkspaceViewState) => void
   /** Raw remote Session IDs whose completion is unread on the Host. */
   readonly getUnreadState?: (deviceId: DeviceId) => readonly string[] | undefined
   /** Current completion tokens, including completions already read. */
@@ -245,6 +252,8 @@ export class NativeDeviceProxy {
   private readonly readyBridgeClients = new Set<WebSocket>()
   /** Host-owned workspace fold state, applied before the remote page's first render. */
   private groupState: Record<string, boolean> = {}
+  /** Host-owned sidebar view state, applied before the remote page's first render. */
+  private uiState: WorkspaceViewState = { groups: {} }
   /** Host-owned raw Session IDs whose completion is unread. */
   private unreadState: readonly string[] = []
   private readCompletions: Readonly<Record<string, string>> | undefined
@@ -265,7 +274,15 @@ export class NativeDeviceProxy {
   }
 
   private refreshHostState(device: DeviceConfig): void {
-    this.groupState = sanitizeGroupState(this.hooks.getGroupState?.(device.id))
+    const uiState = this.hooks.getUiState?.(device.id)
+    if (uiState !== undefined) {
+      this.uiState = sanitizeWorkspaceViewState(uiState)
+      this.groupState = this.uiState.groups
+    } else {
+      // Older Hosts/tests only expose the fold map; keep it authoritative.
+      this.groupState = sanitizeGroupState(this.hooks.getGroupState?.(device.id))
+      this.uiState = { groups: this.groupState }
+    }
     this.unreadState = this.hooks.getUnreadState?.(device.id) ?? []
     const completions = this.hooks.getReadCompletions?.(device.id)
     this.readCompletions = completions === undefined ? undefined : sanitizeReadCompletions(completions)
@@ -517,7 +534,20 @@ export class NativeDeviceProxy {
     const next = sanitizeGroupState(groups)
     if (sameGroupState(this.groupState, next)) return
     this.groupState = next
+    this.uiState = { ...this.uiState, groups: next }
     this.sendToBridge({ type: 'group-expansion', groups: next })
+  }
+
+  /** Apply Host-owned fold/group/sort/filter state to the framed page. */
+  setUiState(state: WorkspaceViewState): void {
+    const next = sanitizeWorkspaceViewState(state)
+    if (sameWorkspaceViewState(this.uiState, next)) return
+    this.uiState = next
+    this.groupState = next.groups
+    // Old cached pages only understand the fold frame; new pages ignore the
+    // duplicate and use the full state.
+    this.sendToBridge({ type: 'group-expansion', groups: next.groups })
+    this.sendToBridge({ type: 'ui-state', state: next })
   }
 
   /** Apply Host-owned unread state to the framed page. */
@@ -663,7 +693,8 @@ export class NativeDeviceProxy {
         'x-content-type-options': 'nosniff',
       })
       res.end(buildNativeBridgeScript({
-        groups: this.groupState,
+        groups: this.uiState.groups,
+        uiState: this.uiState,
         unread: this.unreadState,
         readCompletions: this.readCompletions,
       }))
@@ -1043,6 +1074,7 @@ export class NativeDeviceProxy {
         }
         // Initialization belongs to this new socket, never existing pages.
         this.sendToSocket(ws, { type: 'set-embedded', enabled: state.embedded })
+        this.sendToSocket(ws, { type: 'ui-state', state: this.uiState })
         this.sendToSocket(ws, { type: 'group-expansion', groups: this.groupState })
         const tokens = this.hooks.getReadCompletions?.(this.device.id) ?? this.readCompletions
         this.sendToSocket(ws, {
@@ -1089,6 +1121,15 @@ export class NativeDeviceProxy {
           this.hooks.onGroupState(this.device.id, groups)
         } else {
           this.setGroupState(groups)
+        }
+        return
+      }
+      if (message.type === 'ui-state') {
+        const next = sanitizeWorkspaceViewState(message.state)
+        if (this.hooks.onUiState !== undefined) {
+          this.hooks.onUiState(this.device.id, next)
+        } else {
+          this.setUiState(next)
         }
         return
       }
@@ -1439,6 +1480,11 @@ export class NativeProxyManager {
   /** Push Host-owned fold state to the device's framed page(s). */
   setGroupState(deviceId: DeviceId, groups: Readonly<Record<string, boolean>>): void {
     this.proxies.get(deviceId)?.setGroupState(groups)
+  }
+
+  /** Push the full Host-owned view state to the device's framed page(s). */
+  setUiState(deviceId: DeviceId, state: WorkspaceViewState): void {
+    this.proxies.get(deviceId)?.setUiState(state)
   }
 
   /** Push Host-owned unread Session IDs to the device's framed page(s). */

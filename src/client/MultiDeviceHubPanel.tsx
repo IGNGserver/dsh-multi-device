@@ -710,6 +710,21 @@ export function MultiDeviceHubPanel({
             }}
           />
         </div>
+        <div className="dsh-md-pref-row">
+          <div>
+            <div className="dsh-md-pref-title">{t('crossHostUiStateTitle')}</div>
+            <div className="dsh-md-pref-desc">{t('crossHostUiStateDesc')}</div>
+          </div>
+          <Switch
+            checked={snapshot.ui?.crossHostUiState === true}
+            label={t('crossHostUiStateTitle')}
+            onChange={(enabled) => {
+              void clientStore.setUiPreferences({ crossHostUiState: enabled }).then((res) => {
+                if (!res.ok) pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
+              })
+            }}
+          />
+        </div>
       </div>
       <div className="dsh-md-devices-block">
         <div className="dsh-md-devices-header">

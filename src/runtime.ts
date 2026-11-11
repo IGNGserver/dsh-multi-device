@@ -17,6 +17,7 @@ import type {
   MultiDeviceSnapshot,
   UpsertDeviceInput,
 } from './contract.ts'
+import { sanitizeWorkspaceViewState } from './contract.ts'
 import type { DeviceRegistry } from './host/registry.ts'
 
 export const MULTI_DEVICE_API_PATH = '/multi-device/api'
@@ -133,13 +134,14 @@ export interface ControlPlaneRequest {
     | 'markSessionRead'
     | 'markDeviceRead'
     | 'setUiPreferences'
+    | 'patchUiState'
   readonly payload?: Record<string, unknown>
 }
 
 const CONTROL_ACTIONS: ReadonlySet<string> = new Set<ControlPlaneRequest['action']>([
   'snapshot', 'diagnostics', 'upsertDevice', 'removeDevice', 'reconnectDevice',
   'authenticateDevice', 'testDevice', 'listSshKeys', 'setActiveSession',
-  'markSessionRead', 'markDeviceRead', 'setUiPreferences',
+  'markSessionRead', 'markDeviceRead', 'setUiPreferences', 'patchUiState',
 ])
 
 /** Validate the transport envelope before TypeScript erases its runtime types. */
@@ -231,7 +233,10 @@ export function validateControlPlanePayload(request: ControlPlaneRequest): void 
     case 'markDeviceRead': case 'removeDevice': case 'reconnectDevice': payloadString(payload, 'deviceId', true, 512); break
     case 'authenticateDevice': payloadString(payload, 'deviceId', true, 512); payloadString(payload, 'credential', false, 1024 * 1024, true); break
     case 'upsertDevice': case 'testDevice': validateDeviceInput(payload); break
-    case 'setUiPreferences': payloadBoolean(payload, 'crossHostReadState'); payloadBoolean(payload, 'taskbarSummary'); break
+    case 'setUiPreferences':
+      payloadBoolean(payload, 'crossHostReadState'); payloadBoolean(payload, 'crossHostUiState'); payloadBoolean(payload, 'taskbarSummary')
+      break
+    case 'patchUiState': payloadObject(payload.state, 'state'); break
     default: break
   }
 }
@@ -493,10 +498,20 @@ export class MultiDeviceControlPlane {
         case 'listSshKeys':
           return { ok: true, value: { keys: this.registry.listSshKeys() } }
 
+        case 'patchUiState': {
+          const state = sanitizeWorkspaceViewState(payload.state)
+          const res = this.registry.patchLocalUiState(state)
+          if (!res.ok) return res
+          return { ok: true, value: this.registry.snapshot(clientId) }
+        }
+
         case 'setUiPreferences': {
           this.registry.updateUiPreferences({
             ...(typeof payload.crossHostReadState === 'boolean'
               ? { crossHostReadState: payload.crossHostReadState }
+              : {}),
+            ...(typeof payload.crossHostUiState === 'boolean'
+              ? { crossHostUiState: payload.crossHostUiState }
               : {}),
             ...(typeof payload.taskbarSummary === 'boolean'
               ? { taskbarSummary: payload.taskbarSummary }

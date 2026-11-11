@@ -80,6 +80,8 @@ export declare const zh: {
     readonly bridgeFailedReload: "重新加载";
     readonly crossHostReadStateTitle: "跨 DSH Host 同步未读状态";
     readonly crossHostReadStateDesc: "仅在多台电脑各自运行 DSH Host 时需要。开启后通过现有 SSH 在能识别 POSIX DSH 家目录的远端设备上保存一个只含会话 ID 与时间戳的状态文件；不安装远端插件，也不上传消息内容。默认关闭。";
+    readonly crossHostUiStateTitle: "跨控制机同步界面状态";
+    readonly crossHostUiStateDesc: "仅在多台电脑都作为控制机、各自安装本插件时需要。把远端页面的折叠/分组/排序/归档过滤写入远端 DSH 家目录的一个小文件，供其他控制机读取；远端不安装插件、不运行守护进程，也只含界面状态。默认关闭。";
     readonly savedNotice: "设置已保存";
     readonly actionFailed: "操作失败";
     readonly authRequired: "需要登录";
