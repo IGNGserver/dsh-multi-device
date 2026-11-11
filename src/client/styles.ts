@@ -692,6 +692,88 @@ html[data-platform='darwin'] .dsh-md-native-bar {
   display: none;
 }
 
+/*
+ * Overlay scrollbar for the device strip.
+ *
+ * Absolutely positioned inside the bar — the bar is fixed, so it is the
+ * containing block — and *not* inside the tab scroller: a positioned child of
+ * the scroller would be dragged along by scrollLeft, and an in-flow one would
+ * change the row's height. Nothing here takes part in the bar's flex layout,
+ * which is what keeps every pill at the exact box it had before.
+ *
+ * Hidden by default; the bar's hover/focus reveals it, a drag holds it open,
+ * and data-active covers the no-hover case. The thumb, not the track, owns
+ * pointer events, so the 3px strip never steals a tab click.
+ */
+.dsh-md-native-tab-scroll {
+  position: absolute;
+  bottom: 2px;
+  height: 3px;
+  z-index: 2;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+  -webkit-app-region: no-drag;
+}
+
+.dsh-md-native-tab-scroll-thumb {
+  height: 100%;
+  border-radius: 999px;
+  background: var(
+    --dsw-alias-scrollbar-bg-l2,
+    color-mix(in srgb, var(--dsw-alias-label-tertiary) 55%, transparent)
+  );
+  pointer-events: none;
+  cursor: grab;
+}
+
+.dsh-md-native-bar:hover .dsh-md-native-tab-scroll[data-scrollable='true'],
+.dsh-md-native-bar:focus-within .dsh-md-native-tab-scroll[data-scrollable='true'],
+.dsh-md-native-tab-scroll[data-dragging='true'] {
+  opacity: 1;
+}
+
+.dsh-md-native-bar:hover .dsh-md-native-tab-scroll[data-scrollable='true'] .dsh-md-native-tab-scroll-thumb,
+.dsh-md-native-bar:focus-within .dsh-md-native-tab-scroll[data-scrollable='true'] .dsh-md-native-tab-scroll-thumb,
+.dsh-md-native-tab-scroll[data-dragging='true'] .dsh-md-native-tab-scroll-thumb {
+  pointer-events: auto;
+}
+
+.dsh-md-native-tab-scroll-thumb:hover,
+.dsh-md-native-tab-scroll[data-dragging='true'] .dsh-md-native-tab-scroll-thumb {
+  background: var(
+    --dsw-alias-scrollbar-hover-l2,
+    color-mix(in srgb, var(--dsw-alias-label-secondary) 70%, transparent)
+  );
+}
+
+.dsh-md-native-tab-scroll[data-dragging='true'] .dsh-md-native-tab-scroll-thumb {
+  cursor: grabbing;
+}
+
+/*
+ * Touch: there is no hover, so the thumb appears for a moment after a pan.
+ * It stays non-interactive there — native panning is the gesture, and a 3px
+ * grab target would only compete with it. touch-action is deliberately left
+ * at its default so a vertical swipe starting on the strip still scrolls the
+ * page instead of being swallowed.
+ */
+@media (hover: none) {
+  .dsh-md-native-tab-scroll[data-scrollable='true'][data-active='true'] {
+    opacity: 1;
+  }
+
+  .dsh-md-native-tab-scroll-thumb {
+    pointer-events: none !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dsh-md-native-tab-scroll {
+    transition: none;
+  }
+}
+
 .dsh-md-native-bar-actions {
   display: inline-flex;
   align-items: center;

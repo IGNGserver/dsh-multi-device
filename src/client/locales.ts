@@ -109,6 +109,11 @@ export const zh = {
   pendingCount: '{count} 待回复',
   runningCount: '{count} 运行中',
   unreadCount: '{count} 完成未读',
+  taskbarSummaryTitle: '窗口标题显示任务汇总',
+  taskbarSummaryDesc: '开启后窗口与任务栏标题改为所有设备的任务计数，与标签胶囊同一口径：蓝＝运行中、黄＝待回复、绿＝完成未读，例如「1跑 2结」。没有成员的类别不显示，全部为零时仍显示会话名。默认关闭。',
+  taskbarRunningSegment: '{count}跑',
+  taskbarPendingSegment: '{count}待',
+  taskbarUnreadSegment: '{count}结',
 } as const
 
 export type MultiDeviceLocaleKey = keyof typeof zh
@@ -214,4 +219,9 @@ export const en: Record<MultiDeviceLocaleKey, string> = {
   pendingCount: '{count} needs reply',
   runningCount: '{count} running',
   unreadCount: '{count} finished, unread',
+  taskbarSummaryTitle: 'Show task totals in the window title',
+  taskbarSummaryDesc: 'Replaces the window and taskbar title with every device\'s task counts, the same categories as the tab capsule (blue running, amber needs reply, green finished-unread), for example "1 run 2 done". Empty categories are omitted and an all-zero tally keeps the conversation title. Off by default.',
+  taskbarRunningSegment: '{count} run',
+  taskbarPendingSegment: '{count} wait',
+  taskbarUnreadSegment: '{count} done',
 }

@@ -192,10 +192,12 @@ function applyClient(ctx: ClientContextLike): void {
 
   ctx.effect(() => ctx.locale.register(LOCALE_NS, { zh, en }), 'dsh-multi-device: locales')
   ctx.effect(() => clientStore.start(), 'dsh-multi-device: client-store')
-  ctx.effect(() => installWindowTitle(), 'dsh-multi-device: window title')
+  // Defined before the title effect: the opt-in taskbar aggregate is localized
+  // copy, so the title needs the same translate the strip renders with.
   const getTranslate = (): ((key: MultiDeviceLocaleKey) => string) => {
     try { return ctx.locale.bind?.(LOCALE_NS) ?? translateFallback } catch { return translateFallback }
   }
+  ctx.effect(() => installWindowTitle(getTranslate()), 'dsh-multi-device: window title')
   const handleOpenSettings = (): void => { openSettingsSection(ctx, SETTINGS_SECTION_ID) }
 
   // Publish DSH's Session store and navigation surface to the device UI.
