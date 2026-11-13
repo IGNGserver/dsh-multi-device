@@ -457,7 +457,8 @@ export function NativeTabBar({
     <Tooltip label={t('settingsSectionTitle')} side="bottom" align={compact ? 'start' : 'end'}>
       <Button
         variant="ghost"
-        size="icon"
+        size="sm"
+        className="dsh-md-icon-btn isCompact"
         aria-label={t('settingsSectionTitle')}
         onClick={onOpenSettings}
       >
@@ -548,7 +549,8 @@ export function NativeTabBar({
                   <Tooltip label={t('releaseKeepAlive')} side="bottom">
                     <Button
                       variant="ghost"
-                      size="icon"
+                      size="sm"
+                      className="dsh-md-icon-btn isCompact"
                       aria-label={t('releaseKeepAlive')}
                       onClick={() => clientStore.releaseKeepAliveDevice(dev.id)}
                     >
@@ -571,7 +573,8 @@ export function NativeTabBar({
             <Tooltip label={t('reloadPage')} side="bottom">
               <Button
                 variant="ghost"
-                size="icon"
+                size="sm"
+                className="dsh-md-icon-btn isCompact"
                 aria-label={t('reloadPage')}
                 onClick={() => clientStore.reloadNativeDevice(activeDevice.id)}
               >
@@ -582,7 +585,8 @@ export function NativeTabBar({
               <Tooltip label={t('openExternal')} side="bottom">
                 <Button
                   variant="ghost"
-                  size="icon"
+                  size="sm"
+                  className="dsh-md-icon-btn isCompact"
                   aria-label={t('openExternal')}
                   onClick={() => {
                     const access = assessBrowserNativeAccess({ pageUrl: window.location.href, proxyUrl: activeDevice.nativeProxyUrl, desktopGuest: getDesktopBrowserBridge() !== undefined })

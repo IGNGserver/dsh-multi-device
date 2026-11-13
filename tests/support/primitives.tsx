@@ -21,8 +21,18 @@ function passthrough(name: string) {
   return Component
 }
 
-export const Button = ({ children, icon, variant: _variant, size: _size, ...props }: AnyProps) =>
-  React.createElement('button', props, icon as ReactNode, children)
+export const Button = ({ children, icon, variant, size, ...props }: AnyProps) =>
+  React.createElement(
+    'button',
+    {
+      ...props,
+      type: (props.type as string | undefined) ?? 'button',
+      ...(variant !== undefined ? { 'data-variant': String(variant) } : {}),
+      ...(size !== undefined ? { 'data-size': String(size) } : {}),
+    },
+    icon as ReactNode,
+    children,
+  )
 export const Input = (props: AnyProps) => React.createElement('input', props)
 export const Switch = ({ checked, onChange, label }: AnyProps) =>
   React.createElement('button', {
@@ -62,8 +72,16 @@ export const Pill = ({ children, active, ...props }: AnyProps) =>
   React.createElement('button', { ...props, type: 'button', 'data-active': active === true ? 'true' : 'false' }, children)
 export const DisclosureRow = ({ title, open, children }: AnyProps) =>
   React.createElement('div', {}, title as ReactNode, open === true ? children as ReactNode : null)
-export const Modal = ({ open, title, children }: AnyProps) =>
-  open === true ? React.createElement('div', { role: 'dialog', 'aria-label': title as string }, children) : null
+export const Modal = ({ open, title, description, footer, children }: AnyProps) =>
+  open === true
+    ? React.createElement(
+        'div',
+        { role: 'dialog', 'aria-label': title as string },
+        description !== undefined ? React.createElement('p', {}, description as ReactNode) : null,
+        children,
+        footer !== undefined ? React.createElement('div', { 'data-modal-footer': 'true' }, footer as ReactNode) : null,
+      )
+    : null
 export const Toast = ({ text }: AnyProps) => React.createElement('div', { role: 'status' }, text as ReactNode)
 export const Tooltip = ({ children }: AnyProps) => React.createElement(React.Fragment, {}, children)
 export const MenuItemButton = ({ children, icon, onSelect, disabled }: AnyProps) =>

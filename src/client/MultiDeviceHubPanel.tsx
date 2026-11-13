@@ -124,8 +124,8 @@ function SecretCredentialInput({
       {value.length > 0 && (
         <Button
           variant="ghost"
-          size="icon"
-          className="dsh-md-secret-toggle"
+          size="sm"
+          className="dsh-md-icon-btn isCompact dsh-md-secret-toggle"
           aria-label={t(revealed ? 'keyHide' : 'keyReveal')}
           aria-pressed={revealed}
           disabled={disabled}
@@ -158,6 +158,7 @@ function DeviceEditorForm({
   t,
   onSaved,
   onCancel,
+  onRemove,
 }: {
   device?: DeviceView
   sshConfigHosts: readonly SshConfigHostEntry[]
@@ -165,6 +166,7 @@ function DeviceEditorForm({
   t: (key: MultiDeviceLocaleKey) => string
   onSaved: () => void
   onCancel: () => void
+  onRemove?: () => void
 }): React.ReactElement {
   const formId = useId()
   const [sshHost, setSshHost] = useState(device?.ssh?.host ?? '')
@@ -529,6 +531,18 @@ function DeviceEditorForm({
           >
             {testing ? t('testingConnection') : t('testConnection')}
           </Button>
+          {onRemove !== undefined && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="dsh-md-danger-action"
+              disabled={busy}
+              icon={<IconTrashOutlineRegular size={13} />}
+              onClick={onRemove}
+            >
+              {t('remove')}
+            </Button>
+          )}
           {testResult !== null && (
             testResult.ok ? (
               <span className="dsh-md-success-text">
@@ -826,7 +840,8 @@ export function MultiDeviceHubPanel({
                           <Tooltip label={t('clearUnread')} side="top">
                             <Button
                               variant="ghost"
-                              size="icon"
+                              size="sm"
+                              className="dsh-md-icon-btn"
                               aria-label={t('clearUnread')}
                               onClick={() => {
                                 void clientStore.markDeviceRead(dev.id).then((res) => {
@@ -849,7 +864,8 @@ export function MultiDeviceHubPanel({
                         <Tooltip label={t('reconnect')} side="top">
                           <Button
                             variant="ghost"
-                            size="icon"
+                            size="sm"
+                            className="dsh-md-icon-btn"
                             aria-label={t('reconnect')}
                             onClick={() => {
                               void clientStore.reconnectDevice(dev.id).then((res) => {
@@ -868,7 +884,8 @@ export function MultiDeviceHubPanel({
                         <Tooltip label={t('editDevice')} side="top">
                           <Button
                             variant="ghost"
-                            size="icon"
+                            size="sm"
+                            className="dsh-md-icon-btn"
                             aria-label={t('editDevice')}
                             aria-expanded={isEditing}
                             onClick={() => {
@@ -883,7 +900,8 @@ export function MultiDeviceHubPanel({
                         <Tooltip label={t('remove')} side="top">
                           <Button
                             variant="ghost"
-                            size="icon"
+                            size="sm"
+                            className="dsh-md-icon-btn isDanger"
                             aria-label={t('remove')}
                             onClick={() => {
                               setDeleteError(null)
@@ -912,6 +930,10 @@ export function MultiDeviceHubPanel({
                         pushToast(t('savedNotice'), 'success')
                       }}
                       onCancel={() => setEditingDeviceId(null)}
+                      onRemove={() => {
+                        setDeleteError(null)
+                        setDeleteTarget(dev)
+                      }}
                     />
                   )}
                 </li>
