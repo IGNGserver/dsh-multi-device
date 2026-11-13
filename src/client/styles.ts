@@ -169,6 +169,43 @@ const CSS_TEXT = `
   gap: 2px;
 }
 
+/*
+ * DSH's real Button primitive only supports 'sm' | 'md' sizes (size='icon'
+ * accidentally applies the inner 16x16 icon-span class onto <button> while
+ * keeping padding: 0 14px, collapsing child SVGs to 0px wide). Always render
+ * icon-only buttons with size='sm' plus this class to clear horizontal padding
+ * and protect the SVG box.
+ */
+.dsh-md-icon-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  flex: none;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.dsh-md-icon-btn:hover:not(:disabled) {
+  color: var(--dsw-alias-label-primary);
+}
+
+.dsh-md-icon-btn.isCompact {
+  width: 22px;
+  height: 22px;
+}
+
+.dsh-md-icon-btn.isDanger:hover:not(:disabled) {
+  color: var(--dsw-alias-state-error-primary, #ef4444);
+}
+
+.dsh-md-icon-btn svg {
+  flex: none;
+  display: block;
+}
+
+.dsh-md-danger-action {
+  color: var(--dsw-alias-state-error-primary, #ef4444);
+}
+
 .dsh-md-device-endpoint {
   display: inline-flex;
   align-items: center;
@@ -798,10 +835,9 @@ html[data-platform='darwin'] .dsh-md-native-bar {
 
 /*
  * The keep-alive release control exists only while that device's page is really
- * mounted, and it stays invisible until its tab is hovered or focused. The old
- * fixed slot reserved 26px on every keep-alive-capable tab for a button that
- * was usually absent; keeping the box in flow while fading only the glyph means
- * revealing it never reflows the strip under the pointer.
+ * mounted. Keep a fixed 22x22 slot in flow and render the button visibly at
+ * muted opacity so users can see and click it immediately without hovering
+ * blindly, brightening on tab hover or focus.
  */
 .dsh-md-tab-release {
   display: inline-flex;
@@ -810,15 +846,14 @@ html[data-platform='darwin'] .dsh-md-native-bar {
   width: 22px;
   height: 22px;
   flex: none;
-  opacity: 0;
-  pointer-events: none;
+  opacity: 0.6;
+  pointer-events: auto;
   transition: opacity 0.12s ease;
 }
 
 .dsh-md-native-tab-item:hover .dsh-md-tab-release,
 .dsh-md-native-tab-item:focus-within .dsh-md-tab-release {
   opacity: 1;
-  pointer-events: auto;
 }
 
 .dsh-md-pill-inner {

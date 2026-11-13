@@ -11,8 +11,8 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
   export type IconComponent = React.ComponentType<IconProps>
 
   export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
-    readonly variant?: 'primary' | 'outline' | 'ghost'
-    readonly size?: 'sm' | 'md' | 'toolbar' | 'icon'
+    readonly variant?: 'primary' | 'outline' | 'ghost' | 'toolbar'
+    readonly size?: 'sm' | 'md'
     readonly icon?: React.ReactNode
     readonly className?: string
     readonly children?: React.ReactNode
