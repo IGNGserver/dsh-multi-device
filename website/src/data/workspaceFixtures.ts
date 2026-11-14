@@ -1,0 +1,607 @@
+import type { DeviceRecord } from '../types'
+
+export function createInitialDevices(): DeviceRecord[] {
+  return [
+    {
+      id: '__local__',
+      name: '本机',
+      isLocal: true,
+      osLabel: 'macOS 15 · Apple M3 Max',
+      sshSummary: '127.0.0.1:3080 · Host Native DOM',
+      dshVersion: '0.2.1-rc.5',
+      connected: true,
+      stale: false,
+      enabled: true,
+      keepAliveMounted: true,
+      activeSessionId: 'local:sess-tab-geometry',
+      draftChip: '/plan',
+      draftText: '核对 macOS hiddenInset 红绿灯与顶部 42px 标签条的宽度自适应边界',
+      scatterPose: {
+        x: -230,
+        y: 36,
+        z: 40,
+        rotateX: 8,
+        rotateY: 16,
+        rotateZ: -2.2,
+        scale: 0.78,
+      },
+      workspaces: [
+        {
+          id: 'ws-local-plugin',
+          name: 'dsh-multi-device',
+          path: '~/dev/.wt/DSH多设备插件/native-audit',
+          branch: 'agent/native-audit',
+        },
+        {
+          id: 'ws-local-notes',
+          name: 'cordis-slot-bench',
+          path: '~/dev/cordis-slot-bench',
+          branch: 'main',
+        },
+      ],
+      sessions: [
+        {
+          id: 'local:sess-tab-geometry',
+          rawSessionId: 'sess-8f31c20a-local',
+          workspaceId: 'ws-local-plugin',
+          workspaceName: 'dsh-multi-device',
+          workspacePath: '~/dev/.wt/DSH多设备插件/native-audit',
+          title: {
+            zh: '重构顶部标签条 ResizeObserver 测量与遮挡探测',
+            en: 'Refine tab strip ResizeObserver metrics & obstruction probe',
+          },
+          updatedLabel: { zh: '刚刚', en: 'just now' },
+          status: 'idle',
+          model: 'DeepSeek-V3.2',
+          effort: 'High',
+          contextPercent: 28,
+          blocks: [
+            {
+              id: 'b1',
+              kind: 'user',
+              content: {
+                zh: '请确认顶部常驻标签条只从 Host 框架测量宽度，窗口先缩小到 680px 再拉回 1440px 时不会卡在旧宽度，并且尾部设置按钮始终不被挤出可视区。',
+                en: 'Verify the persistent tab strip measures solely from the Host frame box so shrinking to 680px and expanding back to 1440px restores full width while keeping the trailing Settings gear visible.',
+              },
+            },
+            {
+              id: 'b2',
+              kind: 'tool',
+              title: {
+                zh: '读取文件 · src/client/barMetrics.ts',
+                en: 'Read file · src/client/barMetrics.ts',
+              },
+              subtitle: 'lines 1–94 · 0.5ms',
+              status: 'done',
+              content: {
+                zh: '已核对 resolveBarLayout：width = min(frameWidth, viewportWidth - frameLeft)，与标签条自身 DOM 盒解耦。',
+                en: 'Verified resolveBarLayout: width = min(frameWidth, viewportWidth - frameLeft), decoupled from the bar’s own rendered box.',
+              },
+            },
+            {
+              id: 'b3',
+              kind: 'diff',
+              title: {
+                zh: '编辑补丁 · src/client/NativeViewport.tsx',
+                en: 'Patch · src/client/NativeViewport.tsx',
+              },
+              subtitle: '+6 −2 · ResizeObserver + elementFromPoint',
+              status: 'done',
+              content: {
+                zh: '在首帧绘制前使用 useLayoutEffect 对齐宿主左边界，并通过 elementFromPoint 记录尾部按钮遮挡诊断。',
+                en: 'Align left edge before first paint via useLayoutEffect and record trailing obstruction diagnostics.',
+              },
+              diffLines: [
+                { type: 'ctx', lineOld: 368, lineNew: 368, text: 'const resolved = resolveBarLayout({' },
+                { type: 'del', lineOld: 369, text: '  frameWidth: barRef.current?.offsetWidth ?? 0,' },
+                { type: 'add', lineNew: 369, text: '  frameLeft: rect?.left ?? 0,' },
+                { type: 'add', lineNew: 370, text: '  frameWidth: rect?.width ?? 0,' },
+                { type: 'ctx', lineOld: 370, lineNew: 371, text: '  viewportWidth: window.innerWidth,' },
+              ],
+            },
+            {
+              id: 'b4',
+              kind: 'assistant',
+              content: {
+                zh: '已完成验证：`本机` 页面保持原生三栏布局，本地侧边栏仅渲染本机自己的两个工作区，零远端会话混入；尾部齿轮簇固定 `flex: none`，任意缩放均可点击。',
+                en: 'Verified: This Device preserves the untouched native 3-column layout, the local sidebar lists strictly local workspaces with zero remote session injection, and the trailing gear stays clickable at every width.',
+              },
+            },
+          ],
+        },
+        {
+          id: 'local:sess-smoke-e2e',
+          rawSessionId: 'sess-41b9e012-local',
+          workspaceId: 'ws-local-plugin',
+          workspaceName: 'dsh-multi-device',
+          workspacePath: '~/dev/.wt/DSH多设备插件/native-audit',
+          title: {
+            zh: '完成双官方实例 Keep-Alive 浏览器隔离烟测',
+            en: 'Complete isolated two-server Keep-Alive browser smoke test',
+          },
+          updatedLabel: { zh: '5 分钟前', en: '5m ago' },
+          status: 'unread',
+          model: 'DeepSeek-V3.2',
+          effort: 'Medium',
+          contextPercent: 41,
+          blocks: [
+            {
+              id: 'l2-1',
+              kind: 'tool',
+              title: {
+                zh: '执行验证 · node scripts/smoke-device-browser.mjs',
+                en: 'Run verification · node scripts/smoke-device-browser.mjs',
+              },
+              subtitle: 'exit 0 · 14.2s · turn/end verified',
+              status: 'done',
+              content: {
+                zh: '已验证：[本机][Smoke remote device] 标签条渲染正常、切换至本机时远端 iframe 仅 display:none 不卸载、本地控制器未保留任何远端会话历史。',
+                en: 'Passed: [This Device][Smoke remote device] strip rendered, switching to This Device hid rather than unmounted the iframe, and zero remote history leaked locally.',
+              },
+            },
+            {
+              id: 'l2-2',
+              kind: 'assistant',
+              content: {
+                zh: '双实例端到端回归全部通过（`turn/end` 已落盘）。因为此前焦点在其他会话，本会话被标记为绿色「完成未读」，你刚打开它时已触发幂等已读回执清除计数。',
+                en: 'Two-instance E2E regression passed (`turn/end` persisted). Marked green "Finished, unread" while out of view, and cleared via idempotent read-ack upon opening.',
+              },
+            },
+          ],
+        },
+        {
+          id: 'local:sess-slot-order',
+          rawSessionId: 'sess-19c4d882-local',
+          workspaceId: 'ws-local-notes',
+          workspaceName: 'cordis-slot-bench',
+          workspacePath: '~/dev/cordis-slot-bench',
+          title: {
+            zh: '核对 shell.overlay 与 Menu/Modal z-index 层级预算',
+            en: 'Audit shell.overlay vs Menu/Modal z-index stacking budget',
+          },
+          updatedLabel: { zh: '48 分钟前', en: '48m ago' },
+          status: 'idle',
+          model: 'DeepSeek-V3.2',
+          effort: 'Low',
+          contextPercent: 16,
+          blocks: [
+            {
+              id: 'l3-1',
+              kind: 'assistant',
+              content: {
+                zh: '层级预算确认完毕：框内控件 ≤ 30 ＜ 常驻标签条 60 ＜ Tooltip/HoverCard 100 ＜ Modal 1000 ＜ 官方 Menu/Toast 1100。',
+                en: 'Stacking budget confirmed: in-frame controls ≤ 30 < Native Tab Bar 60 < Tooltip/HoverCard 100 < Modal 1000 < Official Menu/Toast 1100.',
+              },
+            },
+          ],
+        },
+      ],
+    },
+    {
+      id: 'ubuntu-dev',
+      name: 'ubuntu-dev',
+      osLabel: 'Ubuntu 24.04 LTS · EPYC 64C',
+      sshSummary: 'lvziw@ubuntu-dev → 127.0.0.1:3080',
+      proxyUrl: 'http://127.0.0.1:52184/?md_client=9f2a',
+      dshVersion: '0.2.1-rc.5',
+      latencyMs: 4,
+      connected: true,
+      stale: false,
+      enabled: true,
+      keepAliveMounted: true,
+      activeSessionId: 'remote:ubuntu-dev:sess-epoll-stream',
+      draftChip: '@src/mux/replay.rs',
+      draftText: '补充 epoch 连接换代单测：旧代际延迟到达的 HTTP 列表不得覆盖新代际目录',
+      scatterPose: {
+        x: -320,
+        y: -155,
+        z: -150,
+        rotateX: 14,
+        rotateY: 22,
+        rotateZ: -4.5,
+        scale: 0.72,
+      },
+      workspaces: [
+        {
+          id: 'ws-ubuntu-rpc',
+          name: 'kernel-rpc-gateway',
+          path: '/home/lvziw/dev/kernel-rpc-gateway',
+          branch: 'feat/zero-copy-mux',
+        },
+        {
+          id: 'ws-ubuntu-kv',
+          name: 'raft-wal-engine',
+          path: '/home/lvziw/dev/raft-wal-engine',
+          branch: 'main',
+        },
+      ],
+      sessions: [
+        {
+          id: 'remote:ubuntu-dev:sess-epoll-stream',
+          rawSessionId: 'sess-77a10f9c-ubu',
+          workspaceId: 'ws-ubuntu-rpc',
+          workspaceName: 'kernel-rpc-gateway',
+          workspacePath: '/home/lvziw/dev/kernel-rpc-gateway',
+          title: {
+            zh: '压测 epoll 零拷贝帧路由与背压队列吞吐',
+            en: 'Benchmark epoll zero-copy frame router & backpressure queue',
+          },
+          updatedLabel: { zh: '运行中', en: 'running' },
+          status: 'running',
+          subagentCount: 2,
+          model: 'DeepSeek-R1',
+          effort: 'High',
+          contextPercent: 62,
+          blocks: [
+            {
+              id: 'u1-1',
+              kind: 'user',
+              content: {
+                zh: '在 ubuntu-dev 本机 NVMe 构建区跑完整个 zero-copy mux 并发回归套件，并持续输出 P99 延迟采样。',
+                en: 'Run the full zero-copy mux concurrency suite on ubuntu-dev local NVMe scratch and stream P99 latency samples.',
+              },
+            },
+            {
+              id: 'u1-2',
+              kind: 'tool',
+              title: {
+                zh: '持久终端运行中 · cargo nextest run --workspace --release',
+                en: 'Persistent bash running · cargo nextest run --workspace --release',
+              },
+              subtitle: 'PID 48291 · 2 subagents active · WebSocket events.mux live',
+              status: 'ongoing',
+              code: `PASS [ 0.184s] mux_router::epoch_fencing_drops_stale_http_baseline
+PASS [ 0.312s] mux_router::journal_replays_increments_in_seq_order
+RUN  [ LIVE  ] mux_router::soak_64_concurrent_streams_backpressure ...`,
+              content: {
+                zh: '即便你切回「本机」或「gpu-a100」标签页，此远端页面的 WebSocket 实时流与下方草稿依然在后台持续保活推进。',
+                en: 'Even when you switch to This Device or gpu-a100, this remote page’s WebSocket stream and composer draft stay alive in the background.',
+              },
+            },
+          ],
+        },
+        {
+          id: 'remote:ubuntu-dev:sess-epoch-race',
+          rawSessionId: 'sess-52d08b14-ubu',
+          workspaceId: 'ws-ubuntu-rpc',
+          workspaceName: 'kernel-rpc-gateway',
+          workspacePath: '/home/lvziw/dev/kernel-rpc-gateway',
+          title: {
+            zh: '子代理巡检：排查断线重连期间的序号水位竞态',
+            en: 'Subagent audit: inspect seq watermark race across reconnects',
+          },
+          updatedLabel: { zh: '运行中', en: 'running' },
+          status: 'running',
+          subagentCount: 1,
+          model: 'DeepSeek-V3.2',
+          effort: 'High',
+          contextPercent: 49,
+          blocks: [
+            {
+              id: 'u2-1',
+              kind: 'tool',
+              title: {
+                zh: '子代理运行中 · Codebase Verifier',
+                en: 'Subagent running · Codebase Verifier',
+              },
+              subtitle: 'Scanning 18 transport modules on /home/lvziw/dev/kernel-rpc-gateway',
+              status: 'ongoing',
+              content: {
+                zh: '正在验证 per-session per-key 水位投影，确保缓存标题不会覆盖更新的有序事件标题。',
+                en: 'Verifying per-session per-key watermark projection so cached titles never overwrite newer ordered events.',
+              },
+            },
+          ],
+        },
+        {
+          id: 'remote:ubuntu-dev:sess-wal-report',
+          rawSessionId: 'sess-09e3c711-ubu',
+          workspaceId: 'ws-ubuntu-kv',
+          workspaceName: 'raft-wal-engine',
+          workspacePath: '/home/lvziw/dev/raft-wal-engine',
+          title: {
+            zh: '生成 WAL 段压缩与 fsync 原子替换基准报告',
+            en: 'Generate WAL segment compaction & atomic fsync benchmark report',
+          },
+          updatedLabel: { zh: '3 分钟前', en: '3m ago' },
+          status: 'unread',
+          model: 'DeepSeek-V3.2',
+          effort: 'Medium',
+          contextPercent: 35,
+          blocks: [
+            {
+              id: 'u3-1',
+              kind: 'assistant',
+              content: {
+                zh: '基准测试已在 `ubuntu-dev` 完成（`turn/end` 已确认）：`0600` 临时文件 + `fsync` + `rename` 原子替换在 10,000 次突发写入合并下实现零损坏恢复，P99 写放大降低 43%。',
+                en: 'Benchmark finished on `ubuntu-dev` (`turn/end` confirmed): `0600` temp file + `fsync` + `rename` atomic swap achieved zero corruption across 10k burst writes with 43% lower P99 write amplification.',
+              },
+            },
+          ],
+        },
+      ],
+    },
+    {
+      id: 'gpu-a100',
+      name: 'gpu-a100',
+      osLabel: 'Rocky Linux 9 · 4× NVIDIA A100 80GB',
+      sshSummary: 'research@gpu-a100 -J bastion → :3080',
+      proxyUrl: 'http://127.0.0.1:52191/?md_client=9f2a',
+      dshVersion: '0.2.1-rc.5',
+      latencyMs: 19,
+      connected: true,
+      stale: false,
+      enabled: true,
+      keepAliveMounted: true,
+      activeSessionId: 'remote:gpu-a100:sess-fp8-approval',
+      draftChip: '@bench_fp8.py',
+      draftText: '对比 batch=64 与 batch=128 下 NVLink All-to-All 的 P99 尾延迟曲线',
+      scatterPose: {
+        x: 295,
+        y: -135,
+        z: -110,
+        rotateX: 12,
+        rotateY: -22,
+        rotateZ: 3.8,
+        scale: 0.74,
+      },
+      workspaces: [
+        {
+          id: 'ws-gpu-moe',
+          name: 'moe-fp8-kernels',
+          path: '/srv/nvme0/moe-fp8-kernels',
+          branch: 'exp/dispatch-combine-v3',
+        },
+      ],
+      sessions: [
+        {
+          id: 'remote:gpu-a100:sess-fp8-approval',
+          rawSessionId: 'sess-c4109a3e-gpu',
+          workspaceId: 'ws-gpu-moe',
+          workspaceName: 'moe-fp8-kernels',
+          workspacePath: '/srv/nvme0/moe-fp8-kernels',
+          title: {
+            zh: '评测 4 卡 A100 FP8 Dispatch/Combine 算子吞吐',
+            en: 'Evaluate 4×A100 FP8 Dispatch/Combine kernel throughput',
+          },
+          updatedLabel: { zh: '待批准', en: 'Approval' },
+          status: 'pending',
+          pendingKind: 'approval',
+          model: 'DeepSeek-V3.2',
+          effort: 'High',
+          contextPercent: 54,
+          blocks: [
+            {
+              id: 'g1-1',
+              kind: 'user',
+              content: {
+                zh: '编译新版 CUDA warp-specialized combine 内核，并在 4 张 A100 上启动分布式吞吐对比。',
+                en: 'Compile the warp-specialized CUDA combine kernel and launch the 4×A100 distributed throughput benchmark.',
+              },
+            },
+            {
+              id: 'g1-2',
+              kind: 'tool',
+              title: {
+                zh: '编译完成 · ninja -C build moe_fp8_ext',
+                en: 'Build succeeded · ninja -C build moe_fp8_ext',
+              },
+              subtitle: 'sm_80 · ptxas 0 spill bytes · 3.8s',
+              status: 'done',
+              content: {
+                zh: 'FP8 内核扩展模块已在远端 /srv/nvme0/moe-fp8-kernels/build 编译就绪，准备占用 GPU 0–3 启动实测。',
+                en: 'FP8 kernel extension compiled cleanly on remote /srv/nvme0/moe-fp8-kernels/build; ready to allocate GPUs 0–3.',
+              },
+            },
+            {
+              id: 'g1-3',
+              kind: 'approval',
+              command:
+                'CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 bench_fp8_alltoall.py --tokens 8192 --warmup 20',
+              status: 'warning',
+              content: {
+                zh: '此会话处于黄色「待回复」状态，因此 gpu-a100 标签胶囊在最左侧高亮显示琥珀色 1。点击下方「允许一次」观察状态实时流转！',
+                en: 'This session awaits tool approval, lighting up the leftmost amber "1" in gpu-a100’s capsule. Click "Allow once" below to watch the live state transition!',
+              },
+            },
+          ],
+        },
+        {
+          id: 'remote:gpu-a100:sess-nccl-trace',
+          rawSessionId: 'sess-902f4b81-gpu',
+          workspaceId: 'ws-gpu-moe',
+          workspaceName: 'moe-fp8-kernels',
+          workspacePath: '/srv/nvme0/moe-fp8-kernels',
+          title: {
+            zh: '采集 NCCL 跨卡通信拓扑与显存碎片曲线',
+            en: 'Collect NCCL ring topology & VRAM fragmentation telemetry',
+          },
+          updatedLabel: { zh: '运行中', en: 'running' },
+          status: 'running',
+          model: 'DeepSeek-R1',
+          effort: 'Medium',
+          contextPercent: 33,
+          blocks: [
+            {
+              id: 'g2-1',
+              kind: 'tool',
+              title: {
+                zh: '采样进行中 · nvidia-smi dmon & nsight profiler',
+                en: 'Sampling · nvidia-smi dmon & nsight profiler',
+              },
+              subtitle: 'NVLink 12-lane active · 478 GB/s bidirectional',
+              status: 'ongoing',
+              content: {
+                zh: '正在后台持续聚合 120 秒窗口内的显存分配峰值与通信重叠率。',
+                en: 'Continuously aggregating peak VRAM allocation and compute-communication overlap across a 120s window.',
+              },
+            },
+          ],
+        },
+      ],
+    },
+    {
+      id: 'macos-ci',
+      name: 'macos-ci',
+      osLabel: 'macOS 15 Runner · Mac Studio M2 Ultra',
+      sshSummary: 'builder@macos-ci → 127.0.0.1:3080',
+      proxyUrl: 'http://127.0.0.1:52203/?md_client=9f2a',
+      dshVersion: '0.2.0-rc.2',
+      latencyMs: 7,
+      connected: true,
+      stale: false,
+      enabled: true,
+      keepAliveMounted: true,
+      activeSessionId: 'remote:macos-ci:sess-notarize',
+      draftText: '导出公证回执 ticket stapling 校验摘要与 SHA-256 清单',
+      scatterPose: {
+        x: 255,
+        y: 125,
+        z: -185,
+        rotateX: -10,
+        rotateY: -18,
+        rotateZ: 2.5,
+        scale: 0.71,
+      },
+      workspaces: [
+        {
+          id: 'ws-mac-release',
+          name: 'desktop-release-Verify',
+          path: '/Users/builder/desktop-release-verify',
+          branch: 'release/0.3.6',
+        },
+      ],
+      sessions: [
+        {
+          id: 'remote:macos-ci:sess-notarize',
+          rawSessionId: 'sess-63e91a04-mac',
+          workspaceId: 'ws-mac-release',
+          workspaceName: 'desktop-release-Verify',
+          workspacePath: '/Users/builder/desktop-release-verify',
+          title: {
+            zh: '校验插件发行包 .tgz 清单预算与 SHA-256 签名溯源',
+            en: 'Verify plugin .tgz inventory budgets & SHA-256 provenance',
+          },
+          updatedLabel: { zh: '1 分钟前', en: '1m ago' },
+          status: 'unread',
+          model: 'DeepSeek-V3.2',
+          effort: 'High',
+          contextPercent: 24,
+          blocks: [
+            {
+              id: 'm1-1',
+              kind: 'tool',
+              title: {
+                zh: '校验通过 · node scripts/verify-artifacts.mjs && verify-package.mjs',
+                en: 'Verified · node scripts/verify-artifacts.mjs && verify-package.mjs',
+              },
+              subtitle: 'lib/index.js 168KiB/600KiB · lib/client.js 112KiB/400KiB · zero drift',
+              status: 'done',
+              content: {
+                zh: '构建产物零漂移，基础发行包未携带原生 ssh2 依赖，普通用户安装不会触发任何原生编译脚本。',
+                en: 'Zero artifact drift; base tarball excludes optional ssh2 so standard installs trigger zero native build scripts.',
+              },
+            },
+            {
+              id: 'm1-2',
+              kind: 'assistant',
+              content: {
+                zh: '已完成 `macos-ci` 上的官方打包门禁校验。点击顶部绿色未读数字进入本会话后，未读计数会自动按幂等游标消退。',
+                en: 'Official packaging gate finished on `macos-ci`. Opening this session via the green unread capsule segment automatically acknowledges its `turn/end` cursor.',
+              },
+            },
+          ],
+        },
+        {
+          id: 'remote:macos-ci:sess-webview-partition',
+          rawSessionId: 'sess-28f70d55-mac',
+          workspaceId: 'ws-mac-release',
+          workspaceName: 'desktop-release-Verify',
+          workspacePath: '/Users/builder/desktop-release-verify',
+          title: {
+            zh: '回归测试 Electron Desktop webview partition 租约释放',
+            en: 'Regression test Electron Desktop webview partition lease cleanup',
+          },
+          updatedLabel: { zh: '9 分钟前', en: '9m ago' },
+          status: 'unread',
+          model: 'DeepSeek-V3.2',
+          effort: 'Medium',
+          contextPercent: 31,
+          blocks: [
+            {
+              id: 'm2-1',
+              kind: 'assistant',
+              content: {
+                zh: '`dshDesktop.browser.acquire("multi-device:<id>")` 租约与卸载释放逻辑已通过压力循环验证，无残留 guest 进程。',
+                en: '`dshDesktop.browser.acquire("multi-device:<id>")` lease acquisition and teardown passed stress loops with zero leaked guests.',
+              },
+            },
+          ],
+        },
+      ],
+    },
+  ]
+}
+
+export function createImportedProdDevice(): DeviceRecord {
+  return {
+    id: 'prod-arm64',
+    name: 'prod-arm64',
+    osLabel: 'Debian 12 · AWS Graviton4 ARM64',
+    sshSummary: 'ops@prod-arm64 → 127.0.0.1:3080',
+    proxyUrl: 'http://127.0.0.1:52219/?md_client=9f2a',
+    dshVersion: '0.2.1-rc.5',
+    latencyMs: 11,
+    connected: true,
+    stale: false,
+    enabled: true,
+    keepAliveMounted: true,
+    activeSessionId: 'remote:prod-arm64:sess-edge-diag',
+    draftText: '只读检查 systemd 服务单元状态与内存水位，不执行重启',
+    scatterPose: {
+      x: 0,
+      y: -180,
+      z: -200,
+      rotateX: 10,
+      rotateY: 0,
+      rotateZ: 0,
+      scale: 0.72,
+    },
+    workspaces: [
+      {
+        id: 'ws-prod-observability',
+        name: 'edge-telemetry-agent',
+        path: '/opt/services/edge-telemetry-agent',
+        branch: 'v2.4.1',
+      },
+    ],
+    sessions: [
+      {
+        id: 'remote:prod-arm64:sess-edge-diag',
+        rawSessionId: 'sess-b8120e44-arm',
+        workspaceId: 'ws-prod-observability',
+        workspaceName: 'edge-telemetry-agent',
+        workspacePath: '/opt/services/edge-telemetry-agent',
+        title: {
+          zh: '只读巡检 Graviton4 节点文件描述符与 RSS 曲线',
+          en: 'Read-only audit of Graviton4 FD table & RSS memory curve',
+        },
+        updatedLabel: { zh: '刚刚导入', en: 'just imported' },
+        status: 'unread',
+        model: 'DeepSeek-V3.2',
+        effort: 'Medium',
+        contextPercent: 19,
+        blocks: [
+          {
+            id: 'p1-1',
+            kind: 'assistant',
+            content: {
+              zh: '已通过本机 `~/.ssh/config` 别名 `prod-arm64` 建立环回隧道并签发会话 Cookie！远端机器零插件改动，已在独立标签页挂载完整原生 DSH 界面。',
+              en: 'Connected via `~/.ssh/config` alias `prod-arm64` over system SSH loopback tunnel! Zero remote plugins installed — full native DSH UI is now mounted in its own Keep-Alive tab.',
+            },
+          },
+        ],
+      },
+    ],
+  }
+}
