@@ -34,12 +34,16 @@ export const Button = ({ children, icon, variant, size, ...props }: AnyProps) =>
     children,
   )
 export const Input = (props: AnyProps) => React.createElement('input', props)
-export const Switch = ({ checked, onChange, label }: AnyProps) =>
+export const Switch = ({ checked, onChange, label, disabled }: AnyProps) =>
   React.createElement('button', {
     role: 'switch',
     'aria-checked': checked as boolean,
     'aria-label': label as string,
-    onClick: () => (onChange as (next: boolean) => void)(!(checked as boolean)),
+    disabled: disabled as boolean,
+    onClick: () => {
+      if (disabled === true) return
+      ;(onChange as (next: boolean) => void)(!(checked as boolean))
+    },
   })
 export const Checkbox = ({ label, checked, onChange }: AnyProps) =>
   React.createElement(

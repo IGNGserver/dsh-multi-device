@@ -23,7 +23,7 @@
  * @module dsh-multi-device/client/taskbarSummary
  */
 import type { DeviceAttentionView } from '../attention.ts';
-import type { DeviceView } from '../contract.ts';
+import { type DeviceView } from '../contract.ts';
 import type { MultiDeviceLocaleKey } from './locales.ts';
 /** The three categories the device capsule shows, in title order. */
 export declare const TASKBAR_SEGMENT_ORDER: readonly ["running", "pending", "unread"];

@@ -167,6 +167,7 @@ export declare class RemoteDeviceClient {
     pendingInteractionList(): readonly RemotePendingInteraction[];
     start(): void;
     stop(): void;
+    private clearDisabledConnectionTelemetry;
     /** Fence every async operation before a transport/configuration can change. */
     private invalidateGeneration;
     /** Preserve offline rows, but never claim live execution or pending requests. */

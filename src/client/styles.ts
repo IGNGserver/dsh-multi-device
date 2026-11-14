@@ -125,6 +125,16 @@ const CSS_TEXT = `
   gap: 10px;
 }
 
+.dsh-md-card.isDisabled .dsh-md-row-name {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.dsh-md-device-toggle {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 2px;
+}
+
 .dsh-md-empty-card {
   align-items: center;
   text-align: center;

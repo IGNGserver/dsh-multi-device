@@ -551,7 +551,9 @@ export class DeviceRegistry {
     if (previous?.isRemote && previous.deviceId !== next?.deviceId) {
       this.nativeProxyManager.clearPendingSession(previous.deviceId, clientId)
     }
-    if (next?.isRemote) this.publishNativePaneSession(next.deviceId, clientId)
+    if (next?.isRemote && this.configs.get(next.deviceId)?.enabled !== false) {
+      this.publishNativePaneSession(next.deviceId, clientId)
+    }
   }
 
   /**
@@ -1249,11 +1251,15 @@ export class DeviceRegistry {
     }
     if (this.uiSyncTimer !== undefined) return
     const timer = setInterval(() => {
-      for (const deviceId of this.clients.keys()) void this.pullUiSync(deviceId)
+      for (const deviceId of this.clients.keys()) {
+        if (this.configs.get(deviceId)?.enabled === false) continue
+        void this.pullUiSync(deviceId)
+      }
     }, 15_000)
     timer.unref?.()
     this.uiSyncTimer = timer
     for (const deviceId of this.clients.keys()) {
+      if (this.configs.get(deviceId)?.enabled === false) continue
       this.maybeInitializeUiSync(deviceId)
       this.scheduleUiSyncPush(deviceId, 0)
     }
@@ -1272,12 +1278,14 @@ export class DeviceRegistry {
     if (this.sharedReadStateTimer !== undefined) return
     const timer = setInterval(() => {
       for (const deviceId of this.clients.keys()) {
+        if (this.configs.get(deviceId)?.enabled === false) continue
         void this.pullSharedReadState(deviceId)
       }
     }, 30_000)
     timer.unref?.()
     this.sharedReadStateTimer = timer
     for (const deviceId of this.clients.keys()) {
+      if (this.configs.get(deviceId)?.enabled === false) continue
       this.maybeInitializeSharedReadState(deviceId)
       this.scheduleSharedReadStatePush(deviceId, 0)
     }
@@ -1592,25 +1600,9 @@ export class DeviceRegistry {
       this.clients.delete(deviceId)
     }
     this.nativeProxyManager.removeProxy(deviceId)
-    this.authStates.delete(deviceId)
     this.catalogs.delete(deviceId)
     this.scheduleCatalogPersist()
-    for (const [clientId, selection] of this.activeSessions) {
-      const owner = decodeSessionId(selection.sessionId ?? '')
-      if (owner.isRemote && owner.deviceId === deviceId) this.activeSessions.set(clientId, { seq: selection.seq })
-    }
-    for (const key of this.nativePanes.keys()) {
-      if (key.endsWith(`\0${deviceId}`)) this.nativePanes.delete(key)
-    }
-    this.nativeGroups.delete(deviceId)
-    this.sharedReadStateInitialized.delete(deviceId)
-    this.sharedReadStateDirty.delete(deviceId)
-    this.sharedReadStateFailures.delete(deviceId)
-    const pendingPush = this.sharedReadStatePushTimers.get(deviceId)
-    if (pendingPush !== undefined) {
-      clearTimeout(pendingPush)
-      this.sharedReadStatePushTimers.delete(deviceId)
-    }
+    this.clearDeviceRuntimeTransientState(deviceId)
     this.readTracker.retain(sessionId => {
       const decoded = decodeSessionId(sessionId)
       return !decoded.isRemote || decoded.deviceId !== deviceId
@@ -1622,9 +1614,74 @@ export class DeviceRegistry {
     return true
   }
 
+  /** Clear transient runtime projections/panes/timers while leaving persisted catalog & read state intact. */
+  private clearDeviceRuntimeTransientState(deviceId: DeviceId): void {
+    this.authStates.delete(deviceId)
+    this.sessionListErrors.delete(deviceId)
+    for (const [clientId, selection] of this.activeSessions) {
+      const owner = decodeSessionId(selection.sessionId ?? '')
+      if (owner.isRemote && owner.deviceId === deviceId) this.activeSessions.set(clientId, { seq: selection.seq })
+    }
+    for (const key of this.nativePanes.keys()) {
+      if (key.endsWith(`\0${deviceId}`)) this.nativePanes.delete(key)
+    }
+    this.nativeGroups.delete(deviceId)
+    this.sharedReadStateInitialized.delete(deviceId)
+    this.sharedReadStateDirty.delete(deviceId)
+    this.sharedReadStateFailures.delete(deviceId)
+    const pendingReadPush = this.sharedReadStatePushTimers.get(deviceId)
+    if (pendingReadPush !== undefined) {
+      clearTimeout(pendingReadPush)
+      this.sharedReadStatePushTimers.delete(deviceId)
+    }
+    this.uiSyncInitialized.delete(deviceId)
+    this.uiSyncDirty.delete(deviceId)
+    this.uiSyncFailures.delete(deviceId)
+    const pendingUiPush = this.uiSyncPushTimers.get(deviceId)
+    if (pendingUiPush !== undefined) {
+      clearTimeout(pendingUiPush)
+      this.uiSyncPushTimers.delete(deviceId)
+    }
+  }
+
+  /** Enable or disable a configured device without losing its saved config, credentials, catalog, or read state. */
+  async setDeviceEnabled(
+    deviceId: DeviceId,
+    enabled: boolean,
+  ): Promise<{ ok: true; device: DeviceView } | { ok: false; error: string }> {
+    const existing = this.configs.get(deviceId)
+    if (existing === undefined) {
+      return { ok: false, error: 'Device is not configured' }
+    }
+    if (existing.enabled === enabled) {
+      const existingClient = this.clients.get(deviceId)
+      if (existingClient !== undefined) {
+        return { ok: true, device: this.withNativePane(this.withAuthState(existingClient.toView())) }
+      }
+    }
+    this.storage.assertWritable()
+    const updated: DeviceConfig = {
+      ...existing,
+      enabled,
+    }
+    try {
+      this.configs.set(deviceId, updated)
+      this.saveToDisk()
+    } catch (error) {
+      this.configs.set(deviceId, existing)
+      throw error
+    }
+    this.authStates.delete(deviceId)
+    const client = await this.mountClient(updated)
+    this.bumpRevision()
+    this.notifyWorkspacesChanged()
+    return { ok: true, device: this.withNativePane(this.withAuthState(client.toView())) }
+  }
+
   reconnectDevice(deviceId: DeviceId): boolean {
+    const storedConfig = this.configs.get(deviceId)
     const client = this.clients.get(deviceId)
-    if (client === undefined) return false
+    if (client === undefined || storedConfig?.enabled === false) return false
     this.authStates.delete(deviceId)
     client.reconnectNow()
     this.bumpRevision()
@@ -1670,6 +1727,9 @@ export class DeviceRegistry {
     const client = this.clients.get(deviceId)
     if (storedConfig === undefined || client === undefined) {
       return { ok: false, error: 'Device is not configured' }
+    }
+    if (!storedConfig.enabled) {
+      return { ok: false, error: 'Device is disabled' }
     }
     if (credential !== undefined && credential.trim() !== '') {
       this.authManager.setAuthCredential(deviceId, credential.trim())
@@ -1899,6 +1959,7 @@ export class DeviceRegistry {
     }
 
     for (const client of this.clients.values()) {
+      if (!client.deviceConfig.enabled) continue
       const summaries = client.sessionSummaries()
       const pendingBySession = new Map<string, { count: number; kind: import('../contract.ts').PendingInteractionKind }>()
       for (const pending of client.pendingInteractionList()) {
@@ -1926,15 +1987,22 @@ export class DeviceRegistry {
       }
     }
 
-    const attentionByDevice = selectDeviceAttention(attentionFacts, new Set(this.readTracker.unreadIds()), {
+    const isSessionVisibleInSnapshot = (sessionId: string): boolean => {
+      const decoded = decodeSessionId(sessionId)
+      return !decoded.isRemote || this.configs.get(decoded.deviceId)?.enabled !== false
+    }
+    const visibleUnreadSessionIds = this.readTracker.unreadIds().filter(isSessionVisibleInSnapshot)
+    const visibleUnreadSet = new Set(visibleUnreadSessionIds)
+    const attentionByDevice = selectDeviceAttention(attentionFacts, visibleUnreadSet, {
       currentSessionId: this.activeSessions.get(clientId)?.sessionId,
     })
     attentionByDevice[LOCAL_DEVICE_ID] = { ...(attentionByDevice[LOCAL_DEVICE_ID] ?? emptyDeviceAttention()), fresh: this.localCatalogFresh }
     for (const client of this.clients.values()) {
+      if (!client.deviceConfig.enabled) continue
       const fresh = client.catalogFresh
       const rawSelected = this.nativePanes.get(this.paneKey(client.id, clientId))?.sessionId
       const currentSessionId = rawSelected === undefined ? this.activeSessions.get(clientId)?.sessionId : encodeRemoteSessionId(client.id, rawSelected)
-      const projected = selectDeviceAttention(attentionFacts.filter(fact => fact.deviceId === client.id), new Set(this.readTracker.unreadIds()), { currentSessionId, fresh })
+      const projected = selectDeviceAttention(attentionFacts.filter(fact => fact.deviceId === client.id), visibleUnreadSet, { currentSessionId, fresh })
       attentionByDevice[client.id] = projected[client.id] ?? emptyDeviceAttention(fresh)
     }
 
@@ -1943,7 +2011,7 @@ export class DeviceRegistry {
     // catalog titles, which the Host already keeps for its own list surface.
     const sessionTitles = collectAttentionSessionTitles(attentionByDevice, (deviceId) => {
       const owner = this.clients.get(deviceId)
-      if (owner === undefined) return undefined
+      if (owner === undefined || !owner.deviceConfig.enabled) return undefined
       const titles = new Map<string, string>()
       for (const summary of owner.sessionSummaries()) {
         const title = summary.projections?.values.title
@@ -1958,6 +2026,14 @@ export class DeviceRegistry {
       hostId: this.hostId,
       hostEpoch: this.hostEpoch,
       devices: [...this.clients.values()].map(c => {
+        if (!c.deviceConfig.enabled) {
+          return this.withNativePane({
+            ...c.toView(),
+            runningSessionCount: 0,
+            pendingApprovalCount: 0,
+            allRunningSessionCount: 0,
+          }, clientId)
+        }
         const attention = attentionByDevice[c.id]!
         const view = this.withNativePane(this.withAuthState({
           ...c.toView(),
@@ -1968,8 +2044,10 @@ export class DeviceRegistry {
         return sessionListError === undefined ? view : { ...view, sessionListError }
       }),
       sshConfigHosts: listSshConfigHosts(),
-      unreadSessionIds: this.readTracker.unreadIds(),
-      readCompletions: this.readTracker.completionIds(),
+      unreadSessionIds: visibleUnreadSessionIds,
+      readCompletions: Object.fromEntries(
+        Object.entries(this.readTracker.completionIds()).filter(([id]) => isSessionVisibleInSnapshot(id)),
+      ),
       attentionByDevice,
       ...(Object.keys(sessionTitles).length > 0 ? { sessionTitles } : {}),
       archivedSessionIds: [...archivedSessionIds].sort(),
@@ -2120,15 +2198,20 @@ export class DeviceRegistry {
       client.updateConfig(config)
     }
 
+    if (!config.enabled) {
+      this.nativeProxyManager.removeProxy(config.id)
+      client.setNativeProxyUrl(undefined)
+      this.clearDeviceRuntimeTransientState(config.id)
+      return client
+    }
+
     const proxyUrl = await this.nativeProxyManager.ensureProxy(config, () => client.effectiveBaseUrl())
     if (!isMountCurrent(client)) return client
     client.setNativeProxyUrl(proxyUrl)
     if (proxyUrl !== undefined) this.bumpRevision()
 
     if (!isMountCurrent(client)) return client
-    if (config.enabled) {
-      client.start()
-    }
+    client.start()
     return client
   }
 

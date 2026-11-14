@@ -23,7 +23,7 @@
  * @module dsh-multi-device/client/taskbarSummary
  */
 import type { DeviceAttentionView } from '../attention.ts'
-import type { DeviceView } from '../contract.ts'
+import { decodeSessionId, type DeviceView } from '../contract.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
 import { countableUnreadIds } from './unreadCounts.ts'
 
@@ -76,23 +76,31 @@ function finiteCount(value: number | undefined): number {
  * unread set instead of reporting an authoritative-looking zero.
  */
 export function tallyTaskbarSessions(input: TaskbarTallyInput): TaskbarTally {
+  const disabledDeviceIds = new Set(
+    input.devices.filter(device => device.enabled === false).map(device => device.id),
+  )
   const attention = input.attentionByDevice
   if (attention !== undefined && Object.keys(attention).length > 0) {
     const running = new Set<string>()
     const pending = new Set<string>()
     const unread = new Set<string>()
-    for (const view of Object.values(attention)) {
-      if (view === undefined) continue
+    for (const [deviceId, view] of Object.entries(attention)) {
+      if (view === undefined || disabledDeviceIds.has(deviceId)) continue
       for (const sessionId of view.runningSessionIds) running.add(sessionId)
       for (const sessionId of view.pendingSessionIds) pending.add(sessionId)
       for (const sessionId of view.unreadSessionIds) unread.add(sessionId)
     }
     return { running: running.size, pending: pending.size, unread: unread.size }
   }
-  const running = input.devices.reduce((sum, device) => sum + finiteCount(device.runningSessionCount), 0)
-  const pending = input.devices.reduce((sum, device) => sum + finiteCount(device.pendingApprovalCount), 0)
+  const enabledDevices = input.devices.filter(device => device.enabled !== false)
+  const running = enabledDevices.reduce((sum, device) => sum + finiteCount(device.runningSessionCount), 0)
+  const pending = enabledDevices.reduce((sum, device) => sum + finiteCount(device.pendingApprovalCount), 0)
+  const visibleUnread = input.unreadSessionIds.filter(sessionId => {
+    const decoded = decodeSessionId(sessionId)
+    return !decoded.isRemote || !disabledDeviceIds.has(decoded.deviceId)
+  })
   const unread = countableUnreadIds(
-    input.unreadSessionIds,
+    visibleUnread,
     input.archivedSessionIds,
     input.subagentSessionIds,
   ).size

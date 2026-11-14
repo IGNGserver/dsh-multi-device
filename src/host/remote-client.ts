@@ -237,6 +237,7 @@ export class RemoteDeviceClient {
   }
 
   effectiveBaseUrl(): string | undefined {
+    if (!this.config.enabled) return undefined
     if (this.config.transport.kind === 'ssh') {
       return this.tunnel?.baseUrl()
     }
@@ -506,9 +507,18 @@ export class RemoteDeviceClient {
     this.tunnel?.stop()
     this.tunnel = undefined
     this.state = this.config.enabled ? 'error' : 'disabled'
-    if (!this.config.enabled) this.clearPendingInteractions()
+    if (!this.config.enabled) {
+      this.clearDisabledConnectionTelemetry()
+    }
     this.markDisconnected()
     this.callbacks.onStateChanged(this.id)
+  }
+
+  private clearDisabledConnectionTelemetry(): void {
+    this.latencyMs = undefined
+    this.connectedAt = undefined
+    this.lastError = undefined
+    this.reconnectAttempt = 0
   }
 
   /** Fence every async operation before a transport/configuration can change. */
@@ -550,6 +560,7 @@ export class RemoteDeviceClient {
       this.start()
     } else {
       this.state = 'disabled'
+      this.clearDisabledConnectionTelemetry()
       this.callbacks.onStateChanged(this.id)
     }
   }

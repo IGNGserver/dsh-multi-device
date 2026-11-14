@@ -126,6 +126,7 @@ export interface ControlPlaneRequest {
     | 'diagnostics'
     | 'upsertDevice'
     | 'removeDevice'
+    | 'setDeviceEnabled'
     | 'reconnectDevice'
     | 'authenticateDevice'
     | 'testDevice'
@@ -139,7 +140,7 @@ export interface ControlPlaneRequest {
 }
 
 const CONTROL_ACTIONS: ReadonlySet<string> = new Set<ControlPlaneRequest['action']>([
-  'snapshot', 'diagnostics', 'upsertDevice', 'removeDevice', 'reconnectDevice',
+  'snapshot', 'diagnostics', 'upsertDevice', 'removeDevice', 'setDeviceEnabled', 'reconnectDevice',
   'authenticateDevice', 'testDevice', 'listSshKeys', 'setActiveSession',
   'markSessionRead', 'markDeviceRead', 'setUiPreferences', 'patchUiState',
 ])
@@ -231,6 +232,10 @@ export function validateControlPlanePayload(request: ControlPlaneRequest): void 
       break
     case 'markSessionRead': payloadString(payload, 'sessionId'); payloadString(payload, 'expectedCompletionId', false, 1024); break
     case 'markDeviceRead': case 'removeDevice': case 'reconnectDevice': payloadString(payload, 'deviceId', true, 512); break
+    case 'setDeviceEnabled':
+      payloadString(payload, 'deviceId', true, 512)
+      if (typeof payload.enabled !== 'boolean') throw new Error('enabled must be a boolean')
+      break
     case 'authenticateDevice': payloadString(payload, 'deviceId', true, 512); payloadString(payload, 'credential', false, 1024 * 1024, true); break
     case 'upsertDevice': case 'testDevice': validateDeviceInput(payload); break
     case 'setUiPreferences':
@@ -471,9 +476,21 @@ export class MultiDeviceControlPlane {
           return { ok: true, value: { removed, snapshot: this.registry.snapshot(clientId) } }
         }
 
+        case 'setDeviceEnabled': {
+          const deviceId = String(payload.deviceId ?? '') as DeviceId
+          if (deviceId === '') return { ok: false, error: 'Device id is required' }
+          if (typeof payload.enabled !== 'boolean') return { ok: false, error: 'enabled must be a boolean' }
+          const res = await this.registry.setDeviceEnabled(deviceId, payload.enabled)
+          if (!res.ok) return res
+          return { ok: true, value: { device: res.device, snapshot: this.registry.snapshot(clientId) } }
+        }
+
         case 'reconnectDevice': {
           const deviceId = String(payload.deviceId ?? '') as DeviceId
           if (deviceId === '') return { ok: false, error: 'Device id is required' }
+          if (this.registry.client(deviceId)?.deviceConfig.enabled === false) {
+            return { ok: false, error: 'Device is disabled' }
+          }
           const triggered = this.registry.reconnectDevice(deviceId)
           if (!triggered) return { ok: false, error: 'Device is not configured' }
           return { ok: true, value: { triggered, snapshot: this.registry.snapshot(clientId) } }
