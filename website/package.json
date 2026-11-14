@@ -4,6 +4,7 @@
   "version": "0.3.6",
   "description": "Official Spatial Showcase Website for dsh-multi-device — Native Multi-Device Tab Strip & SSH Tunnel Workbench for DeepSeek Harness (DSH)",
   "type": "module",
+  "packageManager": "pnpm@10.33.0",
   "scripts": {
     "dev": "vite",
     "typecheck": "tsc --noEmit",

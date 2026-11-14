@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex" />
+    <meta name="theme-color" content="#0b0d12" />
+    <title>404 路由未命中 — DSH Multi-Device</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background:
+          radial-gradient(circle at 50% 18%, rgba(77, 107, 254, 0.18), transparent 52%),
+          radial-gradient(circle at 82% 84%, rgba(34, 197, 94, 0.08), transparent 45%),
+          #0b0d12;
+        color: #f2f4fa;
+        font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC',
+          'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+      }
+      .card {
+        max-width: 540px;
+        width: 100%;
+        padding: 40px 36px;
+        border-radius: 24px;
+        background: rgba(19, 22, 31, 0.88);
+        border: 1px solid rgba(122, 170, 255, 0.22);
+        box-shadow: 0 28px 80px rgba(0, 0, 0, 0.62);
+        backdrop-filter: blur(18px);
+        text-align: center;
+      }
+      .kicker {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 5px 12px;
+        border-radius: 999px;
+        background: rgba(77, 107, 254, 0.14);
+        border: 1px solid rgba(122, 170, 255, 0.32);
+        color: #9bbdff;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 12px;
+        letter-spacing: 0.06em;
+      }
+      .dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #f59e0b;
+        box-shadow: 0 0 10px rgba(245, 158, 11, 0.7);
+      }
+      h1 {
+        margin: 18px 0 12px;
+        font-size: clamp(1.85rem, 4.8vw, 2.75rem);
+        letter-spacing: -0.025em;
+      }
+      p {
+        margin: 0 0 28px;
+        color: #9ca4b8;
+        line-height: 1.68;
+        font-size: 15px;
+      }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 12px;
+      }
+      a.btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 11px 22px;
+        border-radius: 999px;
+        background: linear-gradient(135deg, #5d7bff, #4d6bfe);
+        color: #ffffff;
+        font-weight: 600;
+        font-size: 14px;
+        text-decoration: none;
+        box-shadow: 0 10px 26px rgba(77, 107, 254, 0.34);
+        transition: transform 160ms ease, box-shadow 160ms ease;
+      }
+      a.btn:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 14px 32px rgba(77, 107, 254, 0.46);
+      }
+      a.ghost {
+        display: inline-flex;
+        align-items: center;
+        padding: 11px 20px;
+        border-radius: 999px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        color: #cfd6e6;
+        font-size: 14px;
+        text-decoration: none;
+      }
+      a.ghost:hover {
+        border-color: rgba(122, 170, 255, 0.42);
+        color: #ffffff;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <span class="kicker"><span class="dot"></span>HTTP 404 // LOOPBACK ROUTE UNMAPPED</span>
+      <h1>404 · 未找到对应设备或页面</h1>
+      <p>
+        当前访问的路径不在 DSH Multi 空间工作台路由表内。请返回主工作台检视多设备 SSH 环回架构与实时交互演示。
+      </p>
+      <div class="actions">
+        <a class="btn" href="/">返回 DSH Multi 首页</a>
+        <a class="ghost" href="https://github.com/IGNGserver/dsh-multi-device/releases">GitHub Releases</a>
+      </div>
+    </main>
+  </body>
+</html>
