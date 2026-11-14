@@ -1,4 +1,7 @@
 export type Locale = 'zh' | 'en'
+export type ThemeMode = 'system' | 'light' | 'dark'
+export type ResolvedTheme = 'light' | 'dark'
+export type WorkbenchViewMode = 'converged' | 'scattered'
 
 export type SessionStatus = 'idle' | 'pending' | 'running' | 'unread'
 
@@ -64,14 +67,9 @@ export interface DeviceRecord {
   readonly activeSessionId: string
   readonly draftText: string
   readonly draftChip?: string
-  /** Spatial 3D scatter pose at scroll = 0 */
-  readonly scatterPose: {
-    readonly x: number
-    readonly y: number
-    readonly z: number
-    readonly rotateX: number
-    readonly rotateY: number
-    readonly rotateZ: number
-    readonly scale: number
+  /** Everyday pain-point callout shown in the 2x2 scattered comparison view */
+  readonly scatteredNote: {
+    readonly zh: string
+    readonly en: string
   }
 }

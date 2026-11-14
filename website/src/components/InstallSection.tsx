@@ -1,152 +1,169 @@
 import { useState } from 'react'
-import { getCopy } from '../data/copy'
-import type { Locale } from '../types'
-import { CheckIcon, CopyIcon } from './Icons'
+import {
+  RELEASE_TAG_URL,
+  RELEASE_TGZ_URL,
+  type SiteCopy,
+} from '../data/copy'
+import { CheckIcon, ChevronDownIcon, CopyIcon, ExternalLinkIcon } from './Icons'
 
 interface InstallSectionProps {
-  readonly locale: Locale
+  readonly copy: SiteCopy
 }
 
-export function InstallSection({ locale }: InstallSectionProps) {
-  const t = getCopy(locale).install
-  const [activeTabId, setActiveTabId] = useState<string>(t.tabs[0].id)
-  const [copiedId, setCopiedId] = useState<string | null>(null)
-  const [checkedItems, setCheckedItems] = useState<Record<number, boolean>>({
-    0: true,
-    1: true,
-  })
+export function InstallSection({ copy }: InstallSectionProps) {
+  const [copiedKey, setCopiedKey] = useState<string | null>(null)
+  const [cliOpen, setCliOpen] = useState(false)
+  const [checklistOpen, setChecklistOpen] = useState(false)
 
-  const currentTab =
-    t.tabs.find((tab) => tab.id === activeTabId) ?? t.tabs[0]
-
-  const handleCopy = async (id: string, code: string) => {
+  const handleCopy = async (key: string, text: string) => {
     try {
-      await navigator.clipboard.writeText(code)
+      await navigator.clipboard.writeText(text)
     } catch {
-      // Fallback for restricted clipboard contexts
+      /* fallback ignored in headless verification */
     }
-    setCopiedId(id)
+    setCopiedKey(key)
     window.setTimeout(() => {
-      setCopiedId((cur) => (cur === id ? null : cur))
+      setCopiedKey((prev) => (prev === key ? null : prev))
     }, 1800)
   }
 
-  const checkedCount = Object.values(checkedItems).filter(Boolean).length
+  const desktopCmd = `dsh --profile desktop plugin install "${RELEASE_TGZ_URL}"`
+  const webCmd = `dsh --profile web plugin install "${RELEASE_TGZ_URL}"`
 
   return (
-    <section id="install" className="section-block">
-      <div className="container">
-        <div className="section-header">
-          <div className="section-eyebrow">{t.eyebrow}</div>
-          <h2 className="section-title">{t.title}</h2>
-          <p className="section-subtitle">{t.subtitle}</p>
+    <section id="install" className="section-band">
+      <div className="shell-container">
+        <div className="section-head">
+          <span className="section-eyebrow">{copy.install.eyebrow}</span>
+          <h2 className="section-title">{copy.install.title}</h2>
+          <p className="section-subtitle">{copy.install.subtitle}</p>
         </div>
 
-        <div className="install-panel">
-          <div className="install-tabs-bar" role="tablist">
-            {t.tabs.map((tab) => (
+        <div className="install-card">
+          <div className="install-card__left">
+            <div className="install-url-label">{copy.install.urlLabel}</div>
+            <div className="install-url-box">
+              <code className="install-url-code">{RELEASE_TGZ_URL}</code>
               <button
-                key={tab.id}
                 type="button"
-                role="tab"
-                aria-selected={tab.id === currentTab.id}
-                className="install-tab-btn"
-                data-active={tab.id === currentTab.id ? 'true' : 'false'}
-                data-testid={`install-tab-${tab.id}`}
-                onClick={() => setActiveTabId(tab.id)}
+                className="dsh-btn dsh-btn--primary"
+                data-testid="copy-tgz-btn"
+                onClick={() => handleCopy('tgz', RELEASE_TGZ_URL)}
               >
-                {tab.label}
+                {copiedKey === 'tgz' ? <CheckIcon /> : <CopyIcon />}
+                <span>
+                  {copiedKey === 'tgz' ? copy.install.copiedBtn : copy.install.copyBtn}
+                </span>
               </button>
-            ))}
+            </div>
+            <a
+              className="install-releases-link"
+              href={RELEASE_TAG_URL}
+              target="_blank"
+              rel="noreferrer"
+            >
+              <span>{copy.install.releasesLink}</span>
+              <ExternalLinkIcon />
+            </a>
           </div>
 
-          <div
-            style={{
-              fontSize: 13.5,
-              color: '#9ec0ff',
-              background: 'rgba(59, 130, 246, 0.08)',
-              border: '1px solid rgba(122, 170, 255, 0.22)',
-              padding: '10px 14px',
-              borderRadius: 10,
-            }}
-          >
-            {currentTab.note}
-          </div>
-
-          <ol className="install-steps-list">
-            {currentTab.steps.map((step, idx) => (
-              <li key={idx}>{step}</li>
+          <ol className="install-steps">
+            {copy.install.steps.map((step) => (
+              <li key={step.num} className="install-step">
+                <span className="install-step__num">{step.num}</span>
+                <div className="install-step__content">
+                  <h3>{step.title}</h3>
+                  <p>{step.body}</p>
+                </div>
+              </li>
             ))}
           </ol>
+        </div>
 
-          <div className="install-code-wrap">
-            <div className="install-code-head">
-              <span>{currentTab.codeLabel}</span>
-              <button
-                type="button"
-                className="copy-code-btn"
-                onClick={() => handleCopy(currentTab.id, currentTab.code)}
-              >
-                {copiedId === currentTab.id ? (
-                  <>
-                    <CheckIcon size={12} />
-                    <span>{t.copiedBtn}</span>
-                  </>
-                ) : (
-                  <>
-                    <CopyIcon size={12} />
-                    <span>{t.copyBtn}</span>
-                  </>
-                )}
-              </button>
-            </div>
-            <pre className="install-code-pre">{currentTab.code}</pre>
+        {/* Default-closed Disclosure Panels */}
+        <div className="disclosure-stack">
+          <div className="disclosure-panel">
+            <button
+              type="button"
+              className="disclosure-trigger"
+              data-testid="details-cli"
+              aria-expanded={cliOpen}
+              onClick={() => setCliOpen((v) => !v)}
+            >
+              <span className="disclosure-trigger__text">{copy.install.cliPanelTitle}</span>
+              <span className={`disclosure-chevron${cliOpen ? ' is-open' : ''}`}>
+                <ChevronDownIcon />
+              </span>
+            </button>
+            {cliOpen && (
+              <div className="disclosure-body">
+                <div className="cli-block">
+                  <div className="cli-block__label">{copy.install.cliDesktopLabel}</div>
+                  <div className="cli-block__row">
+                    <code>{desktopCmd}</code>
+                    <button
+                      type="button"
+                      className="dsh-btn dsh-btn--ghost"
+                      onClick={() => handleCopy('desktop', desktopCmd)}
+                    >
+                      {copiedKey === 'desktop' ? <CheckIcon /> : <CopyIcon />}
+                      <span>
+                        {copiedKey === 'desktop'
+                          ? copy.install.copiedBtn
+                          : copy.install.copyBtn}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+                <div className="cli-block">
+                  <div className="cli-block__label">{copy.install.cliWebLabel}</div>
+                  <div className="cli-block__row">
+                    <code>{webCmd}</code>
+                    <button
+                      type="button"
+                      className="dsh-btn dsh-btn--ghost"
+                      onClick={() => handleCopy('web', webCmd)}
+                    >
+                      {copiedKey === 'web' ? <CheckIcon /> : <CopyIcon />}
+                      <span>
+                        {copiedKey === 'web'
+                          ? copy.install.copiedBtn
+                          : copy.install.copyBtn}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
-          <div className="checklist-box">
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: 12,
-                marginBottom: 4,
-              }}
+          <div className="disclosure-panel">
+            <button
+              type="button"
+              className="disclosure-trigger"
+              data-testid="details-checklist"
+              aria-expanded={checklistOpen}
+              onClick={() => setChecklistOpen((v) => !v)}
             >
-              <strong style={{ fontSize: 13.5 }}>{t.checklistTitle}</strong>
-              <span
-                className="brand-version-pill tabular-nums"
-                style={{
-                  color:
-                    checkedCount === t.checklist.length ? '#86efac' : '#9ec0ff',
-                }}
-              >
-                {checkedCount}/{t.checklist.length}
+              <span className="disclosure-trigger__text">
+                {copy.install.checklistPanelTitle}
               </span>
-            </div>
-
-            {t.checklist.map((item, idx) => {
-              const checked = Boolean(checkedItems[idx])
-              return (
-                <button
-                  key={idx}
-                  type="button"
-                  className="checklist-item"
-                  data-checked={checked ? 'true' : 'false'}
-                  onClick={() =>
-                    setCheckedItems((prev) => ({
-                      ...prev,
-                      [idx]: !prev[idx],
-                    }))
-                  }
-                >
-                  <span className="checklist-box-mark">
-                    {checked && <CheckIcon size={12} />}
-                  </span>
-                  <span>{item}</span>
-                </button>
-              )
-            })}
+              <span className={`disclosure-chevron${checklistOpen ? ' is-open' : ''}`}>
+                <ChevronDownIcon />
+              </span>
+            </button>
+            {checklistOpen && (
+              <div className="disclosure-body">
+                <div className="checklist-grid">
+                  {copy.install.checklistItems.map((item) => (
+                    <div key={item.question} className="checklist-item">
+                      <h4>{item.question}</h4>
+                      <p>{item.answer}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>

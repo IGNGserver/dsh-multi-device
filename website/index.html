@@ -1,58 +1,85 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#0b0d12" />
     <meta name="msvalidate.01" content="B411826ACAE5C5CD20EA5574C3F8A6E4" />
-    <title>DSH Multi-Device · 多台开发机的原生 DeepSeek Harness 空间工作台</title>
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" id="dsh-md-theme-color" content="#ffffff" />
+    <title>dsh-multi-device — 在一个 DSH 窗口里，管好你的所有开发机</title>
     <meta
       name="description"
-      content="通过系统 OpenSSH 隧道连接多台运行 dsh web 的开发机。顶部常驻标签栏切换本机与远端完整原生 DSH 界面，Keep-Alive 保活不丢流与草稿，不执行项目文件同步，不混入全局会话。"
+      content="dsh-multi-device 是 DeepSeek Harness (DSH) 的多设备管理插件：复用电脑里已有的 SSH 配置，把云主机、GPU 服务器和备用电脑装进同一个 DSH 窗口，远程不用装插件，本地记录不混杂。"
     />
     <link rel="canonical" href="https://dsh-multi.igng.net/" />
     <meta property="og:type" content="website" />
-    <meta property="og:site_name" content="DSH Multi-Device" />
-    <meta property="og:locale" content="zh_CN" />
-    <meta property="og:title" content="DSH Multi-Device · 原生多设备空间工作台" />
+    <meta property="og:site_name" content="dsh-multi-device" />
+    <meta property="og:title" content="dsh-multi-device — 在一个 DSH 窗口里，管好你的所有开发机" />
     <meta
       property="og:description"
-      content="一个 DSH Desktop / Web Host，管理所有服务器上的原生 DSH。系统 SSH 环回隧道、Keep-Alive 页面保活、黄/蓝/绿三态会话关注胶囊。"
+      content="一个 DSH 窗口切换多台远程开发机：顶部标签自带红点与审批提醒，草稿和任务互不打架，远程机器零配置。"
     />
     <meta property="og:url" content="https://dsh-multi.igng.net/" />
     <meta property="og:image" content="https://dsh-multi.igng.net/og/og.png" />
-    <meta property="og:image:width" content="1200" />
-    <meta property="og:image:height" content="630" />
-    <meta
-      property="og:image:alt"
-      content="DSH Multi-Device 原生多设备空间工作台与 SSH 环回隧道架构演示"
-    />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="DSH Multi-Device · 原生多设备空间工作台" />
+    <meta name="twitter:title" content="dsh-multi-device — 在一个 DSH 窗口里，管好你的所有开发机" />
     <meta
       name="twitter:description"
-      content="系统 OpenSSH 127.0.0.1 环回隧道 + 顶部常驻设备标签页 + DOM Keep-Alive 保活 + 黄/蓝/绿三态关注胶囊。"
+      content="一个 DSH 窗口管理所有开发机，复用现有 SSH，远程零安装，本地聊天记录依然清清爽爽。"
     />
     <meta name="twitter:image" content="https://dsh-multi.igng.net/og/og.png" />
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+    <script>
+      (function () {
+        try {
+          var mode = localStorage.getItem('dsh-md-site-theme') || 'system';
+          if (mode !== 'light' && mode !== 'dark' && mode !== 'system') {
+            mode = 'system';
+          }
+          var prefersDark =
+            window.matchMedia &&
+            window.matchMedia('(prefers-color-scheme: dark)').matches;
+          var isDark = mode === 'dark' || (mode === 'system' && prefersDark);
+          document.documentElement.dataset.themeMode = mode;
+          document.documentElement.dataset.theme = isDark ? 'dark' : 'light';
+          document.documentElement.style.colorScheme = isDark ? 'dark' : 'light';
+          var meta = document.getElementById('dsh-md-theme-color');
+          if (meta) {
+            meta.setAttribute('content', isDark ? '#151517' : '#ffffff');
+          }
+        } catch (err) {
+          /* ignore storage restrictions */
+        }
+      })();
+    </script>
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
         "@type": "SoftwareApplication",
-        "name": "DSH Multi-Device",
-        "alternateName": "dsh-multi-device",
-        "operatingSystem": "macOS, Linux, Windows",
+        "name": "dsh-multi-device",
         "applicationCategory": "DeveloperApplication",
-        "url": "https://dsh-multi.igng.net/",
-        "downloadUrl": "https://github.com/IGNGserver/dsh-multi-device/releases",
-        "codeRepository": "https://github.com/IGNGserver/dsh-multi-device",
+        "operatingSystem": "macOS, Linux, Windows",
+        "softwareVersion": "0.3.6",
         "license": "https://opensource.org/licenses/MIT",
-        "description": "DeepSeek Harness (DSH) 多设备管理插件：以系统 OpenSSH 环回隧道连接多台运行 dsh web 的远端开发机，通过顶部常驻标签栏 Keep-Alive 保活切换各机完整原生 DSH 界面。"
+        "url": "https://dsh-multi.igng.net/",
+        "downloadUrl": "https://github.com/IGNGserver/dsh-multi-device/releases/download/v0.3.6/dsh-multi-device-v0.3.6.tgz",
+        "description": "DeepSeek Harness (DSH) multi-device plugin that organizes remote DSH instances into one native tab strip using your existing SSH config, keeping remote servers untouched and your local history clean.",
+        "codeRepository": "https://github.com/IGNGserver/dsh-multi-device",
+        "author": {
+          "@type": "Organization",
+          "name": "IGNGserver",
+          "url": "https://github.com/IGNGserver"
+        }
       }
     </script>
   </head>
-  <body data-ds-dark-theme="true">
+  <body>
+    <script>
+      if (document.documentElement.dataset.theme === 'dark') {
+        document.body.setAttribute('data-ds-dark-theme', 'true');
+      }
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
