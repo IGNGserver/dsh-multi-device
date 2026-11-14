@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0b0d12" />
+    <title>DSH Multi-Device · 多台开发机的原生 DeepSeek Harness 空间工作台</title>
+    <meta
+      name="description"
+      content="通过系统 OpenSSH 隧道连接多台运行 dsh web 的开发机。顶部常驻标签栏切换本机与远端完整原生 DSH 界面，Keep-Alive 保活不丢流与草稿，不执行项目文件同步，不混入全局会话。"
+    />
+    <meta property="og:title" content="DSH Multi-Device · 原生多设备空间工作台" />
+    <meta
+      property="og:description"
+      content="一个 DSH Desktop / Web Host，管理所有服务器上的原生 DSH。系统 SSH 环回隧道、Keep-Alive 页面保活、黄/蓝/绿三态会话关注胶囊。"
+    />
+    <meta property="og:image" content="./og-preview.svg" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+  </head>
+  <body data-ds-dark-theme="true">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,78 @@
+:root {
+  color-scheme: dark;
+
+  /* Site Spatial Canvas Palette */
+  --site-bg-void: #06080d;
+  --site-bg-deep: #0a0d14;
+  --site-bg-elevated: #10141f;
+  --site-bg-card: rgba(18, 22, 33, 0.76);
+  --site-bg-card-hover: rgba(24, 30, 44, 0.88);
+  --site-border-hairline: rgba(255, 255, 255, 0.08);
+  --site-border-strong: rgba(255, 255, 255, 0.15);
+  --site-border-specular: rgba(255, 255, 255, 0.22);
+  --site-accent-blue: #6da1ff;
+  --site-accent-cyan: #38bdf8;
+  --site-accent-glow: rgba(109, 161, 255, 0.22);
+
+  /* Official DeepSeek Harness (--dsw-*) Dark Theme Tokens */
+  --dsw-alias-bg-base: #151517;
+  --dsw-specific-sidebar-fill: #1b1b1c;
+  --dsw-alias-bg-layer-1: #232324;
+  --dsw-alias-bg-layer-2: #2c2c2e;
+  --dsw-alias-bg-layer-3: #353638;
+  --dsw-specific-input-major: #2c2c2e;
+  --dsw-specific-bubble: #2c2c2e;
+  --dsw-specific-sidebar-nav-item-active: #43454a;
+  --dsw-specific-sidebar-nav-item-hover: rgba(255, 255, 255, 0.055);
+  --dsw-menu-surface-fill: rgba(48, 49, 54, 0.94);
+
+  --dsw-alias-label-primary: #f9fafb;
+  --dsw-alias-label-secondary: #cfd3d6;
+  --dsw-alias-label-tertiary: #adb2b8;
+  --dsw-alias-label-caption: #81858c;
+
+  --dsw-alias-border-l1: rgba(255, 255, 255, 0.06);
+  --dsw-alias-border-l2: rgba(255, 255, 255, 0.12);
+  --dsw-alias-border-l3: rgba(255, 255, 255, 0.16);
+  --dsw-alias-border-l4: rgba(255, 255, 255, 0.22);
+
+  /* Exact dsh-multi-device Attention Capsule Tones */
+  --dsh-md-tone-pending: #f59e0b;
+  --dsh-md-tone-pending-bg: rgba(245, 158, 11, 0.14);
+  --dsh-md-tone-pending-border: rgba(245, 158, 11, 0.38);
+
+  --dsh-md-tone-running: #7aaaff;
+  --dsh-md-tone-running-bg: rgba(122, 170, 255, 0.14);
+  --dsh-md-tone-running-border: rgba(122, 170, 255, 0.36);
+
+  --dsh-md-tone-done: #22c55e;
+  --dsh-md-tone-done-bg: rgba(34, 197, 94, 0.14);
+  --dsh-md-tone-done-border: rgba(34, 197, 94, 0.36);
+
+  --dsh-md-native-bar-height: 42px;
+
+  /* Typography */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Menlo', 'Monaco', 'Consolas',
+    'Liberation Mono', ui-monospace, monospace;
+
+  /* Layout & Radii */
+  --container-max: 1280px;
+  --radius-window: 16px;
+  --radius-card: 16px;
+  --radius-composer: 24px;
+  --radius-bubble: 18px;
+  --radius-pill: 999px;
+
+  /* Shadows */
+  --shadow-spatial-window:
+    0 34px 96px -18px rgba(0, 0, 0, 0.86),
+    0 12px 32px -8px rgba(0, 0, 0, 0.65),
+    0 0 0 1px rgba(255, 255, 255, 0.09),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  --shadow-dsh-menu:
+    0 20px 54px rgba(0, 0, 0, 0.66),
+    0 4px 14px rgba(0, 0, 0, 0.44),
+    0 0 0 1px rgba(255, 255, 255, 0.14);
+}
