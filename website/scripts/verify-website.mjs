@@ -15,28 +15,37 @@ function findChromiumExecutable() {
   if (process.env.CHROMIUM_PATH && fs.existsSync(process.env.CHROMIUM_PATH)) {
     return process.env.CHROMIUM_PATH
   }
-  const cacheRoot = path.join(os.homedir(), 'Library/Caches/ms-playwright')
-  if (fs.existsSync(cacheRoot)) {
+  try {
+    const builtinPath = chromium.executablePath()
+    if (builtinPath && fs.existsSync(builtinPath)) {
+      return builtinPath
+    }
+  } catch {
+    // Fall back to explicit cache scan below.
+  }
+  const cacheRoots = [
+    path.join(os.homedir(), 'Library/Caches/ms-playwright'),
+    path.join(os.homedir(), '.cache/ms-playwright'),
+  ]
+  const subpaths = [
+    'chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
+    'chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
+    'chrome-linux64/chrome',
+    'chrome-linux/chrome',
+  ]
+  for (const cacheRoot of cacheRoots) {
+    if (!fs.existsSync(cacheRoot)) continue
     const entries = fs.readdirSync(cacheRoot).sort().reverse()
     for (const entry of entries) {
-      if (entry.startsWith('chromium-')) {
-        const macCandidate = path.join(
-          cacheRoot,
-          entry,
-          'chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
-        )
-        if (fs.existsSync(macCandidate)) return macCandidate
-        const armCandidate = path.join(
-          cacheRoot,
-          entry,
-          'chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
-        )
-        if (fs.existsSync(armCandidate)) return armCandidate
+      if (!entry.startsWith('chromium-')) continue
+      for (const rel of subpaths) {
+        const candidate = path.join(cacheRoot, entry, rel)
+        if (fs.existsSync(candidate)) return candidate
       }
     }
   }
   throw new Error(
-    'Could not locate cached Playwright Chromium binary. Set CHROMIUM_PATH explicitly.',
+    'Could not locate cached Playwright Chromium binary. Run `pnpm exec playwright-core install chromium` or set CHROMIUM_PATH explicitly.',
   )
 }
 
@@ -70,6 +79,26 @@ async function main() {
   assert.ok(
     fs.existsSync(path.join(distDir, 'index.html')),
     'dist/index.html missing — run `pnpm run build` first',
+  )
+  for (const requiredAsset of [
+    '_headers',
+    '404.html',
+    'robots.txt',
+    'sitemap.xml',
+    'og/og.png',
+    'apple-touch-icon.png',
+  ]) {
+    assert.ok(
+      fs.existsSync(path.join(distDir, requiredAsset)),
+      `Missing production hosting asset in dist/: ${requiredAsset}`,
+    )
+  }
+  const headersRaw = fs.readFileSync(path.join(distDir, '_headers'), 'utf8')
+  assert.ok(
+    headersRaw.includes('/assets/*') &&
+      headersRaw.includes('immutable') &&
+      headersRaw.includes('X-Content-Type-Options: nosniff'),
+    'dist/_headers is missing immutable asset cache or security headers',
   )
 
   const screenshotDir =
@@ -111,15 +140,42 @@ async function main() {
     const page = await context.newPage()
 
     const errors = []
+    const externalRequests = []
     page.on('pageerror', (err) => errors.push(`pageerror: ${err.message}`))
     page.on('console', (msg) => {
       if (msg.type() === 'error') {
         errors.push(`console.error: ${msg.text()}`)
       }
     })
+    page.on('request', (req) => {
+      const reqUrl = req.url()
+      if (
+        (reqUrl.startsWith('http://') || reqUrl.startsWith('https://')) &&
+        !reqUrl.startsWith(baseUrl)
+      ) {
+        externalRequests.push(reqUrl)
+      }
+    })
 
     await page.goto(baseUrl, { waitUntil: 'networkidle' })
     await page.waitForTimeout(350)
+
+    // 0. Canonical, OpenGraph, Bing Webmaster & zero-external-CDN check
+    const seoMeta = await page.evaluate(() => ({
+      canonical: document.querySelector('link[rel="canonical"]')?.getAttribute('href'),
+      ogUrl: document.querySelector('meta[property="og:url"]')?.getAttribute('content'),
+      ogImage: document.querySelector('meta[property="og:image"]')?.getAttribute('content'),
+      bingVerify: document.querySelector('meta[name="msvalidate.01"]')?.getAttribute('content'),
+    }))
+    assert.equal(seoMeta.canonical, 'https://dsh-multi.igng.net/', 'Unexpected canonical URL')
+    assert.equal(seoMeta.ogUrl, 'https://dsh-multi.igng.net/', 'Unexpected og:url')
+    assert.equal(seoMeta.ogImage, 'https://dsh-multi.igng.net/og/og.png', 'Unexpected og:image')
+    assert.ok(Boolean(seoMeta.bingVerify), 'Missing msvalidate.01 verification tag')
+    assert.deepEqual(
+      externalRequests,
+      [],
+      `Website must not make third-party CDN requests:\n${externalRequests.join('\n')}`,
+    )
 
     // 1. Desktop no horizontal overflow check
     const overflowDesktop = await page.evaluate(
@@ -161,9 +217,14 @@ async function main() {
     // Snapped unified frame (100%)
     await page.evaluate(
       (y) => window.scrollTo({ top: y, behavior: 'instant' }),
-      trackMetrics.top - 64 + scrollable * 1.0,
+      trackMetrics.top - 64 + scrollable * 1.0 + 16,
     )
-    await page.waitForTimeout(450)
+    await page.waitForFunction(
+      () => document.querySelector('[data-testid="convergence-pct"]')?.textContent?.trim() === '100%',
+      null,
+      { timeout: 4000 },
+    )
+    await page.waitForTimeout(180)
     const pctText = await page.getByTestId('convergence-pct').textContent()
     assert.equal(pctText?.trim(), '100%', 'Convergence HUD must reach 100% when scrolled to end of track')
 

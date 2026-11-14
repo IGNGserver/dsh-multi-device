@@ -59,5 +59,6 @@ DeepSeek Harness（DSH）多设备管理插件：以 SSH 隧道连接远端 DSH�
 ## 环境事实（不含凭据）
 
 - 远端仓库：`https://github.com/IGNGserver/dsh-multi-device`
+- 产品官网：`https://dsh-multi.igng.net/`（源码位于 `website/`，独立锁文件，不进入插件 `.tgz`；由 `.github/workflows/website.yml` 在 `main` 与 `release-published` 时自动部署至 Cloudflare Pages Direct Upload 项目 `dsh-multi-website`，详见 `website/docs/HOSTING.md`）
 - 运行方式：作为 Cordis 插件安装于本地 DSH Desktop（`$DSH_HOME/profiles/desktop`）或 DSH Web（`$DSH_HOME/profiles/web`）中，通过 SSH 隧道连接多台远端 `dsh web` 开发机（HTTP(S) direct 仅默认关闭的高级兼容）。
-- CI/发布触发器：`ci.yml` 由 push `main` 与所有 PR 触发；`release.yml` 由 `v*.*.*` tag 推送触发（默认 `test` 渠道 prerelease），亦支持在 tag 上手动 `workflow_dispatch` 指定 `test` / `stable` 渠道。
+- CI/发布触发器：`ci.yml` 由 push `main` 与所有 PR 触发；`website.yml` 由涉及 `website/**` 的 PR / `main` 推送及 `release-published` 触发；`release.yml` 由 `v*.*.*` tag 推送触发（默认 `test` 渠道 prerelease），亦支持在 tag 上手动 `workflow_dispatch` 指定 `test` / `stable` 渠道。
