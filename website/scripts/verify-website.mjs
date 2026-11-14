@@ -1,474 +1,366 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
 import fs from 'node:fs'
-import net from 'node:net'
+import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright-core'
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const websiteRoot = path.resolve(__dirname, '..')
-const distDir = path.join(websiteRoot, 'dist')
+const ROOT_DIR = path.resolve(import.meta.dirname, '..')
+const DIST_DIR = path.join(ROOT_DIR, 'dist')
+const SHOT_DIR =
+  process.env.SCREENSHOT_DIR ||
+  process.env.WEBSITE_VERIFY_SCREENSHOT_DIR ||
+  path.join(os.tmpdir(), 'dsh-multi-website-verify-shots')
+
+const MIME_TYPES = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.json': 'application/json; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
+  '.xml': 'application/xml; charset=utf-8',
+}
 
 function findChromiumExecutable() {
-  if (process.env.CHROMIUM_PATH && fs.existsSync(process.env.CHROMIUM_PATH)) {
-    return process.env.CHROMIUM_PATH
+  if (process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH) {
+    return process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
   }
-  try {
-    const builtinPath = chromium.executablePath()
-    if (builtinPath && fs.existsSync(builtinPath)) {
-      return builtinPath
-    }
-  } catch {
-    // Fall back to explicit cache scan below.
+  const bundled = chromium.executablePath()
+  if (bundled && fs.existsSync(bundled)) {
+    return bundled
   }
-  const cacheRoots = [
-    path.join(os.homedir(), 'Library/Caches/ms-playwright'),
-    path.join(os.homedir(), '.cache/ms-playwright'),
+
+  const cacheDirs = [
+    path.join(os.homedir(), 'Library', 'Caches', 'ms-playwright'),
+    path.join(os.homedir(), '.cache', 'ms-playwright'),
+    '/ms-playwright',
   ]
-  const subpaths = [
-    'chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
-    'chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
-    'chrome-linux64/chrome',
-    'chrome-linux/chrome',
-  ]
-  for (const cacheRoot of cacheRoots) {
-    if (!fs.existsSync(cacheRoot)) continue
-    const entries = fs.readdirSync(cacheRoot).sort().reverse()
+  for (const dir of cacheDirs) {
+    if (!fs.existsSync(dir)) continue
+    const entries = fs
+      .readdirSync(dir)
+      .filter((name) => name.startsWith('chromium'))
+      .sort()
+      .reverse()
     for (const entry of entries) {
-      if (!entry.startsWith('chromium-')) continue
-      for (const rel of subpaths) {
-        const candidate = path.join(cacheRoot, entry, rel)
-        if (fs.existsSync(candidate)) return candidate
+      const candidates = [
+        path.join(
+          dir,
+          entry,
+          'chrome-mac-arm64',
+          'Google Chrome for Testing.app',
+          'Contents',
+          'MacOS',
+          'Google Chrome for Testing',
+        ),
+        path.join(
+          dir,
+          entry,
+          'chrome-mac-x64',
+          'Google Chrome for Testing.app',
+          'Contents',
+          'MacOS',
+          'Google Chrome for Testing',
+        ),
+        path.join(dir, entry, 'chrome-linux64', 'chrome'),
+        path.join(dir, entry, 'chrome-linux', 'chrome'),
+      ]
+      for (const candidate of candidates) {
+        if (fs.existsSync(candidate)) {
+          return candidate
+        }
       }
     }
   }
-  throw new Error(
-    'Could not locate cached Playwright Chromium binary. Run `pnpm exec playwright-core install chromium` or set CHROMIUM_PATH explicitly.',
-  )
+  throw new Error('Could not locate a Playwright Chromium binary.')
 }
 
-function getFreePort() {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer()
-    srv.listen(0, '127.0.0.1', () => {
-      const addr = srv.address()
-      const port = typeof addr === 'object' && addr ? addr.port : 0
-      srv.close((err) => (err ? reject(err) : resolve(port)))
-    })
-    srv.on('error', reject)
-  })
-}
-
-async function waitForHttpReady(url, timeoutMs = 15000) {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(url)
-      if (res.ok) return
-    } catch {
-      // retry
-    }
-    await new Promise((r) => setTimeout(r, 150))
-  }
-  throw new Error(`Timed out waiting for preview server at ${url}`)
-}
-
-async function main() {
-  assert.ok(
-    fs.existsSync(path.join(distDir, 'index.html')),
-    'dist/index.html missing — run `pnpm run build` first',
-  )
-  for (const requiredAsset of [
-    '_headers',
+function assertDistIntegrity() {
+  const required = [
+    'index.html',
     '404.html',
     'robots.txt',
     'sitemap.xml',
-    'og/og.png',
+    'favicon.svg',
     'apple-touch-icon.png',
-  ]) {
-    assert.ok(
-      fs.existsSync(path.join(distDir, requiredAsset)),
-      `Missing production hosting asset in dist/: ${requiredAsset}`,
-    )
+    path.join('og', 'og.png'),
+  ]
+  for (const rel of required) {
+    const full = path.join(DIST_DIR, rel)
+    assert.ok(fs.existsSync(full), `Missing build artifact: dist/${rel}`)
   }
-  const headersRaw = fs.readFileSync(path.join(distDir, '_headers'), 'utf8')
+
+  const indexHtml = fs.readFileSync(path.join(DIST_DIR, 'index.html'), 'utf8')
   assert.ok(
-    headersRaw.includes('/assets/*') &&
-      headersRaw.includes('immutable') &&
-      headersRaw.includes('X-Content-Type-Options: nosniff'),
-    'dist/_headers is missing immutable asset cache or security headers',
+    indexHtml.includes('<meta name="msvalidate.01" content="B411826ACAE5C5CD20EA5574C3F8A6E4"'),
+    'index.html must retain msvalidate.01 verification tag',
   )
-
-  const screenshotDir =
-    process.env.SCREENSHOT_DIR ||
-    path.join(
-      process.env.BUILD_SCRATCH_ROOT || path.join(os.homedir(), '.build'),
-      'DSH多设备插件/official-website/screenshots',
-    )
-  fs.mkdirSync(screenshotDir, { recursive: true })
-
-  const port = await getFreePort()
-  const baseUrl = `http://127.0.0.1:${port}`
-  const viteBin = path.join(websiteRoot, 'node_modules/.bin/vite')
-
-  const server = spawn(
-    viteBin,
-    ['preview', '--host', '127.0.0.1', '--port', String(port), '--strictPort'],
-    {
-      cwd: websiteRoot,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    },
+  assert.ok(
+    indexHtml.includes('<link rel="canonical" href="https://dsh-multi.igng.net/"'),
+    'index.html must retain canonical URL',
   )
+  assert.ok(
+    indexHtml.includes('https://dsh-multi.igng.net/og/og.png'),
+    'index.html must retain OpenGraph image URL',
+  )
+  assert.ok(
+    !/fonts\.googleapis\.com|fonts\.gstatic\.com|cdn\.jsdelivr\.net|unpkg\.com/.test(indexHtml),
+    'index.html must not load external CDN fonts or scripts',
+  )
+}
 
+function startStaticServer() {
+  return new Promise((resolve, reject) => {
+    const server = http.createServer((req, res) => {
+      const reqPath = (req.url || '/').split('?')[0]
+      let target = path.join(DIST_DIR, reqPath === '/' ? 'index.html' : reqPath)
+      if (!target.startsWith(DIST_DIR)) {
+        res.writeHead(403)
+        res.end('Forbidden')
+        return
+      }
+      if (!fs.existsSync(target) || fs.statSync(target).isDirectory()) {
+        target = path.join(DIST_DIR, 'index.html')
+      }
+      const ext = path.extname(target)
+      res.writeHead(200, { 'Content-Type': MIME_TYPES[ext] || 'application/octet-stream' })
+      fs.createReadStream(target).pipe(res)
+    })
+    server.on('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address()
+      assert.ok(addr && typeof addr === 'object')
+      resolve({ server, url: `http://127.0.0.1:${addr.port}/` })
+    })
+  })
+}
+
+async function main() {
+  assertDistIntegrity()
+  fs.mkdirSync(SHOT_DIR, { recursive: true })
+
+  const { server, url } = await startStaticServer()
   const executablePath = findChromiumExecutable()
-  let browser
+  const browser = await chromium.launch({
+    executablePath,
+    headless: true,
+    args: ['--no-sandbox', '--disable-dev-shm-usage'],
+  })
 
   try {
-    await waitForHttpReady(baseUrl)
-
-    browser = await chromium.launch({
-      executablePath,
-      headless: true,
-    })
+    const consoleErrors = []
+    const pageErrors = []
 
     const context = await browser.newContext({
       viewport: { width: 1440, height: 900 },
-      deviceScaleFactor: 2,
+      colorScheme: 'light',
     })
     const page = await context.newPage()
-
-    const errors = []
-    const externalRequests = []
-    page.on('pageerror', (err) => errors.push(`pageerror: ${err.message}`))
     page.on('console', (msg) => {
       if (msg.type() === 'error') {
-        errors.push(`console.error: ${msg.text()}`)
+        consoleErrors.push(msg.text())
       }
     })
-    page.on('request', (req) => {
-      const reqUrl = req.url()
-      if (
-        (reqUrl.startsWith('http://') || reqUrl.startsWith('https://')) &&
-        !reqUrl.startsWith(baseUrl)
-      ) {
-        externalRequests.push(reqUrl)
-      }
+    page.on('pageerror', (err) => {
+      pageErrors.push(err.message)
     })
 
-    await page.goto(baseUrl, { waitUntil: 'networkidle' })
-    await page.waitForTimeout(350)
+    await page.goto(url, { waitUntil: 'networkidle' })
+    await page.locator('[data-testid="interactive-workbench"]').waitFor({ state: 'visible' })
 
-    // 0. Canonical, OpenGraph, Bing Webmaster & zero-external-CDN check
-    const seoMeta = await page.evaluate(() => ({
-      canonical: document.querySelector('link[rel="canonical"]')?.getAttribute('href'),
-      ogUrl: document.querySelector('meta[property="og:url"]')?.getAttribute('content'),
-      ogImage: document.querySelector('meta[property="og:image"]')?.getAttribute('content'),
-      bingVerify: document.querySelector('meta[name="msvalidate.01"]')?.getAttribute('content'),
+    // 1. Verify default light theme follows system light
+    const lightState = await page.evaluate(() => ({
+      themeAttr: document.documentElement.dataset.theme,
+      darkBodyAttr: document.body.getAttribute('data-ds-dark-theme'),
+      bg: getComputedStyle(document.body).backgroundColor,
     }))
-    assert.equal(seoMeta.canonical, 'https://dsh-multi.igng.net/', 'Unexpected canonical URL')
-    assert.equal(seoMeta.ogUrl, 'https://dsh-multi.igng.net/', 'Unexpected og:url')
-    assert.equal(seoMeta.ogImage, 'https://dsh-multi.igng.net/og/og.png', 'Unexpected og:image')
-    assert.ok(Boolean(seoMeta.bingVerify), 'Missing msvalidate.01 verification tag')
-    assert.deepEqual(
-      externalRequests,
-      [],
-      `Website must not make third-party CDN requests:\n${externalRequests.join('\n')}`,
-    )
+    assert.equal(lightState.themeAttr, 'light')
+    assert.equal(lightState.darkBodyAttr, null)
+    assert.equal(lightState.bg, 'rgb(255, 255, 255)')
 
-    // 1. Desktop no horizontal overflow check
-    const overflowDesktop = await page.evaluate(
-      () => document.documentElement.scrollWidth > window.innerWidth,
-    )
-    assert.equal(overflowDesktop, false, 'Desktop viewport must not overflow horizontally')
-
-    // Screenshot 01: Hero + Phase 01 Scattered 3D Windows
-    await page.screenshot({
-      path: path.join(screenshotDir, '01-hero-scattered-1440.png'),
-    })
-
-    const scatterTransform = await page
-      .locator('.mini-dsh-card[data-device-id="ubuntu-dev"]')
-      .evaluate((el) => el.style.transform)
-    assert.match(
-      scatterTransform,
-      /translate3d\(/,
-      'Scattered 3D window must have 3D transform applied',
-    )
-
-    // 2. Scroll through Convergence Stage phases (Phase 02 -> Phase 03 -> Phase 04 Snapped)
-    const trackMetrics = await page.locator('[data-testid="convergence-track"]').evaluate((el) => {
-      const r = el.getBoundingClientRect()
-      return { top: window.scrollY + r.top, height: r.height, vh: window.innerHeight }
-    })
-    const scrollable = trackMetrics.height - (trackMetrics.vh - 64)
-
-    // Mid-scroll Z-Stack (~72%)
-    await page.evaluate(
-      (y) => window.scrollTo({ top: y, behavior: 'instant' }),
-      trackMetrics.top - 64 + scrollable * 0.72,
-    )
-    await page.waitForTimeout(420)
-    await page.screenshot({
-      path: path.join(screenshotDir, '02-convergence-zstack-1440.png'),
-    })
-
-    // Snapped unified frame (100%)
-    await page.evaluate(
-      (y) => window.scrollTo({ top: y, behavior: 'instant' }),
-      trackMetrics.top - 64 + scrollable * 1.0 + 16,
-    )
-    await page.waitForFunction(
-      () => document.querySelector('[data-testid="convergence-pct"]')?.textContent?.trim() === '100%',
-      null,
-      { timeout: 4000 },
-    )
-    await page.waitForTimeout(180)
-    const pctText = await page.getByTestId('convergence-pct').textContent()
-    assert.equal(pctText?.trim(), '100%', 'Convergence HUD must reach 100% when scrolled to end of track')
-
-    const snappedTransform = await page
-      .locator('.mini-dsh-card[data-device-id="__local__"]')
-      .evaluate((el) => el.style.transform)
-    assert.notEqual(
-      snappedTransform,
-      scatterTransform,
-      'Snapped transform must differ from initial scatter pose',
-    )
-
-    // Verify converged top tab strip is visually in front of 3D cards when snapped
-    const topStripHit = await page.evaluate(() => {
-      const strip = document.querySelector('.converged-top-strip .dsh-md-native-bar')
-      if (!strip) return false
-      const r = strip.getBoundingClientRect()
-      const hit = document.elementFromPoint(r.left + 80, r.top + r.height / 2)
-      return Boolean(hit && strip.contains(hit))
-    })
-    assert.equal(
-      topStripHit,
-      true,
-      'Converged 42px native tab bar must sit in front of snapped 3D cards in Z-space',
-    )
-
-    await page.screenshot({
-      path: path.join(screenshotDir, '03-convergence-snapped-1440.png'),
-    })
-
-    // Helper to scroll an element cleanly below the 58px fixed header
-    const scrollBelowHeader = async (selector) => {
-      await page.locator(selector).evaluate((el) => {
-        const r = el.getBoundingClientRect()
-        window.scrollTo({ top: window.scrollY + r.top - 72, behavior: 'instant' })
-      })
-      await page.waitForTimeout(260)
+    // Ensure all 3 disclosure panels default closed
+    for (const id of ['details-cli', 'details-checklist', 'details-architecture']) {
+      const expanded = await page.getAttribute(`[data-testid="${id}"]`, 'aria-expanded')
+      assert.equal(expanded, 'false', `${id} must be closed by default`)
     }
 
-    // 3. Scroll to Interactive Workbench & verify Keep-Alive + Capsule Urgency Order
-    await scrollBelowHeader('[data-testid="interactive-workbench"]')
+    await page.screenshot({ path: path.join(SHOT_DIR, '01-light-desktop.png'), fullPage: false })
+    await page.screenshot({ path: path.join(SHOT_DIR, '07-fullpage-light.png'), fullPage: true })
 
-    // Verify gpu-a100 capsule segment order: pending (Amber) -> running (Blue)
-    const gpuTones = await page
-      .locator('[data-testid="capsule-gpu-a100"] .dsh-md-tab-status-part')
-      .evaluateAll((els) => els.map((e) => e.getAttribute('data-tone')))
-    assert.deepEqual(
-      gpuTones,
-      ['pending', 'running'],
-      'gpu-a100 status capsule must follow strict pending -> running urgency order',
+    // 2. Live OS dark mode follow test
+    await page.emulateMedia({ colorScheme: 'dark' })
+    await page.waitForFunction(
+      () =>
+        document.documentElement.dataset.theme === 'dark' &&
+        getComputedStyle(document.body).backgroundColor === 'rgb(21, 21, 23)',
+    )
+    const darkState = await page.evaluate(() => ({
+      themeAttr: document.documentElement.dataset.theme,
+      darkBodyAttr: document.body.getAttribute('data-ds-dark-theme'),
+      bg: getComputedStyle(document.body).backgroundColor,
+    }))
+    assert.equal(darkState.themeAttr, 'dark')
+    assert.equal(darkState.darkBodyAttr, 'true')
+    assert.equal(darkState.bg, 'rgb(21, 21, 23)')
+    await page.screenshot({ path: path.join(SHOT_DIR, '02-dark-desktop.png'), fullPage: false })
+
+    // 3. Explicit Light theme persistence across reload
+    await page.click('[data-testid="theme-opt-light"]')
+    await page.waitForFunction(
+      () =>
+        document.documentElement.dataset.theme === 'light' &&
+        getComputedStyle(document.body).backgroundColor === 'rgb(255, 255, 255)',
+    )
+    await page.reload({ waitUntil: 'networkidle' })
+    const persistedTheme = await page.evaluate(() => ({
+      stored: localStorage.getItem('dsh-md-site-theme'),
+      themeAttr: document.documentElement.dataset.theme,
+    }))
+    assert.equal(persistedTheme.stored, 'light')
+    assert.equal(persistedTheme.themeAttr, 'light')
+
+    // Restore system mode (dark emulated right now) and back to light for interaction checks
+    await page.click('[data-testid="theme-opt-system"]')
+    await page.emulateMedia({ colorScheme: 'light' })
+    await page.waitForFunction(() => document.documentElement.dataset.theme === 'light')
+
+    // 4. Before vs After 2D mode switch + click-to-dock
+    await page.click('[data-testid="mode-scattered"]')
+    await page.locator('[data-testid="scattered-stage"]').waitFor({ state: 'visible' })
+    await page.screenshot({ path: path.join(SHOT_DIR, '03-scattered-grid.png'), fullPage: false })
+    await page.click('[data-testid="scattered-card-gpu-a100"]')
+    await page.locator('[data-testid="interactive-workbench"]').waitFor({ state: 'visible' })
+    assert.equal(
+      await page.getAttribute('[data-testid="device-tab-gpu-a100"]', 'aria-selected'),
+      'true',
     )
 
-    // Verify Keep-Alive: type draft on ubuntu-dev, switch to local, switch back
-    await page.getByTestId('device-tab-ubuntu-dev').click()
-    await page.waitForTimeout(200)
-    const customDraft = 'KEEP_ALIVE_VERIFIED_DRAFT_9921'
-    await page.getByTestId('composer-ubuntu-dev').fill(customDraft)
-
-    const streamBefore = await page.getByTestId('live-stream-ubuntu-dev').textContent()
-
-    await page.getByTestId('device-tab-__local__').click()
-    await page.waitForTimeout(1250)
-
-    // Assert ubuntu-dev wrapper is hidden via display:none, NOT unmounted!
-    const ubuntuWrapperState = await page
-      .locator('.workbench-stage-viewport .dsh-md-native-frame-wrap[data-device-id="ubuntu-dev"]')
-      .evaluate((el) => ({
-        inDom: document.body.contains(el),
-        display: el.style.display,
-      }))
-    assert.equal(ubuntuWrapperState.inDom, true, 'Keep-Alive wrapper must remain in DOM')
-    assert.equal(ubuntuWrapperState.display, 'none', 'Inactive Keep-Alive wrapper must be display:none')
-
-    // Switch back to ubuntu-dev and verify draft + advanced stream tick
-    await page.getByTestId('device-tab-ubuntu-dev').click()
-    await page.waitForTimeout(200)
-    const preservedValue = await page.getByTestId('composer-ubuntu-dev').inputValue()
-    assert.equal(preservedValue, customDraft, 'Composer draft must survive tab switches without reload')
-    const streamAfter = await page.getByTestId('live-stream-ubuntu-dev').textContent()
-    assert.notEqual(streamAfter, streamBefore, 'Background Keep-Alive stream must continue advancing while hidden')
-
-    // 4. Click status capsule on macos-ci -> open official Menu -> jump to unread session -> verify unread decrements
-    const macUnreadBefore = await page
-      .getByTestId('capsule-part-macos-ci-done')
-      .textContent()
-    assert.equal(macUnreadBefore?.trim(), '2', 'macos-ci initially has 2 unread finished sessions')
-
-    await page.getByTestId('capsule-part-macos-ci-done').click()
-    await page.waitForTimeout(220)
-    await page.getByTestId('attention-menu').waitFor({ state: 'visible' })
-
-    // Verify menu popover extends below the 42px bar without overflow clipping
-    const menuUnclipped = await page.evaluate(() => {
-      const bar = document.querySelector('[data-testid="native-tab-bar"]')
-      const menu = document.querySelector('[data-testid="attention-menu"]')
-      if (!bar || !menu) return false
-      const barR = bar.getBoundingClientRect()
-      const menuR = menu.getBoundingClientRect()
-      const hit = document.elementFromPoint(
-        menuR.left + menuR.width / 2,
-        menuR.top + Math.min(48, menuR.height / 2),
-      )
-      return menuR.bottom > barR.bottom + 60 && Boolean(hit && menu.contains(hit))
-    })
+    // 5. Keep-Alive draft preservation + background stream completion
+    await page.click('[data-testid="device-tab-ubuntu-dev"]')
+    await page.fill('[data-testid="composer-ubuntu-dev"]', 'KeepAlive check text')
+    await page.click('[data-testid="device-tab-__local__"]')
     assert.equal(
-      menuUnclipped,
-      true,
-      'Official Attention Menu popover must float unclipped above the workbench',
+      await page.locator('[data-testid="composer-ubuntu-dev"]').count(),
+      1,
+      'ubuntu-dev composer should stay mounted in DOM while inactive',
+    )
+    await page.click('[data-testid="device-tab-ubuntu-dev"]')
+    assert.equal(
+      await page.inputValue('[data-testid="composer-ubuntu-dev"]'),
+      'KeepAlive check text',
+    )
+    await page.fill('[data-testid="composer-ubuntu-dev"]', 'Run quick check')
+    await page.press('[data-testid="composer-ubuntu-dev"]', 'Enter')
+    await page.click('[data-testid="device-tab-__local__"]')
+    await page.waitForTimeout(1000)
+    await page.click('[data-testid="device-tab-ubuntu-dev"]')
+    const streamText = await page.textContent('[data-testid="live-stream-ubuntu-dev"]')
+    assert.ok(
+      streamText && streamText.includes('检查完成'),
+      'background stream should complete while tab was inactive',
     )
 
-    await page.screenshot({
-      path: path.join(screenshotDir, '04-workbench-attention-menu-1440.png'),
-    })
-
-    await page.getByTestId('menu-item-remote:macos-ci:sess-notarize').click()
-    await page.waitForTimeout(220)
-    const macUnreadAfter = await page
-      .getByTestId('capsule-part-macos-ci-done')
-      .textContent()
+    // 6. Attention capsule & read-ack (macos-ci: 2 -> 1)
     assert.equal(
-      macUnreadAfter?.trim(),
+      await page.textContent('[data-testid="capsule-part-macos-ci-done"]'),
+      '2',
+    )
+    await page.click('[data-testid="capsule-macos-ci"]')
+    await page.locator('[data-testid="attention-menu"]').waitFor({ state: 'visible' })
+    await page.click('[data-testid="menu-item-remote:macos-ci:sess-notarize"]')
+    assert.equal(
+      await page.getAttribute('[data-testid="device-tab-macos-ci"]', 'aria-selected'),
+      'true',
+    )
+    assert.equal(
+      await page.textContent('[data-testid="capsule-part-macos-ci-done"]'),
       '1',
-      'Opening an unread session from the Attention Menu must clear its unread state via read-ack',
     )
 
-    // 5. Navigate via gpu-a100 pending capsule -> approve tool -> verify Amber transitions to Blue running!
-    await page.getByTestId('capsule-part-gpu-a100-pending').click()
-    await page.waitForTimeout(180)
-    await page.getByTestId('menu-item-remote:gpu-a100:sess-fp8-approval').click()
-    await page.waitForTimeout(220)
-    await page.screenshot({
-      path: path.join(screenshotDir, '05-workbench-gpu-approval-1440.png'),
-    })
-
-    await page.getByTestId('approve-allow-btn').click()
-    await page.waitForTimeout(250)
-    const pendingGone = await page
-      .locator('[data-testid="capsule-part-gpu-a100-pending"]')
-      .count()
-    assert.equal(pendingGone, 0, 'Approving pending tool must immediately clear Amber pending count')
-    const gpuRunningNow = await page
-      .getByTestId('capsule-part-gpu-a100-running')
-      .textContent()
-    assert.equal(gpuRunningNow?.trim(), '2', 'Approved session must transition into Blue running count')
-
-    // 6. Toggle 3D Keep-Alive Stack X-Ray perspective
-    await page.getByTestId('toggle-exploded-3d').click()
-    await scrollBelowHeader('[data-testid="interactive-workbench"]')
-    await page.waitForTimeout(450)
-    await page.screenshot({
-      path: path.join(screenshotDir, '06-workbench-3d-xray-1440.png'),
-    })
-    await page.getByTestId('toggle-exploded-3d').click()
-    await page.waitForTimeout(350)
-
-    // 7. Open Settings Modal & import prod-arm64 from ~/.ssh/config
-    await page.getByTestId('open-settings-btn').click()
-    await page.waitForTimeout(250)
-    await page.getByTestId('import-prod-btn').click()
-    await page.waitForTimeout(200)
-    await page.screenshot({
-      path: path.join(screenshotDir, '07-settings-modal-1440.png'),
-    })
-    await page.getByTestId('close-settings-btn').click()
-    await page.waitForTimeout(200)
-    await page.getByTestId('device-tab-prod-arm64').waitFor({ state: 'visible' })
-
-    // 8. Capture Architecture, Boundaries, and Installation sections + test English toggle
-    await scrollBelowHeader('#architecture')
-    await page.screenshot({
-      path: path.join(screenshotDir, '08-architecture-1440.png'),
-    })
-
-    await scrollBelowHeader('#boundaries')
-    await page.screenshot({
-      path: path.join(screenshotDir, '09-boundaries-1440.png'),
-    })
-
-    await scrollBelowHeader('#install')
-    await page.screenshot({
-      path: path.join(screenshotDir, '10-install-1440.png'),
-    })
-
-    // Toggle to English & verify copy switches cleanly
-    await page.getByTestId('locale-toggle').click()
-    await page.waitForTimeout(200)
-    const htmlLang = await page.evaluate(() => document.documentElement.lang)
-    assert.equal(htmlLang, 'en', 'Locale toggle must switch html[lang] to en')
-
-    // 9. Responsive checks: Tablet (834x1112) & Mobile (390x844)
-    await page.setViewportSize({ width: 834, height: 1112 })
-    await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }))
-    await page.waitForTimeout(300)
-    const overflowTablet = await page.evaluate(
-      () => document.documentElement.scrollWidth > window.innerWidth,
+    // 7. Approval action on gpu-a100 (pending: 1, running: 1 -> pending: 0, running: 2)
+    await page.click('[data-testid="device-tab-gpu-a100"]')
+    assert.equal(
+      await page.textContent('[data-testid="capsule-part-gpu-a100-pending"]'),
+      '1',
     )
-    assert.equal(overflowTablet, false, 'Tablet 834px viewport must not overflow horizontally')
-
-    await page.setViewportSize({ width: 390, height: 844 })
-    await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }))
-    await page.waitForTimeout(350)
-    const overflowMobile = await page.evaluate(
-      () => document.documentElement.scrollWidth > window.innerWidth,
+    assert.equal(
+      await page.textContent('[data-testid="capsule-part-gpu-a100-running"]'),
+      '1',
     )
-    assert.equal(overflowMobile, false, 'Mobile 390px viewport must not overflow horizontally')
-    await page.screenshot({
-      path: path.join(screenshotDir, '11-mobile-hero-390.png'),
-    })
-
-    await page.getByTestId('interactive-workbench').scrollIntoViewIfNeeded()
-    await page.waitForTimeout(300)
-    await page.screenshot({
-      path: path.join(screenshotDir, '12-mobile-workbench-390.png'),
-    })
-
-    assert.deepEqual(errors, [], `Unexpected browser errors:\n${errors.join('\n')}`)
-
-    console.log(
-      JSON.stringify(
-        {
-          ok: true,
-          verifiedViewports: ['1440x900', '834x1112', '390x844'],
-          screenshotsSavedTo: screenshotDir,
-          checks: [
-            'zero-console-and-page-errors',
-            'zero-horizontal-overflow-all-breakpoints',
-            '3d-convergence-scroll-scatter-zstack-snap',
-            'keep-alive-dom-and-composer-draft-preservation',
-            'background-live-stream-advancement',
-            'status-capsule-amber-blue-green-order',
-            'attention-menu-session-jump-and-read-ack',
-            'approval-amber-to-blue-live-transition',
-            '3d-exploded-xray-stack',
-            'ssh-config-prod-arm64-import',
-            'zh-en-bilingual-switch',
-          ],
-        },
-        null,
-        2,
-      ),
+    await page.click('[data-testid="approve-allow-btn"]')
+    assert.equal(await page.locator('[data-testid="capsule-part-gpu-a100-pending"]').count(), 0)
+    assert.equal(
+      await page.textContent('[data-testid="capsule-part-gpu-a100-running"]'),
+      '2',
     )
+
+    // 8. Settings modal & import prod-arm64
+    await page.click('[data-testid="open-settings-btn"]')
+    await page.locator('[data-testid="settings-modal"]').waitFor({ state: 'visible' })
+    await page.screenshot({ path: path.join(SHOT_DIR, '04-settings-modal.png'), fullPage: false })
+    await page.click('[data-testid="import-prod-btn"]')
+    await page.locator('[data-testid="device-tab-prod-arm64"]').waitFor({ state: 'visible' })
+    await page.click('[data-testid="close-settings-btn"]')
+
+    // 9. Disclosure panels open on demand & bilingual toggle
+    for (const id of ['details-cli', 'details-checklist', 'details-architecture']) {
+      await page.click(`[data-testid="${id}"]`)
+      assert.equal(await page.getAttribute(`[data-testid="${id}"]`, 'aria-expanded'), 'true')
+    }
+    await page.click('[data-testid="locale-toggle"]')
+    assert.equal(await page.getAttribute('html', 'lang'), 'en')
+    const h1Text = await page.textContent('h1')
+    assert.ok(h1Text && h1Text.includes('Manage every dev machine'))
+    await page.click('[data-testid="locale-toggle"]')
+    assert.equal(await page.getAttribute('html', 'lang'), 'zh-CN')
+
+    // 10. Responsive viewports & zero horizontal overflow check
+    const viewports = [
+      { width: 1440, height: 900, name: 'desktop' },
+      { width: 834, height: 1112, name: 'tablet' },
+      { width: 390, height: 844, name: 'mobile' },
+    ]
+    for (const vp of viewports) {
+      await page.setViewportSize({ width: vp.width, height: vp.height })
+      const overflow = await page.evaluate(() => ({
+        scrollW: document.documentElement.scrollWidth,
+        innerW: window.innerWidth,
+      }))
+      assert.ok(
+        overflow.scrollW <= overflow.innerW,
+        `${vp.name} (${vp.width}px) has horizontal overflow: ${overflow.scrollW} > ${overflow.innerW}`,
+      )
+      if (vp.name === 'mobile') {
+        await page.evaluate(() => window.scrollTo(0, 0))
+        await page.screenshot({
+          path: path.join(SHOT_DIR, '05-mobile-light.png'),
+          fullPage: true,
+        })
+        await page.emulateMedia({ colorScheme: 'dark' })
+        await page.waitForFunction(
+          () =>
+            document.documentElement.dataset.theme === 'dark' &&
+            getComputedStyle(document.body).backgroundColor === 'rgb(21, 21, 23)',
+        )
+        await page.evaluate(() => window.scrollTo(0, 0))
+        await page.screenshot({
+          path: path.join(SHOT_DIR, '06-mobile-dark.png'),
+          fullPage: true,
+        })
+      }
+    }
+
+    // 11. Zero runtime errors
+    assert.deepEqual(pageErrors, [], `Uncaught page errors: ${pageErrors.join('; ')}`)
+    assert.deepEqual(consoleErrors, [], `Console errors: ${consoleErrors.join('; ')}`)
+
+    console.log(`Website verification passed. Screenshots written to: ${SHOT_DIR}`)
+    await context.close()
   } finally {
-    if (browser) await browser.close()
-    server.kill('SIGTERM')
+    await browser.close()
+    server.close()
   }
 }
 

@@ -1,70 +1,35 @@
-import { getCopy } from '../data/copy'
-import type { Locale } from '../types'
-import { MultiDeviceLogo } from './Icons'
+import {
+  RELEASE_TAG_URL,
+  RELEASE_VERSION,
+  REPO_URL,
+  type SiteCopy,
+} from '../data/copy'
+import { FishLogo } from './Icons'
 
 interface FooterProps {
-  readonly locale: Locale
+  readonly copy: SiteCopy
 }
 
-export function Footer({ locale }: FooterProps) {
-  const t = getCopy(locale).footer
-
+export function Footer({ copy }: FooterProps) {
   return (
     <footer className="site-footer">
-      <div className="container footer-inner">
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 9 }}>
-            <span className="brand-logo-box" style={{ width: 26, height: 26 }}>
-              <MultiDeviceLogo size={15} />
-            </span>
-            <strong style={{ fontSize: 14 }}>dsh-multi-device</strong>
-          </div>
-          <div
-            style={{
-              fontSize: 12.5,
-              color: 'var(--dsw-alias-label-secondary)',
-            }}
-          >
-            {t.summary}
-          </div>
-          <div
-            style={{
-              fontSize: 11.5,
-              color: 'var(--dsw-alias-label-caption)',
-            }}
-          >
-            {t.mit}
-          </div>
+      <div className="shell-container site-footer__inner">
+        <div className="site-footer__brand">
+          <FishLogo size={18} />
+          <span>{copy.footer.note}</span>
         </div>
 
-        <div className="footer-links">
-          <a
-            href="https://github.com/IGNGserver/dsh-multi-device"
-            target="_blank"
-            rel="noreferrer"
-          >
-            {t.links.repo}
+        <div className="site-footer__links">
+          <span>{RELEASE_VERSION}</span>
+          <span>·</span>
+          <span>{copy.footer.license}</span>
+          <span>·</span>
+          <a href={REPO_URL} target="_blank" rel="noreferrer">
+            {copy.footer.repo}
           </a>
-          <a
-            href="https://github.com/IGNGserver/dsh-multi-device/releases"
-            target="_blank"
-            rel="noreferrer"
-          >
-            {t.links.releases}
-          </a>
-          <a
-            href="https://github.com/IGNGserver/dsh-multi-device/blob/main/NATIVE-ARCHITECTURE.md"
-            target="_blank"
-            rel="noreferrer"
-          >
-            {t.links.arch}
-          </a>
-          <a
-            href="https://github.com/IGNGserver/dsh-multi-device/issues"
-            target="_blank"
-            rel="noreferrer"
-          >
-            {t.links.issues}
+          <span>·</span>
+          <a href={RELEASE_TAG_URL} target="_blank" rel="noreferrer">
+            {copy.footer.releases}
           </a>
         </div>
       </div>

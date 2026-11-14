@@ -1,551 +1,309 @@
-import { useState } from 'react'
-import { getCopy } from '../data/copy'
-import type { DeviceRecord, Locale } from '../types'
+import { useEffect, useRef } from 'react'
+import type { SiteCopy } from '../data/copy'
+import type { DeviceRecord, Locale, TrajectoryBlock } from '../types'
 import {
+  ArrowUpIcon,
   CheckIcon,
   ContextRing,
-  FishLogo,
   FolderIcon,
+  LaptopIcon,
   PlusIcon,
-  SidebarDockIcon,
-  StateDot,
-  TerminalIcon,
+  ServerIcon,
 } from './Icons'
 
 interface DshDevicePaneProps {
   readonly device: DeviceRecord
+  readonly isActive: boolean
   readonly locale: Locale
-  readonly streamTick: number
-  readonly onSelectSession: (sessionId: string) => void
-  readonly onCreateSession: () => void
-  readonly onChangeDraft: (text: string) => void
-  readonly onSendDraft: () => void
-  readonly onApproveSession: (sessionId: string) => void
-  readonly onRejectSession: (sessionId: string) => void
-  readonly onRemount: () => void
+  readonly copy: SiteCopy
+  readonly onSelectSession: (deviceId: string, sessionId: string) => void
+  readonly onUpdateDraft: (deviceId: string, text: string) => void
+  readonly onSendMessage: (deviceId: string) => void
+  readonly onApproveAction: (deviceId: string, sessionId: string, allow: boolean) => void
+  readonly onReconnect: (deviceId: string) => void
 }
 
 export function DshDevicePane({
   device,
+  isActive,
   locale,
-  streamTick,
+  copy,
   onSelectSession,
-  onCreateSession,
-  onChangeDraft,
-  onSendDraft,
-  onApproveSession,
-  onRejectSession,
-  onRemount,
+  onUpdateDraft,
+  onSendMessage,
+  onApproveAction,
+  onReconnect,
 }: DshDevicePaneProps) {
-  const t = getCopy(locale).workbench
-  const [viewMode, setViewMode] = useState<'trajectory' | 'chat'>('trajectory')
-  const [dockOpen, setDockOpen] = useState(true)
+  const streamRef = useRef<HTMLDivElement | null>(null)
+  const activeSession =
+    device.sessions.find((s) => s.id === device.activeSessionId) ?? device.sessions[0]
 
-  if (!device.keepAliveMounted) {
-    return (
-      <div
-        className="unmounted-stage-placeholder"
-        data-testid={`unmounted-${device.id}`}
-      >
-        <div
-          style={{
-            width: 44,
-            height: 44,
-            borderRadius: 12,
-            background: 'rgba(122, 170, 255, 0.1)',
-            border: '1px solid rgba(122, 170, 255, 0.3)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: '#9ec0ff',
-          }}
-        >
-          <TerminalIcon size={20} />
+  useEffect(() => {
+    if (isActive && streamRef.current) {
+      streamRef.current.scrollTop = streamRef.current.scrollHeight
+    }
+  }, [isActive, activeSession?.blocks.length])
+
+  const renderBlock = (block: TrajectoryBlock) => {
+    if (block.kind === 'user') {
+      return (
+        <div key={block.id} className="dsh-msg-row dsh-msg-row--user">
+          <div className="dsh-user-bubble">{block.content[locale]}</div>
         </div>
-        <h3 style={{ margin: '4px 0 0', fontSize: 16 }}>
-          {t.pane.keepAliveUnmountedTitle}
-        </h3>
-        <p
-          style={{
-            margin: 0,
-            maxWidth: 460,
-            fontSize: 13.5,
-            color: 'var(--dsw-alias-label-secondary)',
-            lineHeight: 1.6,
-          }}
-        >
-          {t.pane.keepAliveUnmountedDesc}
-        </p>
-        <button
-          type="button"
-          className="btn-hero-primary"
-          onClick={onRemount}
-          data-testid={`remount-${device.id}`}
-        >
-          {t.pane.remountBtn}
-        </button>
+      )
+    }
+
+    if (block.kind === 'tool') {
+      return (
+        <div key={block.id} className="dsh-tool-card">
+          <div className="dsh-tool-card__head">
+            <span className="dsh-tool-card__status">
+              <CheckIcon />
+            </span>
+            <span className="dsh-tool-card__title">{block.subtitle ?? 'Tool'}</span>
+            {block.metrics && <span className="dsh-tool-card__metrics">{block.metrics}</span>}
+          </div>
+          <p className="dsh-tool-card__body">{block.content[locale]}</p>
+        </div>
+      )
+    }
+
+    if (block.kind === 'diff') {
+      return (
+        <div key={block.id} className="dsh-diff-card">
+          <div className="dsh-diff-card__head">
+            <span>{block.subtitle ?? 'Diff'}</span>
+          </div>
+          <p className="dsh-diff-card__note">{block.content[locale]}</p>
+          {block.diffLines && (
+            <div className="dsh-diff-lines">
+              {block.diffLines.map((line, idx) => (
+                <div
+                  key={`${block.id}-${idx}`}
+                  className={`dsh-diff-line dsh-diff-line--${line.type}`}
+                >
+                  <span className="dsh-diff-sign">
+                    {line.type === 'add' ? '+' : line.type === 'del' ? '-' : ' '}
+                  </span>
+                  <code>{line.text}</code>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )
+    }
+
+    if (block.kind === 'approval') {
+      return (
+        <div key={block.id} className="dsh-approval-card">
+          <div className="dsh-approval-card__head">
+            <span className="dsh-approval-card__dot" aria-hidden="true" />
+            <span>{block.title?.[locale] ?? copy.workbench.approvalPromptLabel}</span>
+          </div>
+          {block.command && <pre className="dsh-approval-card__cmd">{block.command}</pre>}
+          <p className="dsh-approval-card__body">{block.content[locale]}</p>
+          <div className="dsh-approval-card__actions">
+            <button
+              type="button"
+              className="dsh-btn dsh-btn--primary"
+              data-testid="approve-allow-btn"
+              onClick={() =>
+                activeSession && onApproveAction(device.id, activeSession.id, true)
+              }
+            >
+              {copy.workbench.approveAllow}
+            </button>
+            <button
+              type="button"
+              className="dsh-btn dsh-btn--ghost"
+              onClick={() =>
+                activeSession && onApproveAction(device.id, activeSession.id, false)
+              }
+            >
+              {copy.workbench.approveDeny}
+            </button>
+          </div>
+        </div>
+      )
+    }
+
+    return (
+      <div key={block.id} className="dsh-msg-row dsh-msg-row--assistant">
+        <div className="dsh-assistant-text">
+          {block.content[locale]}
+          {block.status === 'ongoing' && (
+            <span className="dsh-streaming-cursor" aria-hidden="true" />
+          )}
+        </div>
       </div>
     )
   }
 
-  const activeSession =
-    device.sessions.find((s) => s.id === device.activeSessionId) ??
-    device.sessions[0]
-
-  const displayName = device.isLocal ? t.nativeBar.localTab : device.name
-
   return (
     <div
-      className="dsh-device-pane"
-      data-dock-open={dockOpen ? 'true' : 'false'}
+      className={`dsh-pane${isActive ? ' is-active' : ''}`}
+      data-testid={`device-pane-${device.id}`}
+      hidden={!isActive}
+      aria-hidden={!isActive}
     >
-      {/* Column 1: Official DSH Left Sidebar */}
-      <aside className="dsh-sidebar">
-        <div className="dsh-sidebar-header">
-          <span className="dsh-sidebar-brand">
-            <FishLogo size={18} />
-            <span>DeepSeek</span>
+      {/* Left Sidebar (official DSH #f9fafb / #1b1b1c surface) */}
+      <aside className="dsh-sidebar" aria-label={copy.workbench.sidebarTitle}>
+        <div className="dsh-sidebar__head">
+          <span className="dsh-sidebar__device">
+            {device.isLocal ? <LaptopIcon /> : <ServerIcon />}
+            <span>{device.name}</span>
           </span>
-          <span className="dsh-host-chip">{displayName}</span>
+          <span className="dsh-sidebar__host-meta">{device.sshSummary}</span>
         </div>
 
         <button
           type="button"
-          className="dsh-new-session-btn"
-          onClick={onCreateSession}
+          className="dsh-sidebar__new-chat"
+          onClick={() => onSelectSession(device.id, device.sessions[0]?.id ?? '')}
         >
-          <PlusIcon size={14} />
-          <span>{t.pane.newSession}</span>
+          <PlusIcon />
+          <span>{copy.workbench.sidebarNewChat}</span>
         </button>
 
-        <div className="dsh-isolation-callout">
-          {t.pane.localIsolationNote}
-        </div>
-
-        <div className="dsh-sidebar-scroll">
-          <div className="dsh-ws-section-label">{t.pane.workspacesHeader}</div>
-
+        <div className="dsh-sidebar__groups">
           {device.workspaces.map((ws) => {
-            const wsSessions = device.sessions.filter(
-              (s) => s.workspaceId === ws.id,
-            )
+            const wsSessions = device.sessions.filter((s) => s.workspaceId === ws.id)
             return (
-              <div key={ws.id} className="dsh-ws-block">
-                <div className="dsh-ws-title-row">
-                  <span
-                    style={{
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: 6,
-                      minWidth: 0,
-                    }}
-                  >
-                    <FolderIcon size={13} />
-                    <span
-                      style={{
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                      }}
-                    >
-                      {ws.name}
-                    </span>
-                  </span>
-                  <span className="dsh-ws-branch">{ws.branch}</span>
+              <div key={ws.id} className="dsh-ws-group">
+                <div className="dsh-ws-group__head">
+                  <FolderIcon />
+                  <span className="dsh-ws-group__name">{ws.name}</span>
+                  <span className="dsh-ws-group__branch">{ws.branch}</span>
                 </div>
-
-                {wsSessions.map((sess) => (
-                  <button
-                    key={sess.id}
-                    type="button"
-                    className="dsh-session-row"
-                    data-active={sess.id === activeSession.id ? 'true' : 'false'}
-                    data-testid={`sidebar-sess-${sess.id}`}
-                    onClick={() => onSelectSession(sess.id)}
-                  >
-                    <StateDot status={sess.status} />
-                    <span className="dsh-session-row-title">
-                      {sess.title[locale]}
-                    </span>
-                    <span className="dsh-session-row-meta">
-                      {sess.updatedLabel[locale]}
-                    </span>
-                  </button>
-                ))}
+                <ul className="dsh-session-list">
+                  {wsSessions.map((sess) => {
+                    const selected = sess.id === activeSession?.id
+                    return (
+                      <li key={sess.id}>
+                        <button
+                          type="button"
+                          className={`dsh-session-item${selected ? ' is-selected' : ''}`}
+                          onClick={() => onSelectSession(device.id, sess.id)}
+                        >
+                          <span className="dsh-session-item__top">
+                            <span
+                              className={`dsh-status-dot dsh-status-dot--${sess.status}`}
+                              aria-hidden="true"
+                            />
+                            <span className="dsh-session-item__title">
+                              {sess.title[locale]}
+                            </span>
+                          </span>
+                          <span className="dsh-session-item__time">
+                            {sess.updatedLabel[locale]}
+                          </span>
+                        </button>
+                      </li>
+                    )
+                  })}
+                </ul>
               </div>
             )
           })}
-        </div>
-
-        <div className="dsh-sidebar-footer">
-          <span>DSH v{device.dshVersion}</span>
-          <span>{device.isLocal ? 'Host' : `${device.latencyMs ?? 5}ms SSH`}</span>
         </div>
       </aside>
 
-      {/* Column 2: Center Conversation & Trajectory Stream */}
-      <div className="dsh-conversation-col">
-        <div className="dsh-conv-header">
-          <div className="dsh-conv-title-group">
-            <StateDot status={activeSession.status} />
-            <span className="dsh-conv-title">
-              {activeSession.title[locale]}
-            </span>
+      {/* Main Conversation Column */}
+      <div className="dsh-main">
+        <div className="dsh-main__header">
+          <div className="dsh-main__title-group">
+            <h3 className="dsh-main__title">
+              {activeSession ? activeSession.title[locale] : device.name}
+            </h3>
+            {activeSession && (
+              <span className="dsh-main__path">
+                {activeSession.workspaceName} · {activeSession.workspacePath}
+              </span>
+            )}
           </div>
-
-          <div className="dsh-conv-header-controls">
-            <div className="dsh-segmented" role="group">
-              <button
-                type="button"
-                className="dsh-segmented-btn"
-                data-active={viewMode === 'chat' ? 'true' : 'false'}
-                onClick={() => setViewMode('chat')}
-              >
-                Chat
-              </button>
-              <button
-                type="button"
-                className="dsh-segmented-btn"
-                data-active={viewMode === 'trajectory' ? 'true' : 'false'}
-                onClick={() => setViewMode('trajectory')}
-              >
-                Trajectory
-              </button>
+          {activeSession && (
+            <div className="dsh-main__context" title={`${activeSession.contextPercent}%`}>
+              <ContextRing percent={activeSession.contextPercent} />
+              <span>{activeSession.contextPercent}%</span>
             </div>
+          )}
+        </div>
 
+        {!device.connected && (
+          <div className="dsh-offline-banner">
+            <span>{copy.workbench.offlineBanner}</span>
             <button
               type="button"
-              className="dsh-md-icon-btn"
-              title="Toggle Workspace & Tunnel Inspector"
-              onClick={() => setDockOpen((v) => !v)}
+              className="dsh-btn dsh-btn--ghost"
+              onClick={() => onReconnect(device.id)}
             >
-              <SidebarDockIcon size={14} />
+              {copy.workbench.reconnectBtn}
             </button>
           </div>
+        )}
+
+        <div
+          ref={streamRef}
+          className="dsh-stream"
+          data-testid={`live-stream-${device.id}`}
+        >
+          {activeSession?.blocks.map(renderBlock)}
         </div>
 
-        <div className="dsh-conv-stream">
-          {activeSession.blocks.map((block) => {
-            if (block.kind === 'user') {
-              return (
-                <div key={block.id} className="dsh-msg-user">
-                  {block.content[locale]}
-                </div>
-              )
-            }
-
-            if (block.kind === 'assistant') {
-              return (
-                <div key={block.id} className="dsh-msg-assistant">
-                  {block.content[locale]}
-                </div>
-              )
-            }
-
-            if (block.kind === 'approval') {
-              return (
-                <div
-                  key={block.id}
-                  className="dsh-approval-card"
-                  data-testid={`approval-card-${activeSession.id}`}
-                >
-                  <div className="dsh-approval-head">
-                    <span>⚠ {t.pane.approveTitle}</span>
-                    <span
-                      style={{
-                        fontFamily: 'var(--font-mono)',
-                        fontSize: 11,
-                        opacity: 0.85,
-                      }}
-                    >
-                      {device.name}
-                    </span>
-                  </div>
-                  <div
-                    style={{
-                      fontSize: 12.5,
-                      color: '#fef3c7',
-                      lineHeight: 1.5,
-                    }}
-                  >
-                    {t.pane.approveDesc}
-                  </div>
-                  {block.command && (
-                    <pre className="dsh-approval-cmd">{block.command}</pre>
-                  )}
-                  <div
-                    style={{
-                      fontSize: 12,
-                      color: 'rgba(254, 243, 199, 0.8)',
-                      lineHeight: 1.45,
-                    }}
-                  >
-                    {block.content[locale]}
-                  </div>
-                  <div className="dsh-approval-actions">
-                    <button
-                      type="button"
-                      className="btn-approve-allow"
-                      data-testid="approve-allow-btn"
-                      onClick={() => onApproveSession(activeSession.id)}
-                    >
-                      {t.pane.approveAllow}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-approve-reject"
-                      onClick={() => onRejectSession(activeSession.id)}
-                    >
-                      {t.pane.approveReject}
-                    </button>
-                  </div>
-                </div>
-              )
-            }
-
-            if (viewMode === 'chat' && (block.kind === 'tool' || block.kind === 'diff')) {
-              return (
-                <div key={block.id} className="dsh-tool-card">
-                  <div className="dsh-tool-card-head">
-                    <span className="dsh-tool-card-title">
-                      {block.status === 'ongoing' ? (
-                        <StateDot status="running" />
-                      ) : (
-                        <span style={{ color: '#22c55e' }}>
-                          <CheckIcon size={13} />
-                        </span>
-                      )}
-                      <span>{block.title?.[locale]}</span>
-                    </span>
-                    <span className="dsh-tool-card-sub">{block.subtitle}</span>
-                  </div>
-                </div>
-              )
-            }
-
-            if (block.kind === 'diff') {
-              return (
-                <div key={block.id} className="dsh-tool-card">
-                  <div className="dsh-tool-card-head">
-                    <span className="dsh-tool-card-title">
-                      <span style={{ color: '#22c55e' }}>
-                        <CheckIcon size={13} />
-                      </span>
-                      <span>{block.title?.[locale]}</span>
-                    </span>
-                    <span className="dsh-tool-card-sub">{block.subtitle}</span>
-                  </div>
-                  <div className="dsh-tool-card-body">
-                    {block.content[locale]}
-                  </div>
-                  {block.diffLines && (
-                    <div className="dsh-diff-box">
-                      {block.diffLines.map((ln, idx) => (
-                        <div
-                          key={idx}
-                          className="dsh-diff-row"
-                          data-diff={ln.type}
-                        >
-                          <span className="dsh-diff-ln">
-                            {ln.lineOld ?? ''}
-                          </span>
-                          <span className="dsh-diff-ln">
-                            {ln.lineNew ?? ''}
-                          </span>
-                          <span>
-                            {ln.type === 'add'
-                              ? '+ '
-                              : ln.type === 'del'
-                                ? '- '
-                                : '  '}
-                            {ln.text}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )
-            }
-
-            // Tool / Persistent Bash Block
-            const liveStreamSuffix =
-              block.status === 'ongoing'
-                ? `\n[events.mux seq #${1040 + streamTick}] throughput=${141200 + (streamTick % 9) * 310} msg/s · P99=0.${38 + (streamTick % 7)}ms (Keep-Alive live)`
-                : ''
-
-            return (
-              <div key={block.id} className="dsh-tool-card">
-                <div className="dsh-tool-card-head">
-                  <span className="dsh-tool-card-title">
-                    {block.status === 'ongoing' ? (
-                      <StateDot status="running" />
-                    ) : (
-                      <span style={{ color: '#22c55e' }}>
-                        <CheckIcon size={13} />
-                      </span>
-                    )}
-                    <span>{block.title?.[locale]}</span>
-                  </span>
-                  <span className="dsh-tool-card-sub">{block.subtitle}</span>
-                </div>
-                {block.code && (
-                  <pre
-                    className="dsh-terminal-pre tabular-nums"
-                    data-testid={
-                      block.status === 'ongoing'
-                        ? `live-stream-${device.id}`
-                        : undefined
-                    }
-                  >
-                    {block.code}
-                    {liveStreamSuffix}
-                  </pre>
+        <div className="dsh-composer-wrap">
+          <div className="dsh-composer">
+            {(device.draftChip || device.draftText.trim().length > 0) && (
+              <div className="dsh-composer__chips">
+                {device.draftChip && (
+                  <span className="dsh-composer-chip">@ {device.draftChip}</span>
                 )}
-                <div className="dsh-tool-card-body">
-                  {block.content[locale]}
-                </div>
+                {device.draftText.trim().length > 0 && (
+                  <span className="dsh-composer-draft-hint">
+                    {copy.workbench.draftSavedNote}
+                  </span>
+                )}
               </div>
-            )
-          })}
-        </div>
-
-        {/* Official 24px-Radius DSH Composer */}
-        <div className="dsh-composer-outer">
-          <div className="dsh-composer-box">
-            <div className="dsh-composer-top-chips">
-              <span className="dsh-context-chip">
-                {device.draftChip ?? activeSession.workspaceName}
-              </span>
-              <span
-                style={{
-                  fontFamily: 'var(--font-mono)',
-                  fontSize: 10.5,
-                  color: 'var(--dsw-alias-label-caption)',
-                }}
-              >
-                {device.isLocal ? t.pane.localDomPill : t.pane.bridgePill}
-              </span>
-            </div>
+            )}
 
             <textarea
-              className="dsh-composer-textarea"
+              className="dsh-composer__input"
+              data-testid={`composer-${device.id}`}
               rows={2}
               value={device.draftText}
-              placeholder={t.pane.composerPlaceholder}
-              data-testid={`composer-${device.id}`}
-              onChange={(e) => onChangeDraft(e.target.value)}
+              placeholder={copy.workbench.placeholder}
+              onChange={(e) => onUpdateDraft(device.id, e.target.value)}
               onKeyDown={(e) => {
-                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault()
-                  onSendDraft()
+                  if (device.draftText.trim()) {
+                    onSendMessage(device.id)
+                  }
                 }
               }}
             />
 
-            <div className="dsh-composer-toolbar">
-              <div className="dsh-composer-tools-left">
-                <span className="dsh-composer-pill">Workspace Write</span>
-                <span className="dsh-composer-pill">
-                  {activeSession.model} · {activeSession.effort}
+            <div className="dsh-composer__bar">
+              <div className="dsh-composer__meta">
+                <span className="dsh-meta-pill">
+                  {activeSession?.model ?? copy.workbench.modelChip}
                 </span>
+                <span className="dsh-meta-pill">{copy.workbench.agentChip}</span>
               </div>
 
-              <div className="dsh-composer-tools-right">
-                <ContextRing percent={activeSession.contextPercent} />
-                <button
-                  type="button"
-                  className="dsh-send-btn"
-                  data-testid={`send-btn-${device.id}`}
-                  onClick={onSendDraft}
-                >
-                  <span>{t.pane.sendBtn}</span>
-                </button>
-              </div>
+              <button
+                type="button"
+                className="dsh-send-btn"
+                aria-label={copy.workbench.sendAria}
+                disabled={device.draftText.trim().length === 0}
+                onClick={() => onSendMessage(device.id)}
+              >
+                <ArrowUpIcon />
+              </button>
             </div>
           </div>
         </div>
       </div>
-
-      {/* Column 3: Isolated Machine & Tunnel Inspector */}
-      {dockOpen && (
-        <aside className="dsh-inspector-dock">
-          <div className="inspector-card">
-            <div className="inspector-card-title">
-              {locale === 'zh' ? '机器与隧道边界' : 'Host & Tunnel Isolation'}
-            </div>
-            <div className="inspector-kv">
-              <span className="inspector-k">Host</span>
-              <span className="inspector-v">{displayName}</span>
-            </div>
-            <div className="inspector-kv">
-              <span className="inspector-k">OS</span>
-              <span className="inspector-v">{device.osLabel}</span>
-            </div>
-            <div className="inspector-kv">
-              <span className="inspector-k">Transport</span>
-              <span className="inspector-v">
-                {device.isLocal ? 'Native Host DOM' : 'system-ssh -L'}
-              </span>
-            </div>
-            {device.proxyUrl && (
-              <div className="inspector-kv">
-                <span className="inspector-k">Loopback</span>
-                <span className="inspector-v">{device.proxyUrl}</span>
-              </div>
-            )}
-          </div>
-
-          <div className="inspector-card">
-            <div className="inspector-card-title">
-              {locale === 'zh'
-                ? '当前机器本地磁盘路径'
-                : 'Machine-Local Disk Path'}
-            </div>
-            <div
-              style={{
-                fontFamily: 'var(--font-mono)',
-                fontSize: 11,
-                color: '#9ec0ff',
-                wordBreak: 'break-all',
-              }}
-            >
-              {activeSession.workspacePath}
-            </div>
-            <div
-              style={{
-                fontSize: 11,
-                color: 'var(--dsw-alias-label-caption)',
-                lineHeight: 1.45,
-              }}
-            >
-              {locale === 'zh'
-                ? '零文件同步：源码与构建产物 100% 留在该设备自身文件系统。'
-                : 'Zero file sync: source & build outputs stay 100% on this host’s filesystem.'}
-            </div>
-          </div>
-
-          <div className="inspector-card">
-            <div className="inspector-card-title">Keep-Alive Bridge</div>
-            <div className="inspector-kv">
-              <span className="inspector-k">DOM State</span>
-              <span className="inspector-v" style={{ color: '#86efac' }}>
-                Mounted
-              </span>
-            </div>
-            <div className="inspector-kv">
-              <span className="inspector-k">Host Key</span>
-              <span className="inspector-v">Strict=yes</span>
-            </div>
-            <div className="inspector-kv">
-              <span className="inspector-k">Epoch</span>
-              <span className="inspector-v tabular-nums">
-                #{device.stale ? 'reconnecting' : '4 (live)'}
-              </span>
-            </div>
-          </div>
-        </aside>
-      )}
     </div>
   )
 }

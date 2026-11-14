@@ -1,540 +1,555 @@
 import type { Locale } from '../types'
 
-export const COPY = {
+export const RELEASE_VERSION = 'v0.3.6'
+export const RELEASE_TAG_URL =
+  'https://github.com/IGNGserver/dsh-multi-device/releases/tag/v0.3.6'
+export const RELEASE_TGZ_URL =
+  'https://github.com/IGNGserver/dsh-multi-device/releases/download/v0.3.6/dsh-multi-device-v0.3.6.tgz'
+export const REPO_URL = 'https://github.com/IGNGserver/dsh-multi-device'
+
+export interface SiteCopy {
+  readonly brand: string
+  readonly brandTag: string
+  readonly nav: {
+    readonly workbench: string
+    readonly features: string
+    readonly guarantees: string
+    readonly install: string
+    readonly architecture: string
+    readonly github: string
+    readonly cta: string
+    readonly themeLabel: string
+    readonly themeOptions: {
+      readonly system: string
+      readonly light: string
+      readonly dark: string
+    }
+    readonly localeToggle: string
+  }
+  readonly hero: {
+    readonly eyebrow: string
+    readonly title: string
+    readonly subtitle: string
+    readonly primaryCta: string
+    readonly secondaryCta: string
+    readonly modeConverged: string
+    readonly modeScattered: string
+    readonly modeConvergedHint: string
+    readonly modeScatteredHint: string
+    readonly clickToDockHint: string
+    readonly dockThisWindow: string
+  }
+  readonly connectionStrip: {
+    readonly badge: string
+    readonly summary: string
+    readonly tip: string
+  }
+  readonly workbench: {
+    readonly taskbarLabel: string
+    readonly addDeviceTooltip: string
+    readonly sidebarTitle: string
+    readonly sidebarNewChat: string
+    readonly activeTaskBanner: string
+    readonly approvalPromptLabel: string
+    readonly approveAllow: string
+    readonly approveDeny: string
+    readonly approvedNotice: string
+    readonly deniedNotice: string
+    readonly draftSavedNote: string
+    readonly placeholder: string
+    readonly sendAria: string
+    readonly modelChip: string
+    readonly agentChip: string
+    readonly simulatedStreamReply: (prompt: string) => string
+    readonly simulatedStreamFinal: string
+    readonly attentionMenuTitle: string
+    readonly attentionGroups: {
+      readonly pending: string
+      readonly running: string
+      readonly done: string
+    }
+    readonly offlineBanner: string
+    readonly reconnectBtn: string
+    readonly settingsModal: {
+      readonly title: string
+      readonly subtitle: string
+      readonly sshAutoDiscovery: string
+      readonly quickImportBtn: string
+      readonly importedTag: string
+      readonly remoteSetupNote: string
+      readonly closeBtn: string
+    }
+  }
+  readonly features: {
+    readonly eyebrow: string
+    readonly title: string
+    readonly subtitle: string
+    readonly cards: readonly {
+      readonly tag: string
+      readonly title: string
+      readonly body: string
+    }[]
+  }
+  readonly guarantees: {
+    readonly eyebrow: string
+    readonly title: string
+    readonly subtitle: string
+    readonly items: readonly {
+      readonly badge: string
+      readonly title: string
+      readonly body: string
+    }[]
+  }
+  readonly install: {
+    readonly eyebrow: string
+    readonly title: string
+    readonly subtitle: string
+    readonly urlLabel: string
+    readonly copyBtn: string
+    readonly copiedBtn: string
+    readonly releasesLink: string
+    readonly steps: readonly {
+      readonly num: string
+      readonly title: string
+      readonly body: string
+    }[]
+    readonly cliPanelTitle: string
+    readonly cliDesktopLabel: string
+    readonly cliWebLabel: string
+    readonly checklistPanelTitle: string
+    readonly checklistItems: readonly {
+      readonly question: string
+      readonly answer: string
+    }[]
+  }
+  readonly architecture: {
+    readonly eyebrow: string
+    readonly panelTitle: string
+    readonly panelSummary: string
+    readonly items: readonly {
+      readonly title: string
+      readonly body: string
+    }[]
+  }
+  readonly footer: {
+    readonly note: string
+    readonly license: string
+    readonly repo: string
+    readonly releases: string
+  }
+}
+
+export const SITE_COPY: Record<Locale, SiteCopy> = {
   zh: {
+    brand: 'dsh-multi-device',
+    brandTag: RELEASE_VERSION,
     nav: {
-      badge: 'v0.3.6 · 原生模式架构',
-      convergence: '空间汇聚',
-      workbench: '交互工作台',
-      architecture: 'SSH 与代理架构',
-      boundaries: '边界契约',
-      install: '安装指南',
+      workbench: '在线体验',
+      features: '顺手在哪',
+      guarantees: '安心边界',
+      install: '安装步骤',
+      architecture: '工作原理',
       github: 'GitHub',
-      releases: '发行版下载',
-      langToggle: 'EN',
+      cta: '去安装',
+      themeLabel: '界面主题',
+      themeOptions: {
+        system: '跟随系统',
+        light: '浅色',
+        dark: '深色',
+      },
+      localeToggle: 'EN',
     },
     hero: {
-      eyebrow: 'dsh-multi-device · DeepSeek Harness 多设备管理插件',
-      titleLine1: '多台开发机的完整 DSH，',
-      titleLine2: '磁吸汇聚于同一道顶部标签栏。',
+      eyebrow: `DSH 多设备插件 · ${RELEASE_VERSION} · 开源免费`,
+      title: '在一个 DSH 窗口里，管好你的所有开发机',
       subtitle:
-        '通过本机系统 OpenSSH 隧道直连远端环回 dsh web。「本机」保持未经改装的本地界面，每台远端服务器在各自 Keep-Alive 页面内独立运行完整 DSH——零远端插件、不混入本机会话、不触碰或同步任何项目源码。',
-      ctaInteractive: '进入交互式多设备工作台',
-      ctaInstall: '快速安装（Release .tgz）',
-      ctaArch: '阅读原生架构说明',
-      scrollHint: '向下滚动或点击阶段，观看四台离散开发机磁吸合拢',
-      phases: [
-        { id: 0, code: '01', label: '离散实例', sub: '4 台机器独立运行 DSH' },
-        { id: 1, code: '02', label: '环回锁定', sub: 'System SSH 隧道对准 127.0.0.1' },
-        { id: 2, code: '03', label: '保活层叠', sub: '独立 DOM 驻留，绝不混写会话' },
-        { id: 3, code: '04', label: '磁吸成台', sub: '42px 常驻标签栏统一调度' },
-      ],
-      hudTelemetry: {
-        scattered: '离散状态：4 个独立窗口散落于不同终端与服务器，上下文切换需频繁找窗口与重连',
-        aligning: '隧道建立：复用 ~/.ssh/config 与 SSH Agent，仅转发远端 127.0.0.1:3080 环回监听',
-        stacking: '空间层叠：每台远端分配独立本地环回反向代理端口，WebSocket 与 Lexical 草稿持续保活',
-        snapped: '磁吸就绪：顶部 42px 标签条锁定于宿主框架，点击设备标签零重载瞬时切换！',
-      },
+        '连上云主机、GPU 服务器或备用电脑后，顶部标签一点就切。哪台机在等你确认、哪台刚刚跑完，一眼就能看见。远程服务器不用装插件，本地记录也不会混成一团。',
+      primaryCta: '三步装好插件',
+      secondaryCta: '查看 GitHub',
+      modeConverged: '装上插件：一个窗口搞定',
+      modeScattered: '安装前：到处找窗口',
+      modeConvergedHint:
+        '点一点顶部设备标签、琥珀色「1」待确认提醒，或试着发一条消息，感受真实窗口切换。',
+      modeScatteredHint:
+        '以前同时开着本地电脑、云主机、GPU 和打包机，只能在一堆标签和终端里来回找。点任意一张卡片，看看合进一个窗口后的样子。',
+      clickToDockHint: '点击这张卡片，收进同一个 DSH 窗口',
+      dockThisWindow: '收进统一窗口',
+    },
+    connectionStrip: {
+      badge: 'SSH 自动连接',
+      summary: '直接读取你电脑里配好的 ~/.ssh/config · 远程零安装 · 4 台设备在线',
+      tip: '点击左侧任意项目或顶部设备，切回来时草稿与滚动位置都在。',
     },
     workbench: {
-      eyebrow: 'LIVE INTERACTIVE WORKBENCH · 真实交互演示',
-      title: '亲手切换设备、审批远端命令、点击状态胶囊直达会话',
-      subtitle:
-        '下方工作台严格还原 DeepSeek Harness 官方 --dsw-* 视觉令牌与 dsh-multi-device 原生模式组件。试着在远端输入框打字后切回「本机」，或点击顶部黄 / 蓝 / 绿数字胶囊打开官方会话菜单。',
-      controls: {
-        exploded3d: '3D 保活层叠透视',
-        exploded3dActive: '退出 3D 层叠透视',
-        taskbarTitle: '窗口标题任务汇总',
-        simulatePending: '+ 触发待回复 (黄)',
-        simulateRunning: '+ 新建运行中 (蓝)',
-        simulateUnread: '+ 产生完成未读 (绿)',
-        simulateStale: '模拟闪断缓存态 (虚线)',
-        simulateRecover: '恢复实时连接',
-        resetDemo: '重置演示状态',
+      taskbarLabel: '任务汇总',
+      addDeviceTooltip: '在「设置 → 多设备」中添加机器',
+      sidebarTitle: '当前设备对话',
+      sidebarNewChat: '新建对话',
+      activeTaskBanner: '正在切换至选中的远程对话',
+      approvalPromptLabel: '等待你的确认',
+      approveAllow: '允许执行',
+      approveDeny: '暂不执行',
+      approvedNotice: '你已允许执行，任务已继续向后运行。',
+      deniedNotice: '已取消本次高风险动作，设备已回到空闲等待状态。',
+      draftSavedNote: '草稿已保存在本设备标签页内',
+      placeholder: '向当前设备发送指令，切换其他设备时这里的草稿不会丢失…',
+      sendAria: '发送消息',
+      modelChip: 'deepseek-reasoner',
+      agentChip: 'Default Agent',
+      simulatedStreamReply: (prompt) =>
+        `收到你的指令「${prompt}」。当前直接在「这台设备」本地执行并汇报进度：\n1. 已核对当前分支与工作目录状态；\n2. 正在运行对应检查脚本…`,
+      simulatedStreamFinal: '检查完成，所有改动已就绪，你可以直接核对结果或继续下一步。',
+      attentionMenuTitle: '这台设备需要你留意的对话',
+      attentionGroups: {
+        pending: '等你点确认',
+        running: '正在运行中',
+        done: '刚完成（未读）',
       },
-      legend: {
-        pending: '待回复（工具审批 / 提问）',
-        running: '运行中（含子代理活动）',
-        unread: '完成未读（turn/end 游标）',
-        stale: '缓存 / 同步中（非权威零值）',
-      },
-      nativeBar: {
-        localTab: '本机',
-        settingsTooltip: '多设备设置',
-        reloadTooltip: '刷新远端页面',
-        externalTooltip: '在浏览器独立窗口打开',
-        releaseTooltip: '关闭后台保活页面',
-        staleHint: '同步中 / 上次已知快照（非权威零值）',
-        pendingGroup: '{count} 待回复',
-        runningGroup: '{count} 运行中',
-        unreadGroup: '{count} 完成未读',
-        taskbarRun: '{count}跑',
-        taskbarWait: '{count}待',
-        taskbarDone: '{count}结',
-      },
-      pane: {
-        newSession: '新建会话',
-        workspacesHeader: '工作区（仅当前设备本地目录）',
-        localIsolationNote: '仅显示此机器自己的工作区与会话',
-        keepAliveUnmountedTitle: '后台保活页面已手动释放',
-        keepAliveUnmountedDesc: '远端 dsh web 与任务仍在服务器继续运行；重新挂载即可恢复原生界面。',
-        remountBtn: '重新挂载原生页面',
-        composerPlaceholder: '在此设备输入指令或草稿（切换设备标签不会丢失草稿）…',
-        sendBtn: '发送指令',
-        approveTitle: '等待工具执行批准 · Waiting for approval',
-        approveDesc: '远端 Agent 请求在此服务器执行受控命令，批准后将实时转为蓝色运行态：',
-        approveAllow: '允许一次 (Enter)',
-        approveReject: '拒绝 (Esc)',
-        bridgePill: 'Loopback Proxy · Keep-Alive 已挂载',
-        localDomPill: 'Host 原生 DOM · 零代理开销',
-      },
+      offlineBanner: '暂时没连上这台设备，本地原有对话仍保留。',
+      reconnectBtn: '重新连接',
       settingsModal: {
-        title: '设置 → 多设备 (MultiDeviceHubPanel)',
-        intro: '通过系统 SSH 连接远端开发机。顶部标签页常驻：本机显示本地 DSH，每台远端设备在各自标签页运行完整界面。',
-        prefTaskbar: '窗口标题显示任务汇总',
-        prefTaskbarDesc: '将系统窗口与任务栏标题实时更新为「1跑 1待 2结」，零成员类别自动省略。',
-        prefReadSync: '跨 DSH Host 同步未读状态',
-        prefReadSyncDesc: '经现有 SSH 写入仅含会话 ID 与 turn/end 游标的轻量文件，不上传任何消息正文。',
-        prefUiSync: '跨控制机同步界面状态',
-        prefUiSyncDesc: '同步工作区折叠/分组/排序枚举至 views/<hostId>.json，远端零插件、零守护进程。',
-        devicesHeading: '远端设备',
-        importBtn: '+ 从 ~/.ssh/config 一键导入 prod-arm64',
-        importedTag: '已导入 prod-arm64',
-        close: '完成并关闭',
+        title: '设置 · 多设备管理',
+        subtitle:
+          '插件只安装在你面前这台电脑的 DSH 里，会自动读取本地 SSH 别名，无需在远端服务器额外装软件。',
+        sshAutoDiscovery: '从 ~/.ssh/config 发现了 1 台尚未加入顶栏的设备',
+        quickImportBtn: '+ 加入顶部标签栏 (prod-arm64)',
+        importedTag: '已加入顶栏',
+        remoteSetupNote:
+          '提示：如果远端机器只运行普通的 dsh web，直接通过本地 SSH 安全通道就能用。',
+        closeBtn: '完成',
       },
     },
-    architecture: {
-      eyebrow: 'PURE NATIVE ARCHITECTURE · 0.3.x 原生架构解析',
-      title: '为什么采用「系统 SSH 环回隧道 + 逐设备独立本地代理」？',
-      subtitle:
-        '拒绝脆弱的 HTML/AST 改写，也拒绝向本机控制器塞入外部会话状态。远端数据只走两条干净通路：轻量目录事件投影与完整原生页面保活。',
-      pillars: [
+    features: {
+      eyebrow: '日常怎么用',
+      title: '顺手的地方，全在每天切机器的细节里',
+      subtitle: '不改变你习惯的 DSH 操作方式，只是把分散在各处的窗口整整齐齐收进同一栏。',
+      cards: [
         {
-          tag: '01 · TRANSPORT & CREDENTIALS',
-          title: 'System OpenSSH 环回隧道与无密钥落盘鉴权',
-          summary:
-            '默认直接调用宿主系统 ssh 客户端（-N -T -o StrictHostKeyChecking=yes -L 127.0.0.1:<local>:127.0.0.1:<remote>），100% 原生复用 ~/.ssh/config 别名、ProxyJump 跳板、ControlMaster 与系统 SSH Agent / Keychain。',
-          points: [
-            '强制 assertLoopbackForward：转发目标仅限远端 127.0.0.1 / localhost / ::1，绝不变相开放内网跳板或公网端口',
-            'SSH 只读读取远端 $DSH_HOME/.credentials.yaml 换取本地会话 Cookie，远端签名密钥永不写入控制机磁盘',
-            '指数退避（600ms → 15s + Jitter）健康巡检，隧道重连后自动恢复已挂载页面的单次就绪刷新',
-          ],
-          code: `ssh -N -T \\
-  -o ExitOnForwardFailure=yes \\
-  -o BatchMode=yes \\
-  -o ServerAliveInterval=15 \\
-  -o StrictHostKeyChecking=yes \\
-  -L 127.0.0.1:52184:127.0.0.1:3080 \\
-  ubuntu-dev`,
+          tag: '不重刷页面',
+          title: '标签一按就切走，写一半的内容不会丢',
+          body: '切换设备时，后台页面安静保持原样。正在输出的进度、滚动到的位置、框里写了一半的提示词都会留着，随时切回来继续。',
         },
         {
-          tag: '02 · NATIVE REVERSE PROXY & BRIDGE',
-          title: '逐设备独立 Loopback 端口与幂等桥接',
-          summary:
-            '官方 DSH 前端使用根路径资源（/assets/*、/plugins/??*、/api/remote.mux）。为每台设备分配独立本地 127.0.0.1:<port> 反向代理，无需篡改远端业务脚本即可 100% 完整运行模型选择、终端、文件预览与上传。',
-          points: [
-            '自动注入受控 Cookie 与 Origin，剥离客户端伪造认证头与 X-Frame-Options，兼容 Electron <webview> 独立 partition',
-            '轻量 __md/bridge.js 双向同步会话打开（open-session）、工作区折叠态与可见性门控（__dshMdVisibility）',
-            '隐藏保活标签页绝不静默吞掉新完成提醒；仅当页面真正可见且确认官方 turn/end 终态时才发送幂等 read-ack',
-          ],
-          code: `// Keep-Alive Stage: 切换只隐藏 display，不卸载实例
-<div class="dsh-md-native-frame-wrap"
-     data-device-id="ubuntu-dev"
-     style="display: none; visibility: hidden">
-  <iframe src="http://127.0.0.1:52184/?md_client=9f2a" />
-</div>`,
+          tag: '状态一目了然',
+          title: '谁跑完了、谁卡在确认，看颜色就知道',
+          body: '顶部标签右边的小胶囊用颜色区分状态：琥珀色代表等你点「允许」，蓝色代表正在跑，绿色代表刚出结果。点一下直接跳进对应对话。',
         },
         {
-          tag: '03 · EPOCH-FENCED ATTENTION PROJECTION',
-          title: '代际隔离目录（Epoch）与互斥三态关注胶囊',
-          summary:
-            '每台设备拥有独立连接代际 epoch：先订阅 $events 实时流，再单航道（single-flight）拉取会话与工作区基线并重放增量日志；过时代际的数据帧一律丢弃。',
-          points: [
-            '严格互斥优先级：待回复（黄） > 运行中/子代理运行（蓝） > 完成未读（绿），单设备仅挂一枚纯数字胶囊',
-            '固定双位等宽数字格（tabular-nums），1 → 9 → 99 绝不推挤相邻标签；零计数类别直接隐去，安静设备零视觉噪音',
-            '断线或同步中使用半透明虚线胶囊（空计数退化为 10px 虚线圈），绝不把陈旧快照伪装成权威零值',
-          ],
-          code: `// src/attention.ts · 互斥分类优先级
-if (fact.pending > 0)      pendingSessionIds.push(id)
-else if (fact.running)     runningSessionIds.push(id)
-else if (unread.has(id))   unreadSessionIds.push(id)
-// 自动排除已归档与独立 subagent 子行，完整保留 fork`,
+          tag: '少走弯路',
+          title: '打开远程 Git 项目，自动帮你切过去',
+          body: '如果手头目录本来就对应公司服务器或云主机，系统会贴心提示切换过去，不用自己翻配置找设备名。',
         },
       ],
     },
-    boundaries: {
-      eyebrow: 'ARCHITECTURAL CONTRACT · 架构诚实与设计边界',
-      title: '清晰克制的产品定位：它是什么，更不是什么',
-      subtitle:
-        '多设备协同最常见的工程灾难，就是把代码同步、会话混写与远端守护进程强行揉成一团黑盒。dsh-multi-device 从架构根源划清四条红线：',
-      cards: [
+    guarantees: {
+      eyebrow: '安稳不折腾',
+      title: '只管窗口整理，绝不动你原本的环境',
+      subtitle: '你不需要为了用它去改造服务器，也不用担心不同电脑的对话混在一起。',
+      items: [
         {
-          badge: 'NO FILE SYNC',
-          wrong: '不是文件同步或代码镜像工具',
-          right: '零克隆、零 rsync、零项目文件改写',
-          desc: '插件从不复制、同步或触碰任何机器上的仓库文件。代码在哪台服务器编译与运行，就原封不动留在那台服务器的磁盘上。',
+          badge: '01',
+          title: '远程服务器完全不用动',
+          body: '只装在你当前使用的 DSH 里。远端机器照常开着 dsh web 就行，不会给远程安装脚本或写配置文件。',
         },
         {
-          badge: 'NO MERGED SESSIONS',
-          wrong: '不是全局会话大杂烩合并器',
-          right: '本机侧栏 100% 纯净，会话严格归属原设备',
-          desc: '绝不向本地 Session Controller 注入远端会话，也不拼凑跨机聊天记录。每台设备拥有自己独立的侧边栏、模型配置、沙箱权限与终端上下文。',
+          badge: '02',
+          title: '代码与文件各自待在原处',
+          body: '不做跨机文件同步，也不偷偷克隆仓库。你在哪个标签下发指令，读取和改动的就只属于那台设备。',
         },
         {
-          badge: 'ZERO REMOTE PLUGIN',
-          wrong: '不需要在远端安装插件或守护进程',
-          right: '仅控制机安装，远端只需原生 dsh web',
-          desc: '被管开发机、GPU 节点或容器无需安装 dsh-multi-device，也不接管远端 Agent Loop；随时停用或卸载插件，远端环境毫发无损。',
+          badge: '03',
+          title: '本机与远程记录清清楚楚',
+          body: '本地侧边栏永远只显示本机自己的对话，每台远程电脑的历史只在它自己的标签里看得到，绝对不会乱串。',
         },
         {
-          badge: 'FAIL-CLOSED SECURITY',
-          wrong: '不靠裸奔代理或关闭校验“强行可用”',
-          right: '不支持的拓扑明确告知原因，绝不静默降级',
-          desc: '强制 StrictHostKeyChecking=yes；遇到远程浏览器直连控制机 loopback、HTTPS→HTTP 混合内容或 IPv6 父页面时明确给出原因，不暴露公网端口。',
+          badge: '04',
+          title: '配好 SSH 就能直接连',
+          body: '复用电脑里现成的 ~/.ssh/config 和私钥。默认只走你本机发起的安全加密转发，安全边界清晰。',
         },
       ],
     },
     install: {
-      eyebrow: 'INSTALLATION & VERIFICATION · 安装与验收',
-      title: '三分钟接入你的多机开发矩阵',
-      subtitle:
-        '使用 GitHub Releases 已验证的预构建 .tgz 资产安装，普通用户无需 clone 仓库或本地编译。（注：公共 npm 注册表未发布同名包，请始终使用精确 Release 资产 URL。）',
-      tabs: [
+      eyebrow: '开始使用',
+      title: '三步装进你的 DSH',
+      subtitle: '不需要配置繁琐环境，直接在 DSH 插件设置里粘贴下方安装包地址即可。',
+      urlLabel: `v0.3.6 插件安装包地址（GitHub Release .tgz）`,
+      copyBtn: '复制链接',
+      copiedBtn: '已复制',
+      releasesLink: '前往 GitHub Releases',
+      steps: [
         {
-          id: 'manager',
-          label: '1. 官方插件管理器（推荐）',
-          note: '适用于 DSH Desktop 应用内与 DSH Web Host 页面，自动匹配当前 Profile 与包管理器。',
-          steps: [
-            '在控制机确认系统 OpenSSH 可用，并已完成首次 known_hosts 指纹核验：ssh -V && ssh -o StrictHostKeyChecking=yes <你的主机别名> true',
-            '在远端开发机启动原生 dsh web（保持默认 127.0.0.1 环回监听即可，无需开放防火墙端口）。',
-            '打开控制机 DSH 侧栏「插件 → 添加插件 / 安装第三方插件」，粘贴 GitHub Releases 中已验证版本的完整 dsh-multi-device-vX.Y.Z.tgz 下载链接，启用后按提示重启并刷新。',
-          ],
-          codeLabel: '精确 Release .tgz 资产 URL 格式（请在 Releases 页面复制目标版本实际链接）',
-          code: `https://github.com/IGNGserver/dsh-multi-device/releases/download/v0.3.6/dsh-multi-device-v0.3.6.tgz`,
+          num: '01',
+          title: '打开 DSH 设置里的插件页',
+          body: '进入当前正在用的 DSH Desktop 或本地 DSH Web，打开「设置 → 插件」。',
         },
         {
-          id: 'web-cli',
-          label: '2. DSH Web 官方 CLI',
-          note: '先停止使用同一 web Profile 的 dsh web 进程并备份配置，再执行安装。',
-          steps: [
-            '检查官方 DSH CLI 版本，确保使用同一套安装入口。',
-            '通过 dsh plugin --profile web add 安装指定 Release .tgz URL（或已校验 SHA-256 的本地绝对路径）。',
-            '核对 --dump-config 输出后重新启动 dsh web，在「设置 → 多设备」导入 ~/.ssh/config 主机。',
-          ],
-          codeLabel: 'DSH Web Profile 命令行安装',
-          code: `# 1. 确认系统 SSH 与主机指纹已就绪
-ssh -V
-ssh -o StrictHostKeyChecking=yes your-host-alias true
-
-# 2. 停止当前 web Profile 进程后安装指定 Release 资产
-dsh --version
-dsh plugin --profile web add "https://github.com/IGNGserver/dsh-multi-device/releases/download/v0.3.6/dsh-multi-device-v0.3.6.tgz"
-dsh --profile web --dump-config
-dsh web`,
+          num: '02',
+          title: '选择「从 URL 安装」并粘贴链接',
+          body: '复制左侧的 .tgz 发布地址贴进去完成安装；重载界面后顶部就会出现设备栏。',
         },
         {
-          id: 'desktop-cli',
-          label: '3. DSH Desktop CLI（含前置条件）',
-          note: 'Desktop 优先推荐应用内插件管理器；使用 CLI 时必须先让 Desktop 初始化一次并完全退出（含托盘进程），且必须使用 Desktop 自带的 dsh 入口（不能用 npm 另装的 CLI）。',
-          steps: [
-            '首次正常打开 DSH Desktop 完成 desktop Profile 初始化，随后完全退出应用（含后台托盘）。',
-            '使用 DSH Desktop 安装目录提供的官方 dsh 入口执行 desktop Profile 安装。',
-            '重新启动 DSH Desktop，确认顶部出现 [本机][设备…] 常驻标签栏。',
-          ],
-          codeLabel: 'DSH Desktop 自带 CLI 入口安装',
-          code: `# 前置条件：Desktop 已初始化一次并完全退出；此处 dsh 须为 Desktop 自带入口
-dsh plugin --profile desktop add "https://github.com/IGNGserver/dsh-multi-device/releases/download/v0.3.6/dsh-multi-device-v0.3.6.tgz"`,
+          num: '03',
+          title: '点右上角「+」勾选常用服务器',
+          body: '插件会自动列出你 SSH 配置里的主机别名，选完直接开启使用。',
         },
       ],
-      copyBtn: '复制',
-      copiedBtn: '已复制',
-      checklistTitle: '安装后四步快速自检（点击勾选）',
-      checklist: [
-        '插件管理器显示目标版本与精确来源，重启后无激活报错，「设置 → 多设备」可正常打开',
-        '控制机 ssh -V 正常、known_hosts 已登记；连接设备采用默认 system-ssh，未隐式安装原生构建脚本',
-        '顶部常驻 [本机][设备…] 标签条：「本机」侧栏仅含本地会话，远端标签展示该机完整 DSH 且来回切换不重载',
-        '胶囊计数准确反映黄（待回复）/ 蓝（运行中）/ 绿（完成未读），点击菜单行可直接切到对应设备并打开会话',
+      cliPanelTitle: '习惯用命令行的用户：复制终端安装命令',
+      cliDesktopLabel: '安装到 DSH Desktop',
+      cliWebLabel: '安装到本地 DSH Web',
+      checklistPanelTitle: '连不上或没看到提醒？先快速排查这 4 件事',
+      checklistItems: [
+        {
+          question: '1. 远端服务器上的 dsh web 启动了吗？',
+          answer: '确认目标机器已经启动了 dsh web 服务，端口处于正常监听状态。',
+        },
+        {
+          question: '2. 本机终端能直接 ssh <别名> 免密登录吗？',
+          answer: '插件直接复用系统的 SSH；如果在命令行里就能直接免密登上去，插件就能连上。',
+        },
+        {
+          question: '3. 当前是不是在本地地址里打开的 DSH？',
+          answer: '本插件支持 DSH Desktop 以及本机 127.0.0.1 / localhost 打开的 HTTP 版 DSH Web。',
+        },
+        {
+          question: '4. 遇到过老版本 OpenSSH 报错？',
+          answer: '确保本机 OpenSSH 客户端支持本地端口转发（macOS、Linux 与 Windows 10/11 自带 OpenSSH 均可）。',
+        },
+      ],
+    },
+    architecture: {
+      eyebrow: '技术透明',
+      panelTitle: '底层安全与工作原理（展开查看连接细节与支持边界）',
+      panelSummary: '面向想了解端口转发机制、状态保活方式以及适用边界的开发者',
+      items: [
+        {
+          title: '默认基于系统 SSH 环回端口转发',
+          body: '每台已启用远程设备默认使用 system-ssh，通过本机 OpenSSH 建立独立的 127.0.0.1 本地环回转发端口，不暴露给局域网或公网。「HTTP(S) direct」仅作高级兼容开关保留且默认关闭。',
+        },
+        {
+          title: '独立容器 Keep-Alive 保留现场',
+          body: '已连接设备会保留各自的对话容器与草稿状态，切换标签时不会重新加载整页、也不会打断后台正在执行的输出流。',
+        },
+        {
+          title: '三色状态严格按需提醒（待确认 > 运行中 > 刚完成）',
+          body: '只有真实发生的审批阻塞、运行任务或新完成未读会计算进胶囊徽标；点击切换到未读对话时自动消红，且不虚构未开启设备的在线状态。',
+        },
+        {
+          title: '支持环境边界与安装包来源说明',
+          body: '仅在 DSH Desktop 或本机 127.0.0.1 / localhost HTTP DSH Web 下生效（不支持远程浏览器直访、HTTPS 嵌套 HTTP 或 IPv6 父页面）。本插件未发布至公共 npm，请仅从 GitHub Release .tgz URL 安装。',
+        },
       ],
     },
     footer: {
-      summary: 'dsh-multi-device · 面向多开发机与异构服务器矩阵的原生 DeepSeek Harness 空间标签栏插件。',
-      mit: 'MIT License · 遵循原子持久化与最小权限安全边界',
-      links: {
-        repo: 'GitHub 仓库',
-        releases: 'Releases 发行包',
-        arch: 'NATIVE-ARCHITECTURE.md',
-        issues: '问题反馈',
-      },
+      note: 'dsh-multi-device · 专为 DeepSeek Harness (DSH) 打造的多设备标签插件',
+      license: 'MIT 开源协议',
+      repo: 'GitHub 源码',
+      releases: '版本发布记录',
     },
   },
   en: {
+    brand: 'dsh-multi-device',
+    brandTag: RELEASE_VERSION,
     nav: {
-      badge: 'v0.3.6 · Pure Native Mode',
-      convergence: 'Spatial Convergence',
-      workbench: 'Live Workbench',
-      architecture: 'SSH & Proxy Architecture',
-      boundaries: 'Contract & Boundaries',
+      workbench: 'Live Demo',
+      features: 'Why It Helps',
+      guarantees: 'Safety',
       install: 'Install',
+      architecture: 'How It Works',
       github: 'GitHub',
-      releases: 'Releases',
-      langToggle: '中文',
+      cta: 'Get Started',
+      themeLabel: 'Theme',
+      themeOptions: {
+        system: 'System',
+        light: 'Light',
+        dark: 'Dark',
+      },
+      localeToggle: '中文',
     },
     hero: {
-      eyebrow: 'dsh-multi-device · Multi-Device Plugin for DeepSeek Harness',
-      titleLine1: 'Every machine’s full native DSH,',
-      titleLine2: 'magnetically docked into one tab strip.',
+      eyebrow: `DSH Multi-Device Plugin · ${RELEASE_VERSION} · Open Source`,
+      title: 'Manage every dev machine inside one DSH window.',
       subtitle:
-        'Connect remote dsh web hosts over system OpenSSH loopback tunnels. "This Device" stays your untouched local DSH, while each remote server runs its complete UI in a Keep-Alive frame — zero remote plugins, zero merged session soup, zero file sync.',
-      ctaInteractive: 'Explore Interactive Workbench',
-      ctaInstall: 'Quick Install (Release .tgz)',
-      ctaArch: 'Read Native Architecture',
-      scrollHint: 'Scroll down or click a phase to watch 4 independent machines dock into one frame',
-      phases: [
-        { id: 0, code: '01', label: 'Scattered Hosts', sub: '4 independent DSH instances' },
-        { id: 1, code: '02', label: 'Loopback Lock', sub: 'System SSH tunnels bind 127.0.0.1' },
-        { id: 2, code: '03', label: 'Keep-Alive Stack', sub: 'Isolated DOM layers stay mounted' },
-        { id: 3, code: '04', label: 'Magnetic Snap', sub: '42px native tab strip takes helm' },
-      ],
-      hudTelemetry: {
-        scattered: 'Scattered: 4 separate DSH windows across local laptop, Linux devbox, GPU node, and CI mini',
-        aligning: 'Tunnel Lock: Reusing ~/.ssh/config & SSH Agent, strictly forwarding remote 127.0.0.1:3080 loopback',
-        stacking: 'Z-Stacking: Dedicated per-device loopback proxy ports keep WebSockets & Lexical drafts alive',
-        snapped: 'Docked: Persistent 42px native bar locked to Host frame — switch machines with zero reload!',
-      },
+        'Connect your cloud VM, GPU box, and spare laptop via your existing SSH setup. Switch cleanly from one top tab bar with calm status pills—no remote plugins required and zero local history clutter.',
+      primaryCta: 'Install in 3 steps',
+      secondaryCta: 'View on GitHub',
+      modeConverged: 'With plugin: One tab strip',
+      modeScattered: 'Before: 4 scattered windows',
+      modeConvergedHint:
+        'Click top device tabs, tap the amber "1" pill, or send a prompt to see real multi-machine switching in action.',
+      modeScatteredHint:
+        'Without the plugin, hopping between local DSH, SSH terminals, GPU servers, and build Macs means hunting for tabs. Click any card below to dock it into one window.',
+      clickToDockHint: 'Click card to dock into the unified window',
+      dockThisWindow: 'Dock into one window',
+    },
+    connectionStrip: {
+      badge: 'SSH Ready',
+      summary: 'Reads your existing ~/.ssh/config · Zero remote install · 4 machines active',
+      tip: 'Switch tabs freely—unsent drafts and scroll position stay put.',
     },
     workbench: {
-      eyebrow: 'LIVE INTERACTIVE WORKBENCH · HANDS-ON SIMULATION',
-      title: 'Switch machines, approve remote tools, and jump via status capsules',
-      subtitle:
-        'Built with authentic DeepSeek Harness --dsw-* tokens and dsh-multi-device Native Mode geometry. Type a draft on a remote server, switch back to This Device, or click any amber / blue / green count segment to open the official DSH Menu.',
-      controls: {
-        exploded3d: '3D Keep-Alive Stack X-Ray',
-        exploded3dActive: 'Exit 3D Stack X-Ray',
-        taskbarTitle: 'Window Title Task Summary',
-        simulatePending: '+ Needs Reply (Amber)',
-        simulateRunning: '+ Start Running (Blue)',
-        simulateUnread: '+ Unread Done (Green)',
-        simulateStale: 'Simulate Stale / Offline (Dashed)',
-        simulateRecover: 'Reconnect Live Stream',
-        resetDemo: 'Reset Demo',
+      taskbarLabel: 'All machines',
+      addDeviceTooltip: 'Manage devices in Settings → Multi-Device',
+      sidebarTitle: 'Device conversations',
+      sidebarNewChat: 'New chat',
+      activeTaskBanner: 'Focused on selected conversation',
+      approvalPromptLabel: 'Needs your approval',
+      approveAllow: 'Allow',
+      approveDeny: 'Decline',
+      approvedNotice: 'Approved. The agent resumed running on this machine.',
+      deniedNotice: 'Action declined. Session returned to idle.',
+      draftSavedNote: 'Unsent draft stays inside this tab',
+      placeholder: 'Message this machine—switching tabs preserves what you typed…',
+      sendAria: 'Send message',
+      modelChip: 'deepseek-reasoner',
+      agentChip: 'Default Agent',
+      simulatedStreamReply: (prompt) =>
+        `Got "${prompt}". Running directly inside this machine's workspace:\n1. Checked current git status and target directory;\n2. Executing quick verification checks…`,
+      simulatedStreamFinal: 'Checks passed. Changes are ready for review.',
+      attentionMenuTitle: 'Conversations needing attention',
+      attentionGroups: {
+        pending: 'Waiting for approval',
+        running: 'Running now',
+        done: 'Finished (unread)',
       },
-      legend: {
-        pending: 'Needs reply (approval / question)',
-        running: 'Running (incl. subagents)',
-        unread: 'Finished, unread (turn/end)',
-        stale: 'Cached / syncing (non-zero-authoritative)',
-      },
-      nativeBar: {
-        localTab: 'This Device',
-        settingsTooltip: 'Multi-Device Settings',
-        reloadTooltip: 'Reload remote page',
-        externalTooltip: 'Open in standalone browser tab',
-        releaseTooltip: 'Close background Keep-Alive page',
-        staleHint: 'Syncing / last-known snapshot (not an authoritative zero)',
-        pendingGroup: '{count} needs reply',
-        runningGroup: '{count} running',
-        unreadGroup: '{count} finished, unread',
-        taskbarRun: '{count} run',
-        taskbarWait: '{count} wait',
-        taskbarDone: '{count} done',
-      },
-      pane: {
-        newSession: 'New Session',
-        workspacesHeader: 'Workspaces (Local to this machine only)',
-        localIsolationNote: 'Shows only workspaces & sessions owned by this machine',
-        keepAliveUnmountedTitle: 'Background Keep-Alive frame released',
-        keepAliveUnmountedDesc: 'Remote dsh web and running turns continue untouched on the server; remount anytime.',
-        remountBtn: 'Remount Native Page',
-        composerPlaceholder: 'Type a prompt or draft on this machine (preserved across tab switches)…',
-        sendBtn: 'Send Prompt',
-        approveTitle: 'Waiting for tool approval',
-        approveDesc: 'Remote Agent requests permission on this server. Approving transitions Amber → Blue running:',
-        approveAllow: 'Allow once (Enter)',
-        approveReject: 'Reject (Esc)',
-        bridgePill: 'Loopback Proxy · Keep-Alive Mounted',
-        localDomPill: 'Host Native DOM · Zero Proxy Overhead',
-      },
+      offlineBanner: 'Could not reach this machine yet. Local history remains safe.',
+      reconnectBtn: 'Reconnect',
       settingsModal: {
-        title: 'Settings → Multi-Device (MultiDeviceHubPanel)',
-        intro: 'Connect remote machines over SSH. This Device is your local DSH, and every remote runs its complete UI in its own tab.',
-        prefTaskbar: 'Show task totals in the window title',
-        prefTaskbarDesc: 'Updates window & taskbar title to "1 run 1 wait 2 done"; empty categories are omitted.',
-        prefReadSync: 'Sync unread state across DSH Hosts',
-        prefReadSyncDesc: 'Exchanges lightweight session-ID + turn/end cursor metadata over SSH; zero message content uploaded.',
-        prefUiSync: 'Sync view state across Controllers',
-        prefUiSyncDesc: 'Persists workspace fold/group/sort enums in views/<hostId>.json with zero remote plugin or daemon.',
-        devicesHeading: 'Remote devices',
-        importBtn: '+ Quick import prod-arm64 from ~/.ssh/config',
-        importedTag: 'prod-arm64 imported',
-        close: 'Done',
+        title: 'Settings · Multi-Device',
+        subtitle:
+          'Installed only on your computer. Discovers SSH host aliases locally without touching remote servers.',
+        sshAutoDiscovery: 'Found 1 SSH alias in ~/.ssh/config not yet pinned to the tab bar',
+        quickImportBtn: '+ Add to tab bar (prod-arm64)',
+        importedTag: 'Pinned',
+        remoteSetupNote:
+          'Note: Remote servers just run stock dsh web—traffic travels safely through your local SSH tunnel.',
+        closeBtn: 'Done',
       },
     },
-    architecture: {
-      eyebrow: 'PURE NATIVE ARCHITECTURE · 0.3.x DESIGN',
-      title: 'Why System SSH Loopback Tunnels + Per-Device Local Reverse Proxies?',
-      subtitle:
-        'No brittle HTML/JS AST rewriting and no foreign session injection into your local controller. Remote data travels along two clean channels: epoch-fenced catalog metadata and full Keep-Alive native pages.',
-      pillars: [
+    features: {
+      eyebrow: 'Everyday Flow',
+      title: 'Smooth in all the moments that usually break focus',
+      subtitle: 'Everything still feels like native DSH—only now all your machines live in one quiet top strip.',
+      cards: [
         {
-          tag: '01 · TRANSPORT & CREDENTIALS',
-          title: 'System OpenSSH Loopback Tunnel & Secret-Free Cookie Bootstrap',
-          summary:
-            'Spawns the OS ssh client (-N -T -o StrictHostKeyChecking=yes -L 127.0.0.1:<local>:127.0.0.1:<remote>), inheriting 100% of ~/.ssh/config aliases, ProxyJump, ControlMaster, and OS SSH Agent / Keychain.',
-          points: [
-            'Enforces assertLoopbackForward: forwards strictly to remote 127.0.0.1 / localhost / ::1 — never turning local ports into LAN jumpgates',
-            'Reads remote $DSH_HOME/.credentials.yaml over SSH to mint a local session Cookie; remote signing secrets never touch local disk',
-            'Exponential backoff (600ms → 15s + jitter) health supervision with automatic single-reload recovery on reconnect',
-          ],
-          code: `ssh -N -T \\
-  -o ExitOnForwardFailure=yes \\
-  -o BatchMode=yes \\
-  -o ServerAliveInterval=15 \\
-  -o StrictHostKeyChecking=yes \\
-  -L 127.0.0.1:52184:127.0.0.1:3080 \\
-  ubuntu-dev`,
+          tag: 'Instant switching',
+          title: 'Flip between machines without losing your place',
+          body: 'Background tabs stay quietly alive while you switch. Streaming answers, scroll offsets, and half-written prompts are right where you left them.',
         },
         {
-          tag: '02 · NATIVE REVERSE PROXY & BRIDGE',
-          title: 'Dedicated Per-Device Loopback Origin & Idempotent Bridge',
-          summary:
-            'Official DSH Web UI relies on root-relative paths (/assets/*, /plugins/??*, /api/remote.mux). Giving each device its own 127.0.0.1:<port> proxy preserves 100% native models, terminals, diffs, and uploads without AST hacks.',
-          points: [
-            'Injects authenticated Cookie & Origin, strips client auth-smuggling headers, and supports isolated Electron <webview> partitions',
-            'Lightweight __md/bridge.js relays open-session navigation, workspace fold state, and __dshMdVisibility gating',
-            'Hidden Keep-Alive tabs never silently clear unread completions; idempotent read-ack fires only once visible with verified turn/end',
-          ],
-          code: `// Keep-Alive Stage: hide via display, never unmount
-<div class="dsh-md-native-frame-wrap"
-     data-device-id="ubuntu-dev"
-     style="display: none; visibility: hidden">
-  <iframe src="http://127.0.0.1:52184/?md_client=9f2a" />
-</div>`,
+          tag: 'Calm status pills',
+          title: 'Know which box needs you at a glance',
+          body: 'Tiny color-coded pills show what needs attention: amber when an approval is waiting, blue while running, green for finished replies. Click once to jump straight there.',
         },
         {
-          tag: '03 · EPOCH-FENCED ATTENTION PROJECTION',
-          title: 'Epoch-Fenced Catalogs & Exclusive 3-Tone Status Capsules',
-          summary:
-            'Every device maintains an independent connection epoch: subscribe to $events first, fetch baseline single-flight, replay bounded journal increments, and drop stale-generation frames.',
-          points: [
-            'Mutually exclusive urgency: Needs reply (Amber) > Running / Subagents (Blue) > Finished unread (Green) in one pure-digit capsule',
-            'Fixed 2-digit tabular cells prevent 1 → 9 → 99 from nudging adjacent tabs; empty categories render zero width on quiet devices',
-            'Offline or syncing state dims with a dashed border (or 10px dashed ring when empty), never faking an authoritative zero',
-          ],
-          code: `// src/attention.ts · Exclusive urgency order
-if (fact.pending > 0)      pendingSessionIds.push(id)
-else if (fact.running)     runningSessionIds.push(id)
-else if (unread.has(id))   unreadSessionIds.push(id)
-// Excludes archived & subagent rows; preserves forks`,
+          tag: 'Zero guesswork',
+          title: 'Opens the right machine for remote repos',
+          body: 'When you open a project whose Git remote points to another server, the plugin offers to switch straight to that host so you never edit in the wrong place.',
         },
       ],
     },
-    boundaries: {
-      eyebrow: 'ARCHITECTURAL CONTRACT · EXPLICIT BOUNDARIES',
-      title: 'Precision by Restraint: What It Is — and What It Refuses to Be',
-      subtitle:
-        'Multi-machine developer tools fall apart when they conflate file syncing, merged chat state, and invasive remote daemons. dsh-multi-device enforces four strict architectural invariants:',
-      cards: [
+    guarantees: {
+      eyebrow: 'Non-Intrusive',
+      title: 'Keeps everything tidy without touching what works',
+      subtitle: 'Designed to stay out of your way and leave your existing servers untouched.',
+      items: [
         {
-          badge: 'NO FILE SYNC',
-          wrong: 'NOT a file synchronizer or repo cloner',
-          right: 'Zero cloning, zero rsync, zero file mutation',
-          desc: 'The plugin never copies, mirrors, or modifies project files across machines. Source trees and build artifacts stay strictly on the machine that owns them.',
+          badge: '01',
+          title: 'Zero changes on remote servers',
+          body: 'Only your local DSH loads the plugin. Remote machines run stock dsh web—no server-side scripts or extra configs.',
         },
         {
-          badge: 'NO MERGED SESSIONS',
-          wrong: 'NOT a global merged-session aggregator',
-          right: 'Local sidebar stays 100% local; each machine owns its sessions',
-          desc: 'Remote sessions are never injected into your local Session Controller. Each device tab runs its own authentic sidebar, model routing, terminal, and sandbox.',
+          badge: '02',
+          title: 'Files never leave their machine',
+          body: 'Nothing clones or mirrors your folders across hosts. Each tab talks directly to the machine where those files live.',
         },
         {
-          badge: 'ZERO REMOTE PLUGIN',
-          wrong: 'NO remote plugin or background daemon required',
-          right: 'Installed on the Controller Host only; stock dsh web on servers',
-          desc: 'Remote Linux boxes, GPU nodes, and CI hosts run unmodified official dsh web. Disabling or removing the plugin leaves remote machines completely untouched.',
+          badge: '03',
+          title: 'Local sidebar stays clean',
+          body: 'Your laptop conversations stay on your local tab. Remote sessions remain scoped cleanly inside each machine tab.',
         },
         {
-          badge: 'FAIL-CLOSED SECURITY',
-          wrong: 'NO unsafe proxy exposure or silent fallbacks',
-          right: 'Explicit diagnostics on unsupported topologies',
-          desc: 'Enforces StrictHostKeyChecking=yes; clearly explains mixed-content HTTPS→HTTP, remote-browser loopback, or IPv6 parent constraints instead of exposing public ports.',
+          badge: '04',
+          title: 'Works with your existing SSH setup',
+          body: 'Reuses ~/.ssh/config aliases and keys you already trust. Uses local loopback forwarding by default—no public ports exposed.',
         },
       ],
     },
     install: {
-      eyebrow: 'INSTALLATION & VERIFICATION · GET STARTED',
-      title: 'Connect Your Machine Fleet in Three Minutes',
-      subtitle:
-        'Install from verified prebuilt GitHub Release .tgz assets — no git clone or local build needed. (Note: dsh-multi-device is not published to public npm; always paste the exact Release .tgz URL.)',
-      tabs: [
+      eyebrow: 'Setup',
+      title: 'Install in three quick steps',
+      subtitle: 'Paste the official release package URL directly inside DSH Settings.',
+      urlLabel: `v0.3.6 Package URL (GitHub Release .tgz)`,
+      copyBtn: 'Copy URL',
+      copiedBtn: 'Copied',
+      releasesLink: 'Open GitHub Releases',
+      steps: [
         {
-          id: 'manager',
-          label: '1. Official Plugin Manager (Recommended)',
-          note: 'Works inside DSH Desktop and DSH Web Host UI, automatically targeting the active Profile.',
-          steps: [
-            'Verify system OpenSSH and known_hosts on the Host machine: ssh -V && ssh -o StrictHostKeyChecking=yes <your-host-alias> true',
-            'Start official dsh web on each remote server (keep default 127.0.0.1 loopback binding — no public port needed).',
-            'Open Sidebar → Plugins → Add / Install third-party plugin, paste the full dsh-multi-device-vX.Y.Z.tgz URL from GitHub Releases, enable, and restart/refresh as prompted.',
-          ],
-          codeLabel: 'Exact Release .tgz Asset URL Pattern (copy verified version URL from GitHub Releases)',
-          code: `https://github.com/IGNGserver/dsh-multi-device/releases/download/v0.3.6/dsh-multi-device-v0.3.6.tgz`,
+          num: '01',
+          title: 'Open DSH Plugin Settings',
+          body: 'Launch your DSH Desktop or local DSH Web window and navigate to Settings → Plugins.',
         },
         {
-          id: 'web-cli',
-          label: '2. DSH Web Official CLI',
-          note: 'Stop any running dsh web process using the same web Profile and back up profile data first.',
-          steps: [
-            'Verify the official dsh CLI version and environment.',
-            'Run dsh plugin --profile web add with the exact Release .tgz URL (or SHA-256-verified local absolute path).',
-            'Verify with --dump-config, start dsh web, and import hosts from ~/.ssh/config in Settings → Multi-Device.',
-          ],
-          codeLabel: 'DSH Web Profile CLI Installation',
-          code: `# 1. Verify system OpenSSH & host key in known_hosts
-ssh -V
-ssh -o StrictHostKeyChecking=yes your-host-alias true
-
-# 2. Stop active web Profile host, then install exact Release tarball
-dsh --version
-dsh plugin --profile web add "https://github.com/IGNGserver/dsh-multi-device/releases/download/v0.3.6/dsh-multi-device-v0.3.6.tgz"
-dsh --profile web --dump-config
-dsh web`,
+          num: '02',
+          title: 'Choose "Install from URL" & paste',
+          body: 'Copy the .tgz link on the left, paste it into DSH, and reload once installed.',
         },
         {
-          id: 'desktop-cli',
-          label: '3. DSH Desktop CLI (Prerequisites)',
-          note: 'In-app Plugin Manager is preferred for Desktop. For CLI, launch Desktop once to initialize its profile, quit completely (including tray), and use Desktop’s bundled dsh binary.',
-          steps: [
-            'Launch DSH Desktop once so it initializes the desktop Profile, then quit completely (including background tray).',
-            'Invoke the official dsh binary bundled with DSH Desktop (do not use a separate npm-installed dsh CLI).',
-            'Relaunch DSH Desktop and verify the persistent [This Device][device…] tab strip.',
-          ],
-          codeLabel: 'DSH Desktop Bundled CLI Installation',
-          code: `# Prerequisite: Desktop initialized once & quit completely; use Desktop's bundled dsh binary
-dsh plugin --profile desktop add "https://github.com/IGNGserver/dsh-multi-device/releases/download/v0.3.6/dsh-multi-device-v0.3.6.tgz"`,
+          num: '03',
+          title: 'Click "+" in the top bar to pick hosts',
+          body: 'Pick any SSH host from ~/.ssh/config and your multi-device tab bar is ready.',
         },
       ],
-      copyBtn: 'Copy',
-      copiedBtn: 'Copied',
-      checklistTitle: 'Post-Install 4-Point Verification Checklist (Interactive)',
-      checklist: [
-        'Plugin Manager shows exact version & Release source; Settings → Multi-Device loads cleanly after restart',
-        'ssh -V succeeds with verified known_hosts; devices connect via default system-ssh without native build scripts',
-        'Persistent [This Device][device…] bar: local sidebar stays local-only, remote tabs keep full UI alive across switches',
-        'Status capsules accurately reflect Amber (reply) / Blue (running) / Green (unread) and open target sessions on click',
+      cliPanelTitle: 'Prefer the terminal? Show CLI install commands',
+      cliDesktopLabel: 'Install for DSH Desktop',
+      cliWebLabel: 'Install for local DSH Web',
+      checklistPanelTitle: 'Not seeing your remote machine? Check these 4 quick things',
+      checklistItems: [
+        {
+          question: '1. Is dsh web running on the remote host?',
+          answer: 'Make sure dsh web is started and listening normally on the target computer.',
+        },
+        {
+          question: '2. Does "ssh <host>" connect without interactive prompts?',
+          answer: 'If your terminal can log in cleanly via SSH keys, the plugin can connect too.',
+        },
+        {
+          question: '3. Are you opening DSH Desktop or local 127.0.0.1 / localhost HTTP?',
+          answer: 'The plugin supports DSH Desktop and local loopback HTTP Web GUI sessions.',
+        },
+        {
+          question: '4. Does local OpenSSH support port forwarding?',
+          answer: 'Built-in OpenSSH on macOS, Linux, and Windows 10/11 works out of the box.',
+        },
+      ],
+    },
+    architecture: {
+      eyebrow: 'Under the Hood',
+      panelTitle: 'Architecture, SSH security & support boundaries (expand details)',
+      panelSummary: 'Technical details on loopback forwarding, keep-alive containers, and strict boundaries',
+      items: [
+        {
+          title: 'Loopback SSH forwarding by default (system-ssh)',
+          body: 'Enabled machines open isolated 127.0.0.1 loopback tunnels via system OpenSSH—never exposing remote DSH ports publicly. HTTP(S) direct mode stays off unless explicitly enabled.',
+        },
+        {
+          title: 'Controlled DOM Keep-Alive tabs',
+          body: 'Each active device preserves its viewport instance, scroll state, and composer draft in memory while switching tabs.',
+        },
+        {
+          title: 'Priority status rollup (Pending > Running > Done)',
+          body: 'Only live approvals, running turns, and unread completions populate each tab capsule; opening an unread session clears its counter immediately.',
+        },
+        {
+          title: 'Supported parent environments & package source',
+          body: 'Supports DSH Desktop and local 127.0.0.1/localhost HTTP DSH Web only (remote browser parents, HTTPS->HTTP mixed content, and IPv6 origins are unsupported). Distributed solely via GitHub Release .tgz.',
+        },
       ],
     },
     footer: {
-      summary: 'dsh-multi-device · Native persistent device tab strip & SSH tunnel workbench for DeepSeek Harness.',
-      mit: 'MIT License · Atomic 0600 persistence & fail-closed loopback boundaries',
-      links: {
-        repo: 'GitHub Repository',
-        releases: 'GitHub Releases',
-        arch: 'NATIVE-ARCHITECTURE.md',
-        issues: 'Issue Tracker',
-      },
+      note: 'dsh-multi-device · Multi-device tab strip plugin for DeepSeek Harness (DSH)',
+      license: 'MIT License',
+      repo: 'Source on GitHub',
+      releases: 'Releases',
     },
   },
-} as const
-
-export function getCopy(locale: Locale) {
-  return COPY[locale]
 }

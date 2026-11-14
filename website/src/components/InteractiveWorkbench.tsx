@@ -1,15 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { getCopy } from '../data/copy'
-import {
-  createImportedProdDevice,
-  createInitialDevices,
-} from '../data/workspaceFixtures'
-import type {
-  AttentionTone,
-  DeviceRecord,
-  DshSessionItem,
-  Locale,
-} from '../types'
+import { REPO_URL, type SiteCopy } from '../data/copy'
+import { createImportedProdDevice, INITIAL_DEVICES } from '../data/workspaceFixtures'
+import type { DeviceRecord, DshSessionItem, Locale, WorkbenchViewMode } from '../types'
 import {
   formatCountCell,
   formatTaskbarSummary,
@@ -17,141 +9,116 @@ import {
 } from '../utils/attention'
 import { DshDevicePane } from './DshDevicePane'
 import {
+  CheckIcon,
   CloseIcon,
-  ExternalLinkIcon,
-  GlobeIcon,
-  Layers3DIcon,
-  RefreshIcon,
+  LaptopIcon,
+  PlusIcon,
+  ServerIcon,
   SettingsIcon,
-  StateDot,
 } from './Icons'
+import { MiniDshWindow } from './MiniDshWindow'
 
 interface InteractiveWorkbenchProps {
   readonly locale: Locale
+  readonly copy: SiteCopy
 }
 
-export function InteractiveWorkbench({ locale }: InteractiveWorkbenchProps) {
-  const t = getCopy(locale).workbench
-
-  const [devices, setDevices] = useState<DeviceRecord[]>(() =>
-    createInitialDevices(),
-  )
-  const [activeDeviceId, setActiveDeviceId] = useState<string>('__local__')
+export function InteractiveWorkbench({ locale, copy }: InteractiveWorkbenchProps) {
+  const [devices, setDevices] = useState<DeviceRecord[]>(INITIAL_DEVICES)
+  const [activeDeviceId, setActiveDeviceId] = useState<string>('ubuntu-dev')
+  const [viewMode, setViewMode] = useState<WorkbenchViewMode>('converged')
   const [openMenuDeviceId, setOpenMenuDeviceId] = useState<string | null>(null)
-  const [menuLeftPx, setMenuLeftPx] = useState<number>(12)
-  const [exploded3d, setExploded3d] = useState<boolean>(false)
-  const nativeBarRef = useRef<HTMLDivElement | null>(null)
-  const [showTaskbarSummary, setShowTaskbarSummary] = useState<boolean>(true)
-  const [syncReadState, setSyncReadState] = useState<boolean>(true)
-  const [syncUiState, setSyncUiState] = useState<boolean>(true)
-  const [settingsOpen, setSettingsOpen] = useState<boolean>(false)
-  const [streamTick, setStreamTick] = useState<number>(1)
-  const [toastMessage, setToastMessage] = useState<string | null>(null)
-
-  const activeDeviceIdRef = useRef(activeDeviceId)
-  activeDeviceIdRef.current = activeDeviceId
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   const timersRef = useRef<number[]>([])
+  const activeDeviceIdRef = useRef<string>(activeDeviceId)
+  activeDeviceIdRef.current = activeDeviceId
 
-  // Continuous background Keep-Alive stream ticker
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      setStreamTick((n) => n + 1)
-    }, 1100)
-    return () => {
-      window.clearInterval(id)
-    }
-  }, [])
+  const workbenchWrapRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     return () => {
-      timersRef.current.forEach((id) => window.clearTimeout(id))
-    }
-  }, [])
-
-  // Close attention menu on outside click or Escape
-  useEffect(() => {
-    if (!openMenuDeviceId) return
-    const onPointerDown = (e: MouseEvent) => {
-      const target = e.target as HTMLElement | null
-      if (
-        target?.closest('.dsh-md-tab-status-anchor') ||
-        target?.closest('.dsh-official-menu-popover')
-      ) {
-        return
+      for (const id of timersRef.current) {
+        window.clearTimeout(id)
       }
-      setOpenMenuDeviceId(null)
+      timersRef.current = []
     }
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpenMenuDeviceId(null)
+  }, [])
+
+  useEffect(() => {
+    if (!openMenuDeviceId && !settingsOpen) return
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setOpenMenuDeviceId(null)
+        setSettingsOpen(false)
+      }
     }
-    window.addEventListener('mousedown', onPointerDown)
-    window.addEventListener('keydown', onKeyDown)
+    const handleOutside = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null
+      if (!target) return
+      if (
+        openMenuDeviceId &&
+        !target.closest('[data-testid="attention-menu"]') &&
+        !target.closest('[data-testid="native-tab-bar"]')
+      ) {
+        setOpenMenuDeviceId(null)
+      }
+    }
+    window.addEventListener('keydown', handleKey)
+    window.addEventListener('mousedown', handleOutside)
     return () => {
-      window.removeEventListener('mousedown', onPointerDown)
-      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keydown', handleKey)
+      window.removeEventListener('mousedown', handleOutside)
     }
-  }, [openMenuDeviceId])
+  }, [openMenuDeviceId, settingsOpen])
 
-  const showToast = (msg: string) => {
-    setToastMessage(msg)
-    const timer = window.setTimeout(() => {
-      setToastMessage((cur) => (cur === msg ? null : cur))
-    }, 2800)
-    timersRef.current.push(timer)
-  }
-
-  const visibleTabs = useMemo(
-    () => devices.filter((d) => d.isLocal || d.enabled),
+  const enabledDevices = useMemo(
+    () => devices.filter((dev) => dev.enabled),
     [devices],
   )
 
-  const activeDevice =
-    visibleTabs.find((d) => d.id === activeDeviceId) ?? visibleTabs[0]
-
-  const taskbarSummary = useMemo(
-    () => formatTaskbarSummary(devices, locale),
-    [devices, locale],
+  const taskbarText = useMemo(
+    () => formatTaskbarSummary(enabledDevices, locale),
+    [enabledDevices, locale],
   )
 
-  // Acknowledge unread status when selecting/viewing an unread session on a visible device
-  const acknowledgeIfUnread = (deviceId: string, sessionId: string) => {
-    setDevices((prev) =>
-      prev.map((dev) => {
-        if (dev.id !== deviceId) return dev
-        return {
-          ...dev,
-          activeSessionId: sessionId,
-          sessions: dev.sessions.map((s) =>
-            s.id === sessionId && s.status === 'unread'
-              ? {
-                  ...s,
-                  status: 'idle',
-                  updatedLabel: { zh: '已读', en: 'read' },
-                }
-              : s,
-          ),
-        }
-      }),
-    )
-  }
+  const menuDevice = useMemo(
+    () => devices.find((d) => d.id === openMenuDeviceId) ?? null,
+    [devices, openMenuDeviceId],
+  )
 
-  const handleSwitchDevice = (deviceId: string) => {
-    setActiveDeviceId(deviceId)
-    setOpenMenuDeviceId(null)
-    // Only clear unread if the active session on that newly visible tab is unread & mounted
-    const target = devices.find((d) => d.id === deviceId)
-    if (target && target.keepAliveMounted) {
-      const currentSess = target.sessions.find(
-        (s) => s.id === target.activeSessionId,
-      )
-      if (currentSess?.status === 'unread') {
-        acknowledgeIfUnread(deviceId, currentSess.id)
+  const menuSummary = useMemo(
+    () => (menuDevice ? summarizeDeviceAttention(menuDevice) : null),
+    [menuDevice],
+  )
+
+  const prodImported = useMemo(
+    () => devices.some((d) => d.id === 'prod-arm64'),
+    [devices],
+  )
+
+  const handleSelectDevice = (deviceId: string) => {
+    if (activeDeviceId === deviceId) {
+      const current = devices.find((d) => d.id === deviceId)
+      const summary = current ? summarizeDeviceAttention(current) : null
+      if (summary && summary.totalActive > 0) {
+        setOpenMenuDeviceId((prev) => (prev === deviceId ? null : deviceId))
       }
+      return
     }
+    setOpenMenuDeviceId(null)
+    setActiveDeviceId(deviceId)
   }
 
-  const handleOpenSessionFromMenu = (deviceId: string, sessionId: string) => {
+  const handleDockFromScattered = (deviceId: string) => {
+    setViewMode('converged')
+    setActiveDeviceId(deviceId)
+    setOpenMenuDeviceId(null)
+  }
+
+  const handleSelectSession = (deviceId: string, sessionId: string) => {
+    if (!sessionId) return
+    setViewMode('converged')
     setActiveDeviceId(deviceId)
     setOpenMenuDeviceId(null)
     setDevices((prev) =>
@@ -159,147 +126,31 @@ export function InteractiveWorkbench({ locale }: InteractiveWorkbenchProps) {
         if (dev.id !== deviceId) return dev
         return {
           ...dev,
-          keepAliveMounted: true,
           activeSessionId: sessionId,
           sessions: dev.sessions.map((s) =>
-            s.id === sessionId && s.status === 'unread'
-              ? {
-                  ...s,
-                  status: 'idle',
-                  updatedLabel: { zh: '刚刚已读', en: 'just read' },
-                }
-              : s,
+            s.id === sessionId && s.status === 'unread' ? { ...s, status: 'idle' } : s,
           ),
         }
       }),
     )
   }
 
-  const handleReleaseKeepAlive = (deviceId: string) => {
+  const handleUpdateDraft = (deviceId: string, text: string) => {
     setDevices((prev) =>
-      prev.map((dev) =>
-        dev.id === deviceId ? { ...dev, keepAliveMounted: false } : dev,
-      ),
-    )
-    showToast(
-      locale === 'zh'
-        ? `已释放 ${deviceId} 后台页面（远端 SSH 与任务继续保活运行）`
-        : `Released ${deviceId} background frame (remote tasks continue running)`,
+      prev.map((dev) => (dev.id === deviceId ? { ...dev, draftText: text } : dev)),
     )
   }
 
-  const handleRemount = (deviceId: string) => {
-    setDevices((prev) =>
-      prev.map((dev) =>
-        dev.id === deviceId ? { ...dev, keepAliveMounted: true } : dev,
-      ),
-    )
-  }
-
-  const handleApproveSession = (deviceId: string, sessionId: string) => {
-    setDevices((prev) =>
-      prev.map((dev) => {
-        if (dev.id !== deviceId) return dev
-        return {
-          ...dev,
-          sessions: dev.sessions.map((s) => {
-            if (s.id !== sessionId) return s
-            return {
-              ...s,
-              status: 'running',
-              updatedLabel: { zh: '运行中', en: 'running' },
-              blocks: s.blocks.map((b) =>
-                b.kind === 'approval'
-                  ? {
-                      id: `${b.id}-running`,
-                      kind: 'tool',
-                      title: {
-                        zh: '已批准并启动 · torchrun 4×A100 FP8 All-to-All',
-                        en: 'Approved & running · torchrun 4×A100 FP8 All-to-All',
-                      },
-                      subtitle: 'NVLink 614 GB/s · FP8 dispatch/combine active',
-                      status: 'ongoing',
-                      code: `Rank 0..3 initialized | tokens=8192 | FP8 combine latency: 148 us (1.84x speedup)`,
-                      content: {
-                        zh: '工具审批已通过！顶部胶囊已从琥珀色「待回复」实时切换为蓝色「运行中」。约 3 秒后运行完成：若你切去其他标签页，它将变为绿色「完成未读」！',
-                        en: 'Tool approved! The capsule transitioned live from Amber (pending) to Blue (running). In ~3s it will finish: switch tabs now to see it land as Green (unread)!',
-                      },
-                    }
-                  : b,
-              ),
-            }
-          }),
-        }
-      }),
-    )
-
-    const timer = window.setTimeout(() => {
-      const isVisibleNow = activeDeviceIdRef.current === deviceId
-      setDevices((prev) =>
-        prev.map((dev) => {
-          if (dev.id !== deviceId) return dev
-          const stillViewingThisSession =
-            isVisibleNow && dev.keepAliveMounted && dev.activeSessionId === sessionId
-          return {
-            ...dev,
-            sessions: dev.sessions.map((s) => {
-              if (s.id !== sessionId) return s
-              return {
-                ...s,
-                status: stillViewingThisSession ? 'idle' : 'unread',
-                updatedLabel: stillViewingThisSession
-                  ? { zh: '已完成', en: 'done' }
-                  : { zh: '完成未读', en: 'unread' },
-                blocks: [
-                  ...s.blocks.map((b) =>
-                    b.status === 'ongoing'
-                      ? { ...b, status: 'done' as const, subtitle: 'exit 0 · 3.1s · turn/end persisted' }
-                      : b,
-                  ),
-                  {
-                    id: `done-${Date.now()}`,
-                    kind: 'assistant',
-                    content: {
-                      zh: '4 卡 A100 FP8 评测已完成（`turn/end` 已确认）：吞吐提升 1.84×，零数值溢出。',
-                      en: '4×A100 FP8 benchmark completed (`turn/end` confirmed): 1.84× throughput gain with zero overflow.',
-                    },
-                  },
-                ],
-              }
-            }),
-          }
-        }),
-      )
-    }, 3100)
-    timersRef.current.push(timer)
-  }
-
-  const handleRejectSession = (deviceId: string, sessionId: string) => {
-    setDevices((prev) =>
-      prev.map((dev) => {
-        if (dev.id !== deviceId) return dev
-        return {
-          ...dev,
-          sessions: dev.sessions.map((s) =>
-            s.id === sessionId
-              ? {
-                  ...s,
-                  status: 'idle',
-                  updatedLabel: { zh: '已取消', en: 'rejected' },
-                  blocks: s.blocks.filter((b) => b.kind !== 'approval'),
-                }
-              : s,
-          ),
-        }
-      }),
-    )
-  }
-
-  const handleSendDraft = (deviceId: string) => {
+  const handleSendMessage = (deviceId: string) => {
     const dev = devices.find((d) => d.id === deviceId)
-    if (!dev || !dev.draftText.trim()) return
-    const promptText = dev.draftText.trim()
+    if (!dev) return
+    const prompt = dev.draftText.trim()
+    if (!prompt) return
+
     const targetSessionId = dev.activeSessionId
+    const stamp = Date.now()
+    const userBlockId = `u-${stamp}`
+    const assistBlockId = `a-${stamp}`
 
     setDevices((prev) =>
       prev.map((d) => {
@@ -307,997 +158,542 @@ export function InteractiveWorkbench({ locale }: InteractiveWorkbenchProps) {
         return {
           ...d,
           draftText: '',
-          sessions: d.sessions.map((s) =>
-            s.id === targetSessionId
-              ? {
-                  ...s,
-                  status: 'running',
-                  updatedLabel: { zh: '运行中', en: 'running' },
-                  blocks: [
-                    ...s.blocks,
-                    {
-                      id: `usr-${Date.now()}`,
-                      kind: 'user',
-                      content: { zh: promptText, en: promptText },
-                    },
-                  ],
-                }
-              : s,
-          ),
+          sessions: d.sessions.map((s) => {
+            if (s.id !== targetSessionId) return s
+            return {
+              ...s,
+              status: 'running',
+              updatedLabel: { zh: '运行中', en: 'Running' },
+              blocks: [
+                ...s.blocks,
+                {
+                  id: userBlockId,
+                  kind: 'user',
+                  content: { zh: prompt, en: prompt },
+                },
+                {
+                  id: assistBlockId,
+                  kind: 'assistant',
+                  status: 'ongoing',
+                  content: {
+                    zh: copy.workbench.simulatedStreamReply(prompt),
+                    en: copy.workbench.simulatedStreamReply(prompt),
+                  },
+                },
+              ],
+            }
+          }),
         }
       }),
     )
 
-    const timer = window.setTimeout(() => {
-      const visibleNow = activeDeviceIdRef.current === deviceId
+    const finishTimer = window.setTimeout(() => {
+      const stillWatching = activeDeviceIdRef.current === deviceId
       setDevices((prev) =>
         prev.map((d) => {
           if (d.id !== deviceId) return d
-          const markIdle = visibleNow && d.activeSessionId === targetSessionId
           return {
             ...d,
-            sessions: d.sessions.map((s) =>
-              s.id === targetSessionId
-                ? {
-                    ...s,
-                    status: markIdle ? 'idle' : 'unread',
-                    updatedLabel: markIdle
-                      ? { zh: '刚刚', en: 'just now' }
-                      : { zh: '完成未读', en: 'unread' },
-                    blocks: [
-                      ...s.blocks,
-                      {
-                        id: `ast-${Date.now()}`,
-                        kind: 'assistant',
+            sessions: d.sessions.map((s) => {
+              if (s.id !== targetSessionId) return s
+              return {
+                ...s,
+                status: stillWatching ? 'idle' : 'unread',
+                updatedLabel: { zh: '刚刚', en: 'Just now' },
+                blocks: s.blocks.map((b) =>
+                  b.id === assistBlockId
+                    ? {
+                        ...b,
+                        status: 'done',
                         content: {
-                          zh: `已在「${d.name}」本地环境独立执行完毕（未同步或改动其他设备文件）。`,
-                          en: `Executed independently inside "${d.name}" local workspace (zero cross-machine file mutation).`,
+                          zh: `${copy.workbench.simulatedStreamReply(prompt)}\n\n${copy.workbench.simulatedStreamFinal}`,
+                          en: `${copy.workbench.simulatedStreamReply(prompt)}\n\n${copy.workbench.simulatedStreamFinal}`,
                         },
-                      },
-                    ],
-                  }
-                : s,
-            ),
+                      }
+                    : b,
+                ),
+              }
+            }),
           }
         }),
       )
-    }, 1800)
-    timersRef.current.push(timer)
+    }, 850)
+
+    timersRef.current.push(finishTimer)
   }
 
-  const handleCreateSession = (deviceId: string) => {
-    const newId = `${deviceId}:sess-${Date.now()}`
+  const handleApproveAction = (deviceId: string, sessionId: string, allow: boolean) => {
     setDevices((prev) =>
-      prev.map((d) => {
-        if (d.id !== deviceId) return d
-        const ws = d.workspaces[0]
-        const created: DshSessionItem = {
-          id: newId,
-          rawSessionId: `sess-${Math.random().toString(16).slice(2, 8)}`,
-          workspaceId: ws.id,
-          workspaceName: ws.name,
-          workspacePath: ws.path,
-          title: {
-            zh: `新会话 · ${ws.name} 诊断`,
-            en: `New Session · ${ws.name} check`,
-          },
-          updatedLabel: { zh: '刚刚', en: 'just now' },
-          status: 'idle',
-          model: 'DeepSeek-V3.2',
-          effort: 'High',
-          contextPercent: 8,
-          blocks: [
-            {
-              id: `init-${Date.now()}`,
-              kind: 'assistant',
-              content: {
-                zh: `已在 ${d.name} (${ws.path}) 创建全新本地会话。`,
-                en: `Created an isolated session on ${d.name} (${ws.path}).`,
-              },
-            },
-          ],
-        }
+      prev.map((dev) => {
+        if (dev.id !== deviceId) return dev
         return {
-          ...d,
-          activeSessionId: newId,
-          sessions: [created, ...d.sessions],
+          ...dev,
+          sessions: dev.sessions.map((sess) => {
+            if (sess.id !== sessionId) return sess
+            return {
+              ...sess,
+              status: allow ? 'running' : 'idle',
+              pendingKind: undefined,
+              updatedLabel: allow
+                ? { zh: '运行中', en: 'Running' }
+                : { zh: '已取消', en: 'Declined' },
+              blocks: sess.blocks.map((b) => {
+                if (b.kind !== 'approval') return b
+                return {
+                  ...b,
+                  kind: 'assistant',
+                  status: allow ? 'ongoing' : 'done',
+                  content: allow
+                    ? {
+                        zh: SITE_NOTICE_ALLOW.zh,
+                        en: SITE_NOTICE_ALLOW.en,
+                      }
+                    : {
+                        zh: SITE_NOTICE_DENY.zh,
+                        en: SITE_NOTICE_DENY.en,
+                      },
+                }
+              }),
+            }
+          }),
         }
       }),
     )
   }
 
-  // Simulator controls
-  const simulateEvent = (tone: AttentionTone) => {
-    const targetId =
-      activeDeviceId === 'ubuntu-dev' ? 'gpu-a100' : 'ubuntu-dev'
-    const sessId = `sim:${targetId}:${Date.now()}`
+  const handleReconnect = (deviceId: string) => {
     setDevices((prev) =>
-      prev.map((d) => {
-        if (d.id !== targetId) return d
-        const ws = d.workspaces[0]
-        const newSession: DshSessionItem =
-          tone === 'pending'
-            ? {
-                id: sessId,
-                rawSessionId: `sess-sim-pend`,
-                workspaceId: ws.id,
-                workspaceName: ws.name,
-                workspacePath: ws.path,
-                title: {
-                  zh: '请求批准：清理旧 benchmark 火焰图快照',
-                  en: 'Approval needed: prune flamegraph snapshots',
-                },
-                updatedLabel: { zh: '待批准', en: 'Approval' },
-                status: 'pending',
-                pendingKind: 'approval',
-                model: 'DeepSeek-V3.2',
-                effort: 'Medium',
-                contextPercent: 21,
-                blocks: [
-                  {
-                    id: `ap-${Date.now()}`,
-                    kind: 'approval',
-                    command: 'rm -f ./artifacts/flamegraph-*.svg',
-                    status: 'warning',
-                    content: {
-                      zh: '由顶部模拟器触发的待回复会话：请点击允许一次观察胶囊变化。',
-                      en: 'Simulated pending approval session: click Allow once to watch the capsule update.',
-                    },
-                  },
-                ],
-              }
-            : tone === 'running'
-              ? {
-                  id: sessId,
-                  rawSessionId: `sess-sim-run`,
-                  workspaceId: ws.id,
-                  workspaceName: ws.name,
-                  workspacePath: ws.path,
-                  title: {
-                    zh: '后台增量构建与单元回归巡检',
-                    en: 'Background incremental check & unit suite',
-                  },
-                  updatedLabel: { zh: '运行中', en: 'running' },
-                  status: 'running',
-                  model: 'DeepSeek-R1',
-                  effort: 'High',
-                  contextPercent: 44,
-                  blocks: [
-                    {
-                      id: `rn-${Date.now()}`,
-                      kind: 'tool',
-                      title: {
-                        zh: '后台任务运行中 · vitest --run',
-                        en: 'Background task · vitest --run',
-                      },
-                      subtitle: 'Keep-Alive stream active',
-                      status: 'ongoing',
-                      code: 'RUN  v3.0 · 42 passed · streaming events.mux ...',
-                      content: {
-                        zh: '此会话正在后台运行，计数已实时计入蓝色胶囊。',
-                        en: 'Running in background; reflected live in the blue capsule segment.',
-                      },
-                    },
-                  ],
-                }
-              : {
-                  id: sessId,
-                  rawSessionId: `sess-sim-done`,
-                  workspaceId: ws.id,
-                  workspaceName: ws.name,
-                  workspacePath: ws.path,
-                  title: {
-                    zh: '后台任务已完成：SSH 端口健康巡检报告',
-                    en: 'Completed: SSH loopback health audit report',
-                  },
-                  updatedLabel: { zh: '刚刚完成', en: 'just done' },
-                  status: 'unread',
-                  model: 'DeepSeek-V3.2',
-                  effort: 'Medium',
-                  contextPercent: 18,
-                  blocks: [
-                    {
-                      id: `dn-${Date.now()}`,
-                      kind: 'assistant',
-                      content: {
-                        zh: '后台 `turn/end` 已到达！点击顶部绿色未读胶囊数字即可一键跳转至此并清除未读。',
-                        en: 'Background `turn/end` arrived! Click the green unread count in the top bar to jump straight here and clear it.',
-                      },
-                    },
-                  ],
-                }
-
-        return {
-          ...d,
-          sessions: [newSession, ...d.sessions],
-        }
-      }),
-    )
-  }
-
-  const anyStale = devices.some((d) => d.stale)
-
-  const toggleStaleDemo = () => {
-    setDevices((prev) =>
-      prev.map((d) =>
-        d.id === 'macos-ci' || d.id === 'prod-arm64'
-          ? { ...d, stale: !anyStale }
-          : d,
+      prev.map((dev) =>
+        dev.id === deviceId ? { ...dev, connected: true, stale: false } : dev,
       ),
     )
   }
 
   const handleImportProd = () => {
-    if (devices.some((d) => d.id === 'prod-arm64')) return
-    setDevices((prev) => [...prev, createImportedProdDevice()])
+    setDevices((prev) => {
+      if (prev.some((d) => d.id === 'prod-arm64')) {
+        return prev.map((d) => (d.id === 'prod-arm64' ? { ...d, enabled: true } : d))
+      }
+      return [...prev, createImportedProdDevice()]
+    })
   }
 
-  const hasProdImported = devices.some((d) => d.id === 'prod-arm64')
-
-  const resetDemo = () => {
-    setDevices(createInitialDevices())
-    setActiveDeviceId('__local__')
-    setOpenMenuDeviceId(null)
-    setExploded3d(false)
+  const handleToggleDeviceEnabled = (deviceId: string) => {
+    setDevices((prev) =>
+      prev.map((d) => {
+        if (d.id !== deviceId || d.isLocal) return d
+        return { ...d, enabled: !d.enabled }
+      }),
+    )
+    if (activeDeviceId === deviceId) {
+      setActiveDeviceId('__local__')
+    }
   }
-
-  // Order for 3D exploded Z-stack: active device at Z=0, others fanned behind
-  const mountedOrder = useMemo(() => {
-    const rest = visibleTabs.filter((d) => d.id !== activeDevice.id)
-    return [activeDevice, ...rest]
-  }, [activeDevice, visibleTabs])
 
   return (
-    <section id="workbench" className="section-block">
-      <div className="container">
-        <div className="section-header">
-          <div className="section-eyebrow">{t.eyebrow}</div>
-          <h2 className="section-title">{t.title}</h2>
-          <p className="section-subtitle">{t.subtitle}</p>
-        </div>
-
-        {/* Control Deck & Status Legend */}
-        <div className="workbench-control-deck">
-          <div className="legend-cluster">
-            <span className="legend-item">
-              <span className="legend-swatch legend-swatch--pending" />
-              <span>{t.legend.pending}</span>
-            </span>
-            <span className="legend-item">
-              <span className="legend-swatch legend-swatch--running" />
-              <span>{t.legend.running}</span>
-            </span>
-            <span className="legend-item">
-              <span className="legend-swatch legend-swatch--done" />
-              <span>{t.legend.unread}</span>
-            </span>
-            <span className="legend-item">
-              <span className="legend-swatch legend-swatch--stale" />
-              <span>{t.legend.stale}</span>
-            </span>
-          </div>
-
-          <div className="sim-buttons-cluster">
-            <button
-              type="button"
-              className="sim-btn"
-              data-active={exploded3d ? 'true' : 'false'}
-              data-testid="toggle-exploded-3d"
-              onClick={() => setExploded3d((v) => !v)}
+    <section id="workbench" className="hero-workbench">
+      <div className="shell-container">
+        {/* Clean, readable DSH Hero */}
+        <div className="hero-header">
+          <div className="hero-eyebrow">{copy.hero.eyebrow}</div>
+          <h1 className="hero-title">{copy.hero.title}</h1>
+          <p className="hero-subtitle">{copy.hero.subtitle}</p>
+          <div className="hero-actions">
+            <a className="dsh-btn dsh-btn--primary dsh-btn--lg" href="#install">
+              {copy.hero.primaryCta}
+            </a>
+            <a
+              className="dsh-btn dsh-btn--ghost dsh-btn--lg"
+              href={REPO_URL}
+              target="_blank"
+              rel="noreferrer"
             >
-              <Layers3DIcon size={13} />
-              <span>
-                {exploded3d ? t.controls.exploded3dActive : t.controls.exploded3d}
-              </span>
-            </button>
-
-            <button
-              type="button"
-              className="sim-btn sim-btn--pending"
-              onClick={() => simulateEvent('pending')}
-            >
-              {t.controls.simulatePending}
-            </button>
-
-            <button
-              type="button"
-              className="sim-btn sim-btn--running"
-              onClick={() => simulateEvent('running')}
-            >
-              {t.controls.simulateRunning}
-            </button>
-
-            <button
-              type="button"
-              className="sim-btn sim-btn--done"
-              onClick={() => simulateEvent('done')}
-            >
-              {t.controls.simulateUnread}
-            </button>
-
-            <button
-              type="button"
-              className="sim-btn"
-              data-active={anyStale ? 'true' : 'false'}
-              data-testid="toggle-stale-btn"
-              onClick={toggleStaleDemo}
-            >
-              {anyStale ? t.controls.simulateRecover : t.controls.simulateStale}
-            </button>
-
-            <button type="button" className="sim-btn" onClick={resetDemo}>
-              {t.controls.resetDemo}
-            </button>
+              {copy.hero.secondaryCta}
+            </a>
           </div>
         </div>
 
-        {/* Full-Scale DSH Host Window */}
-        <div className="workbench-window" data-testid="interactive-workbench">
-          {/* OS Window Titlebar */}
-          <div className="workbench-os-titlebar">
-            <div className="window-dots" aria-hidden="true">
-              <span className="window-dot window-dot--close" />
-              <span className="window-dot window-dot--min" />
-              <span className="window-dot window-dot--max" />
-            </div>
-
-            <div className="workbench-os-title-center">
-              {showTaskbarSummary && taskbarSummary && (
-                <span
-                  className="os-title-summary-badge tabular-nums"
-                  data-testid="window-title-summary"
-                >
-                  {taskbarSummary}
-                </span>
-              )}
-              <span>
-                DeepSeek Harness —{' '}
-                {activeDevice.isLocal
-                  ? t.nativeBar.localTab
-                  : activeDevice.name}
-              </span>
-            </div>
-
-            <div className="workbench-os-right">
-              <span className="transport-telemetry-pill">
-                {activeDevice.sshSummary}
-              </span>
-            </div>
-          </div>
-
-          {/* Authentic 42px Persistent Top Native Bar */}
-          <div
-            ref={nativeBarRef}
-            className="dsh-md-native-bar"
-            data-testid="native-tab-bar"
-          >
-            <div className="dsh-md-native-tabs" role="tablist">
-              {visibleTabs.map((dev) => {
-                const isActive = dev.id === activeDevice.id
-                const attention = summarizeDeviceAttention(dev)
-                const label = dev.isLocal ? t.nativeBar.localTab : dev.name
-                const showCapsule =
-                  attention.segments.length > 0 || dev.stale
-
-                const toggleMenuFor = (anchorEl: HTMLElement) => {
-                  const barRect = nativeBarRef.current?.getBoundingClientRect()
-                  const anchorRect = anchorEl.getBoundingClientRect()
-                  if (barRect) {
-                    const maxLeft = Math.max(8, barRect.width - 356)
-                    const computedLeft = Math.min(
-                      maxLeft,
-                      Math.max(8, anchorRect.left - barRect.left),
-                    )
-                    setMenuLeftPx(computedLeft)
-                  }
-                  setOpenMenuDeviceId((cur) => (cur === dev.id ? null : dev.id))
-                }
-
-                return (
-                  <div
-                    key={dev.id}
-                    className="dsh-md-tab-pill"
-                    data-active={isActive ? 'true' : 'false'}
-                    data-device-tab={dev.id}
-                  >
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={isActive}
-                      className="dsh-md-tab-trigger"
-                      data-testid={`device-tab-${dev.id}`}
-                      onClick={() => handleSwitchDevice(dev.id)}
-                    >
-                      {dev.isLocal && <GlobeIcon size={13} />}
-                      <span className="dsh-md-tab-name">{label}</span>
-                      {!dev.keepAliveMounted && !dev.isLocal && (
-                        <span
-                          className="dsh-md-tab-unmounted-dot"
-                          title={t.pane.keepAliveUnmountedTitle}
-                        />
-                      )}
-                    </button>
-
-                    {/* Status Capsule */}
-                    {showCapsule && (
-                      <span className="dsh-md-tab-status-anchor">
-                        {attention.segments.length > 0 ? (
-                          <span
-                            className="dsh-md-tab-status"
-                            data-stale={dev.stale ? 'true' : undefined}
-                            data-testid={`capsule-${dev.id}`}
-                          >
-                            {attention.segments.map((seg) => (
-                              <button
-                                key={seg.tone}
-                                type="button"
-                                className="dsh-md-tab-status-part"
-                                data-tone={seg.tone}
-                                data-testid={`capsule-part-${dev.id}-${seg.tone}`}
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  toggleMenuFor(e.currentTarget)
-                                }}
-                              >
-                                {formatCountCell(seg.count)}
-                              </button>
-                            ))}
-                          </span>
-                        ) : (
-                          <button
-                            type="button"
-                            className="dsh-md-tab-status"
-                            data-empty="true"
-                            data-stale="true"
-                            title={t.nativeBar.staleHint}
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              toggleMenuFor(e.currentTarget)
-                            }}
-                          />
-                        )}
-                      </span>
-                    )}
-
-                    {/* Close Background Keep-Alive Frame Button on Inactive Remote Tabs */}
-                    {!dev.isLocal && !isActive && dev.keepAliveMounted && (
-                      <button
-                        type="button"
-                        className="dsh-md-tab-close"
-                        title={t.nativeBar.releaseTooltip}
-                        aria-label={`${t.nativeBar.releaseTooltip}: ${dev.name}`}
-                        data-testid={`close-keepalive-${dev.id}`}
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          handleReleaseKeepAlive(dev.id)
-                        }}
-                      >
-                        <CloseIcon size={11} />
-                      </button>
-                    )}
-                  </div>
-                )
-              })}
-            </div>
-
-            {/* Portalled/Unclipped Official Translucent DSH Attention Menu */}
-            {openMenuDeviceId &&
-              (() => {
-                const menuDev = visibleTabs.find(
-                  (d) => d.id === openMenuDeviceId,
-                )
-                if (!menuDev) return null
-                const menuAttention = summarizeDeviceAttention(menuDev)
-                const menuLabel = menuDev.isLocal
-                  ? t.nativeBar.localTab
-                  : menuDev.name
-                return (
-                  <div
-                    className="dsh-official-menu-popover"
-                    role="menu"
-                    data-testid="attention-menu"
-                    style={{ left: `${menuLeftPx}px` }}
-                  >
-                    {menuDev.stale && (
-                      <div className="dsh-menu-stale-banner">
-                        {t.nativeBar.staleHint}
-                      </div>
-                    )}
-
-                    {menuAttention.pendingSessions.length > 0 && (
-                      <div className="dsh-menu-group">
-                        <div className="dsh-menu-group-label">
-                          <span style={{ color: '#f59e0b' }}>
-                            {t.nativeBar.pendingGroup.replace(
-                              '{count}',
-                              String(menuAttention.pendingSessions.length),
-                            )}
-                          </span>
-                        </div>
-                        {menuAttention.pendingSessions.map((sess) => (
-                          <button
-                            key={sess.id}
-                            type="button"
-                            role="menuitem"
-                            className="dsh-menu-item-btn"
-                            data-testid={`menu-item-${sess.id}`}
-                            onClick={() =>
-                              handleOpenSessionFromMenu(menuDev.id, sess.id)
-                            }
-                          >
-                            <StateDot status="pending" />
-                            <span className="dsh-menu-item-texts">
-                              <div className="dsh-menu-item-title">
-                                {sess.title[locale]}
-                              </div>
-                              <div className="dsh-menu-item-sub">
-                                {sess.workspacePath} · {menuLabel} ·{' '}
-                                {sess.updatedLabel[locale]}
-                              </div>
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-
-                    {menuAttention.runningSessions.length > 0 && (
-                      <div className="dsh-menu-group">
-                        <div className="dsh-menu-group-label">
-                          <span style={{ color: '#7aaaff' }}>
-                            {t.nativeBar.runningGroup.replace(
-                              '{count}',
-                              String(menuAttention.runningSessions.length),
-                            )}
-                          </span>
-                        </div>
-                        {menuAttention.runningSessions.map((sess) => (
-                          <button
-                            key={sess.id}
-                            type="button"
-                            role="menuitem"
-                            className="dsh-menu-item-btn"
-                            data-testid={`menu-item-${sess.id}`}
-                            onClick={() =>
-                              handleOpenSessionFromMenu(menuDev.id, sess.id)
-                            }
-                          >
-                            <StateDot status="running" />
-                            <span className="dsh-menu-item-texts">
-                              <div className="dsh-menu-item-title">
-                                {sess.title[locale]}
-                              </div>
-                              <div className="dsh-menu-item-sub">
-                                {sess.workspacePath} · {menuLabel} ·{' '}
-                                {sess.updatedLabel[locale]}
-                              </div>
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-
-                    {menuAttention.unreadSessions.length > 0 && (
-                      <div className="dsh-menu-group">
-                        <div className="dsh-menu-group-label">
-                          <span style={{ color: '#22c55e' }}>
-                            {t.nativeBar.unreadGroup.replace(
-                              '{count}',
-                              String(menuAttention.unreadSessions.length),
-                            )}
-                          </span>
-                        </div>
-                        {menuAttention.unreadSessions.map((sess) => (
-                          <button
-                            key={sess.id}
-                            type="button"
-                            role="menuitem"
-                            className="dsh-menu-item-btn"
-                            data-testid={`menu-item-${sess.id}`}
-                            onClick={() =>
-                              handleOpenSessionFromMenu(menuDev.id, sess.id)
-                            }
-                          >
-                            <StateDot status="unread" />
-                            <span className="dsh-menu-item-texts">
-                              <div className="dsh-menu-item-title">
-                                {sess.title[locale]}
-                              </div>
-                              <div className="dsh-menu-item-sub">
-                                {sess.workspacePath} · {menuLabel} ·{' '}
-                                {sess.updatedLabel[locale]}
-                              </div>
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )
-              })()}
-
-            {/* Right Fixed Action Cluster */}
-            <div className="dsh-md-native-actions">
-              {!activeDevice.isLocal && (
-                <>
-                  <button
-                    type="button"
-                    className="dsh-md-icon-btn"
-                    title={t.nativeBar.reloadTooltip}
-                    onClick={() =>
-                      showToast(
-                        locale === 'zh'
-                          ? `已通过本地代理刷新 ${activeDevice.name} (${activeDevice.proxyUrl})`
-                          : `Reloaded ${activeDevice.name} via local proxy`,
-                      )
-                    }
-                  >
-                    <RefreshIcon size={14} />
-                  </button>
-                  <button
-                    type="button"
-                    className="dsh-md-icon-btn"
-                    title={t.nativeBar.externalTooltip}
-                    onClick={() =>
-                      showToast(
-                        locale === 'zh'
-                          ? `独立窗口地址：${activeDevice.proxyUrl}`
-                          : `Standalone loopback URL: ${activeDevice.proxyUrl}`,
-                      )
-                    }
-                  >
-                    <ExternalLinkIcon size={14} />
-                  </button>
-                </>
-              )}
-
-              <button
-                type="button"
-                className="dsh-md-icon-btn"
-                title={t.nativeBar.settingsTooltip}
-                data-testid="open-settings-btn"
-                onClick={() => setSettingsOpen(true)}
-              >
-                <SettingsIcon size={15} />
-              </button>
-            </div>
-          </div>
-
-          {toastMessage && (
-            <div
-              style={{
-                position: 'absolute',
-                top: 88,
-                right: 18,
-                zIndex: 120,
-                padding: '8px 14px',
-                borderRadius: 10,
-                background: 'rgba(20, 26, 40, 0.95)',
-                border: '1px solid rgba(122, 170, 255, 0.4)',
-                fontSize: 12,
-                color: '#dbeafe',
-                boxShadow: '0 12px 32px rgba(0,0,0,0.55)',
-              }}
+        {/* Restrained 2D Segmented Mode Switcher (Before vs After) */}
+        <div className="workbench-controls">
+          <div className="segmented-tabs" role="tablist" aria-label={copy.nav.workbench}>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={viewMode === 'converged'}
+              className={`segmented-tabs__btn${viewMode === 'converged' ? ' is-active' : ''}`}
+              data-testid="mode-converged"
+              onClick={() => setViewMode('converged')}
             >
-              {toastMessage}
-            </div>
-          )}
+              {copy.hero.modeConverged}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={viewMode === 'scattered'}
+              className={`segmented-tabs__btn${viewMode === 'scattered' ? ' is-active' : ''}`}
+              data-testid="mode-scattered"
+              onClick={() => setViewMode('scattered')}
+            >
+              {copy.hero.modeScattered}
+            </button>
+          </div>
+          <p className="workbench-controls__hint">
+            {viewMode === 'converged'
+              ? copy.hero.modeConvergedHint
+              : copy.hero.modeScatteredHint}
+          </p>
+        </div>
 
-          {/* Keep-Alive DOM Stage: All mounted devices remain in DOM! */}
-          <div
-            className="workbench-stage-viewport"
-            data-exploded={exploded3d ? 'true' : 'false'}
-            data-testid="keepalive-stage"
-          >
-            {visibleTabs.map((dev) => {
-              const isActive = dev.id === activeDevice.id
-              const rank = mountedOrder.findIndex((d) => d.id === dev.id)
-
-              const style: React.CSSProperties = exploded3d
-                ? {
-                    display: 'block',
-                    visibility: 'visible',
-                    zIndex: 30 - rank,
-                    opacity: isActive ? 1 : Math.max(0.62, 0.94 - rank * 0.12),
-                    transform: `translate3d(${(rank - 1.3) * 52}px, ${56 - rank * 38}px, ${-rank * 72}px) rotateX(10deg) rotateY(-14deg) scale(0.76)`,
-                  }
-                : isActive
-                  ? {
-                      display: 'block',
-                      visibility: 'visible',
-                      zIndex: 20,
-                    }
-                  : {
-                      display: 'none',
-                      visibility: 'hidden',
-                      zIndex: 1,
-                    }
-
-              return (
-                <div
+        {/* 2x2 Flat Comparison Grid OR Unified DSH Workbench */}
+        {viewMode === 'scattered' ? (
+          <div className="scattered-stage" data-testid="scattered-stage">
+            <div className="scattered-grid">
+              {enabledDevices.slice(0, 4).map((dev) => (
+                <MiniDshWindow
                   key={dev.id}
-                  className="dsh-md-native-frame-wrap"
-                  data-device-id={dev.id}
-                  data-visible={isActive ? 'true' : 'false'}
-                  style={style}
-                  onClick={
-                    exploded3d
-                      ? () => {
-                          handleSwitchDevice(dev.id)
-                        }
-                      : undefined
-                  }
+                  device={dev}
+                  locale={locale}
+                  copy={copy}
+                  onDockDevice={handleDockFromScattered}
+                />
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div ref={workbenchWrapRef} className="workbench-shell-wrap">
+            {/* Quiet SSH Connection Strip integrated directly above window */}
+            <div className="connection-strip">
+              <div className="connection-strip__left">
+                <span className="connection-strip__dot" aria-hidden="true" />
+                <span className="connection-strip__badge">{copy.connectionStrip.badge}</span>
+                <span className="connection-strip__summary">
+                  {copy.connectionStrip.summary}
+                </span>
+              </div>
+              <span className="connection-strip__tip">{copy.connectionStrip.tip}</span>
+            </div>
+
+            {/* Authentic DSH Desktop Window Frame */}
+            <div className="dsh-window" data-testid="interactive-workbench">
+              <div className="dsh-titlebar">
+                <div className="dsh-titlebar__dots" aria-hidden="true">
+                  <span />
+                  <span />
+                  <span />
+                </div>
+                <div className="dsh-titlebar__center">DeepSeek Harness</div>
+                <div className="dsh-titlebar__right">
+                  {taskbarText && (
+                    <span className="dsh-taskbar-pill" title={copy.workbench.taskbarLabel}>
+                      {copy.workbench.taskbarLabel} · {taskbarText}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* 42px Native Multi-Device Plugin Tab Strip */}
+              <div className="dsh-tabstrip-wrap">
+                <div
+                  className="dsh-tabstrip"
+                  role="tablist"
+                  data-testid="native-tab-bar"
                 >
-                  {exploded3d && (
-                    <div className="exploded-layer-ribbon">
-                      <span>
-                        {dev.isLocal ? t.nativeBar.localTab : dev.name}
-                      </span>
-                      <span>·</span>
-                      <span style={{ color: isActive ? '#86efac' : '#9ec0ff' }}>
-                        {isActive
-                          ? 'Z=0px (ACTIVE)'
-                          : dev.keepAliveMounted
-                            ? `Z=-${rank * 72}px (KEEP-ALIVE MOUNTED)`
-                            : 'RELEASED'}
+                  <div className="dsh-tabstrip__tabs">
+                    {enabledDevices.map((dev) => {
+                      const active = dev.id === activeDeviceId
+                      const attention = summarizeDeviceAttention(dev)
+                      return (
+                        <button
+                          key={dev.id}
+                          type="button"
+                          role="tab"
+                          aria-selected={active}
+                          className={`dsh-tab${active ? ' is-active' : ''}`}
+                          data-testid={`device-tab-${dev.id}`}
+                          onClick={() => handleSelectDevice(dev.id)}
+                        >
+                          <span className="dsh-tab__icon">
+                            {dev.isLocal ? <LaptopIcon /> : <ServerIcon />}
+                          </span>
+                          <span className="dsh-tab__label">{dev.name}</span>
+
+                          {attention.segments.length > 0 && (
+                            <span
+                              className="dsh-capsule"
+                              data-testid={`capsule-${dev.id}`}
+                              role="button"
+                              tabIndex={0}
+                              aria-label={`${dev.name} attention`}
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setOpenMenuDeviceId((prev) =>
+                                  prev === dev.id ? null : dev.id,
+                                )
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.preventDefault()
+                                  e.stopPropagation()
+                                  setOpenMenuDeviceId((prev) =>
+                                    prev === dev.id ? null : dev.id,
+                                  )
+                                }
+                              }}
+                            >
+                              {attention.segments.map((seg) => (
+                                <span
+                                  key={seg.tone}
+                                  className={`dsh-capsule__part dsh-capsule__part--${seg.tone}`}
+                                  data-testid={`capsule-part-${dev.id}-${seg.tone}`}
+                                >
+                                  {formatCountCell(seg.count)}
+                                </span>
+                              ))}
+                            </span>
+                          )}
+                        </button>
+                      )
+                    })}
+                  </div>
+
+                  <button
+                    type="button"
+                    className="dsh-tabstrip__settings"
+                    data-testid="open-settings-btn"
+                    title={copy.workbench.addDeviceTooltip}
+                    aria-label={copy.workbench.addDeviceTooltip}
+                    onClick={() => {
+                      setOpenMenuDeviceId(null)
+                      setSettingsOpen(true)
+                    }}
+                  >
+                    <PlusIcon />
+                    <SettingsIcon />
+                  </button>
+                </div>
+
+                {/* Attention Capsule Popover Menu */}
+                {menuDevice && menuSummary && (
+                  <div
+                    className="dsh-attention-menu"
+                    role="dialog"
+                    aria-label={copy.workbench.attentionMenuTitle}
+                    data-testid="attention-menu"
+                  >
+                    <div className="dsh-attention-menu__head">
+                      <span>{menuDevice.name}</span>
+                      <span className="dsh-attention-menu__sub">
+                        {copy.workbench.attentionMenuTitle}
                       </span>
                     </div>
-                  )}
 
+                    <AttentionGroup
+                      label={copy.workbench.attentionGroups.pending}
+                      tone="pending"
+                      sessions={menuSummary.pendingSessions}
+                      locale={locale}
+                      onPick={(sessId) => handleSelectSession(menuDevice.id, sessId)}
+                    />
+                    <AttentionGroup
+                      label={copy.workbench.attentionGroups.running}
+                      tone="running"
+                      sessions={menuSummary.runningSessions}
+                      locale={locale}
+                      onPick={(sessId) => handleSelectSession(menuDevice.id, sessId)}
+                    />
+                    <AttentionGroup
+                      label={copy.workbench.attentionGroups.done}
+                      tone="done"
+                      sessions={menuSummary.unreadSessions}
+                      locale={locale}
+                      onPick={(sessId) => handleSelectSession(menuDevice.id, sessId)}
+                    />
+                  </div>
+                )}
+              </div>
+
+              {/* Keep-Alive Viewport Stage: all mounted tabs stay alive in DOM */}
+              <div className="dsh-stage" data-testid="keepalive-stage">
+                {enabledDevices.map((dev) => (
                   <DshDevicePane
+                    key={dev.id}
                     device={dev}
+                    isActive={dev.id === activeDeviceId}
                     locale={locale}
-                    streamTick={streamTick}
-                    onSelectSession={(sessId) =>
-                      acknowledgeIfUnread(dev.id, sessId)
-                    }
-                    onCreateSession={() => handleCreateSession(dev.id)}
-                    onChangeDraft={(txt) =>
-                      setDevices((prev) =>
-                        prev.map((item) =>
-                          item.id === dev.id
-                            ? { ...item, draftText: txt }
-                            : item,
-                        ),
-                      )
-                    }
-                    onSendDraft={() => handleSendDraft(dev.id)}
-                    onApproveSession={(sessId) =>
-                      handleApproveSession(dev.id, sessId)
-                    }
-                    onRejectSession={(sessId) =>
-                      handleRejectSession(dev.id, sessId)
-                    }
-                    onRemount={() => handleRemount(dev.id)}
+                    copy={copy}
+                    onSelectSession={handleSelectSession}
+                    onUpdateDraft={handleUpdateDraft}
+                    onSendMessage={handleSendMessage}
+                    onApproveAction={handleApproveAction}
+                    onReconnect={handleReconnect}
                   />
-                </div>
-              )
-            })}
+                ))}
+              </div>
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
-      {/* Settings -> Multi-Device (MultiDeviceHubPanel) Modal */}
+      {/* Settings · Multi-Device Discovery Modal */}
       {settingsOpen && (
         <div
           className="dsh-modal-backdrop"
-          onClick={() => setSettingsOpen(false)}
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) {
+              setSettingsOpen(false)
+            }
+          }}
         >
           <div
-            className="dsh-modal-panel"
+            className="dsh-modal"
             role="dialog"
             aria-modal="true"
+            aria-labelledby="dsh-settings-title"
             data-testid="settings-modal"
-            onClick={(e) => e.stopPropagation()}
           >
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: 12,
-              }}
-            >
-              <h3 style={{ margin: 0, fontSize: 17 }}>
-                {t.settingsModal.title}
-              </h3>
+            <div className="dsh-modal__head">
+              <div>
+                <h2 id="dsh-settings-title" className="dsh-modal__title">
+                  {copy.workbench.settingsModal.title}
+                </h2>
+                <p className="dsh-modal__subtitle">
+                  {copy.workbench.settingsModal.subtitle}
+                </p>
+              </div>
               <button
                 type="button"
-                className="dsh-md-icon-btn"
+                className="dsh-modal__close"
+                data-testid="close-settings-btn"
+                aria-label={copy.workbench.settingsModal.closeBtn}
                 onClick={() => setSettingsOpen(false)}
               >
-                <CloseIcon size={14} />
+                <CloseIcon />
               </button>
             </div>
 
-            <p
-              style={{
-                margin: 0,
-                fontSize: 13,
-                lineHeight: 1.55,
-                color: 'var(--dsw-alias-label-secondary)',
-              }}
-            >
-              {t.settingsModal.intro}
-            </p>
-
-            <div className="dsh-pref-row">
-              <div>
-                <div style={{ fontSize: 13.5, fontWeight: 600 }}>
-                  {t.settingsModal.prefTaskbar}
+            <div className="dsh-modal__body">
+              <div className="dsh-ssh-discovery">
+                <div className="dsh-ssh-discovery__text">
+                  <span className="dsh-ssh-discovery__dot" aria-hidden="true" />
+                  <span>{copy.workbench.settingsModal.sshAutoDiscovery}</span>
                 </div>
-                <div
-                  style={{
-                    fontSize: 12,
-                    color: 'var(--dsw-alias-label-tertiary)',
-                    marginTop: 3,
-                  }}
-                >
-                  {t.settingsModal.prefTaskbarDesc}
-                </div>
-              </div>
-              <button
-                type="button"
-                className="dsh-switch"
-                data-checked={showTaskbarSummary ? 'true' : 'false'}
-                onClick={() => setShowTaskbarSummary((v) => !v)}
-              >
-                <span className="dsh-switch-thumb" />
-              </button>
-            </div>
-
-            <div className="dsh-pref-row">
-              <div>
-                <div style={{ fontSize: 13.5, fontWeight: 600 }}>
-                  {t.settingsModal.prefReadSync}
-                </div>
-                <div
-                  style={{
-                    fontSize: 12,
-                    color: 'var(--dsw-alias-label-tertiary)',
-                    marginTop: 3,
-                  }}
-                >
-                  {t.settingsModal.prefReadSyncDesc}
-                </div>
-              </div>
-              <button
-                type="button"
-                className="dsh-switch"
-                data-checked={syncReadState ? 'true' : 'false'}
-                onClick={() => setSyncReadState((v) => !v)}
-              >
-                <span className="dsh-switch-thumb" />
-              </button>
-            </div>
-
-            <div className="dsh-pref-row">
-              <div>
-                <div style={{ fontSize: 13.5, fontWeight: 600 }}>
-                  {t.settingsModal.prefUiSync}
-                </div>
-                <div
-                  style={{
-                    fontSize: 12,
-                    color: 'var(--dsw-alias-label-tertiary)',
-                    marginTop: 3,
-                  }}
-                >
-                  {t.settingsModal.prefUiSyncDesc}
-                </div>
-              </div>
-              <button
-                type="button"
-                className="dsh-switch"
-                data-checked={syncUiState ? 'true' : 'false'}
-                onClick={() => setSyncUiState((v) => !v)}
-              >
-                <span className="dsh-switch-thumb" />
-              </button>
-            </div>
-
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: 12,
-                marginTop: 4,
-              }}
-            >
-              <strong style={{ fontSize: 13.5 }}>
-                {t.settingsModal.devicesHeading}
-              </strong>
-              <button
-                type="button"
-                className="sim-btn"
-                disabled={hasProdImported}
-                data-testid="import-prod-btn"
-                onClick={handleImportProd}
-                style={{
-                  opacity: hasProdImported ? 0.6 : 1,
-                }}
-              >
-                {hasProdImported
-                  ? t.settingsModal.importedTag
-                  : t.settingsModal.importBtn}
-              </button>
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {devices
-                .filter((d) => !d.isLocal)
-                .map((d) => (
-                  <div
-                    key={d.id}
-                    className="dsh-pref-row"
-                    style={{ alignItems: 'center', padding: '10px 14px' }}
+                {prodImported ? (
+                  <span className="dsh-imported-badge">
+                    <CheckIcon />
+                    <span>{copy.workbench.settingsModal.importedTag}</span>
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    className="dsh-btn dsh-btn--primary"
+                    data-testid="import-prod-btn"
+                    onClick={handleImportProd}
                   >
+                    {copy.workbench.settingsModal.quickImportBtn}
+                  </button>
+                )}
+              </div>
+
+              <ul className="dsh-device-settings-list">
+                {devices.map((dev) => (
+                  <li key={dev.id} className="dsh-device-settings-row">
                     <div>
-                      <div
-                        style={{
-                          fontSize: 13,
-                          fontWeight: 620,
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 8,
-                        }}
-                      >
-                        <span>{d.name}</span>
-                        <span
-                          style={{
-                            fontFamily: 'var(--font-mono)',
-                            fontSize: 11,
-                            color: '#86efac',
-                          }}
-                        >
-                          system-ssh
-                        </span>
-                      </div>
-                      <div
-                        style={{
-                          fontFamily: 'var(--font-mono)',
-                          fontSize: 11,
-                          color: 'var(--dsw-alias-label-tertiary)',
-                          marginTop: 2,
-                        }}
-                      >
-                        {d.sshSummary} · {d.proxyUrl}
+                      <div className="dsh-device-settings-row__name">{dev.name}</div>
+                      <div className="dsh-device-settings-row__meta">
+                        {dev.sshSummary} · {dev.osLabel}
                       </div>
                     </div>
-
-                    <button
-                      type="button"
-                      className="dsh-switch"
-                      data-checked={d.enabled ? 'true' : 'false'}
-                      onClick={() =>
-                        setDevices((prev) =>
-                          prev.map((item) =>
-                            item.id === d.id
-                              ? { ...item, enabled: !item.enabled }
-                              : item,
-                          ),
-                        )
-                      }
-                    >
-                      <span className="dsh-switch-thumb" />
-                    </button>
-                  </div>
+                    {dev.isLocal ? (
+                      <span className="dsh-device-settings-row__locked">
+                        {locale === 'zh' ? '本机' : 'Local'}
+                      </span>
+                    ) : (
+                      <label className="dsh-switch">
+                        <input
+                          type="checkbox"
+                          checked={dev.enabled}
+                          onChange={() => handleToggleDeviceEnabled(dev.id)}
+                        />
+                        <span>
+                          {dev.enabled
+                            ? locale === 'zh'
+                              ? '已启用'
+                              : 'Enabled'
+                            : locale === 'zh'
+                              ? '已暂停'
+                              : 'Paused'}
+                        </span>
+                      </label>
+                    )}
+                  </li>
                 ))}
+              </ul>
+
+              <p className="dsh-modal__note">
+                {copy.workbench.settingsModal.remoteSetupNote}
+              </p>
             </div>
 
-            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+            <div className="dsh-modal__foot">
               <button
                 type="button"
-                className="btn-hero-primary"
-                data-testid="close-settings-btn"
+                className="dsh-btn dsh-btn--primary"
                 onClick={() => setSettingsOpen(false)}
               >
-                {t.settingsModal.close}
+                {copy.workbench.settingsModal.closeBtn}
               </button>
             </div>
           </div>
         </div>
       )}
     </section>
+  )
+}
+
+const SITE_NOTICE_ALLOW = {
+  zh: '你已允许执行，正在后台清理旧缓存并打包第 4 轮训练权重…',
+  en: 'Approved. Cleaning old cache folders and exporting checkpoint round 4 in the background…',
+}
+
+const SITE_NOTICE_DENY = {
+  zh: '已取消本次磁盘清理操作，会话已安全停留在当前步骤。',
+  en: 'Cancelled the cleanup command. Session remains safely idle at this checkpoint.',
+}
+
+function AttentionGroup({
+  label,
+  tone,
+  sessions,
+  locale,
+  onPick,
+}: {
+  readonly label: string
+  readonly tone: 'pending' | 'running' | 'done'
+  readonly sessions: readonly DshSessionItem[]
+  readonly locale: Locale
+  readonly onPick: (sessionId: string) => void
+}) {
+  if (sessions.length === 0) return null
+  return (
+    <div className="dsh-attention-group">
+      <div className={`dsh-attention-group__label dsh-attention-group__label--${tone}`}>
+        <span className="dsh-attention-group__dot" aria-hidden="true" />
+        <span>{label}</span>
+      </div>
+      {sessions.map((sess) => (
+        <button
+          key={sess.id}
+          type="button"
+          className="dsh-attention-item"
+          data-testid={`menu-item-${sess.id}`}
+          onClick={() => onPick(sess.id)}
+        >
+          <span className="dsh-attention-item__title">{sess.title[locale]}</span>
+          <span className="dsh-attention-item__meta">
+            {sess.workspaceName} · {sess.updatedLabel[locale]}
+          </span>
+        </button>
+      ))}
+    </div>
   )
 }
