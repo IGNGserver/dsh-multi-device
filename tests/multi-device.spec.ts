@@ -304,7 +304,7 @@ describe('0b. Host-owned read state and native page state', () => {
       devices: [{
         id: 'dev-a',
         name: 'A',
-        enabled: false,
+        enabled: true,
         transport: { kind: 'direct', baseUrl: 'http://127.0.0.1:9' },
         auth: { mode: 'none' },
       }],
@@ -370,8 +370,8 @@ describe('0b. Host-owned read state and native page state', () => {
     writeFileSync(dataFile, JSON.stringify({
       version: 1,
       devices: [
-        { id: 'dev-a', name: 'A', enabled: false, transport: { kind: 'direct', baseUrl: 'http://127.0.0.1:9' }, auth: { mode: 'none' } },
-        { id: 'dev-b', name: 'B', enabled: false, transport: { kind: 'direct', baseUrl: 'http://127.0.0.1:9' }, auth: { mode: 'none' } },
+        { id: 'dev-a', name: 'A', enabled: true, transport: { kind: 'direct', baseUrl: 'http://127.0.0.1:9' }, auth: { mode: 'none' } },
+        { id: 'dev-b', name: 'B', enabled: true, transport: { kind: 'direct', baseUrl: 'http://127.0.0.1:9' }, auth: { mode: 'none' } },
       ],
       // Retired Aggregated Mode keys: still readable, never revived.
       displayMode: 'aggregated',
@@ -799,46 +799,51 @@ describe('4d. Offline catalog cache & reconnect waiting', () => {
     const localHost = { localPort: () => 3080 }
     const options = { allowDirectTransport: true }
 
-    const first = new DeviceRegistry(dataFile, secretsFile, localHost, options)
-    const added = await first.upsertDevice({
-      id: 'dev-cache',
-      name: 'cache-dev',
-      enabled: false,
-      transport: { kind: 'direct', baseUrl: 'http://127.0.0.1:9' },
-      auth: { mode: 'none' },
-    })
-    expect(added.ok).toBe(true)
-    first.setDeviceCatalog(cachedCatalog)
-    first.saveToDisk()
-    first.dispose()
-    await first.flushPersistence()
+    const startSpy = vi.spyOn(RemoteDeviceClient.prototype, 'start').mockImplementation(() => {})
+    try {
+      const first = new DeviceRegistry(dataFile, secretsFile, localHost, options)
+      const added = await first.upsertDevice({
+        id: 'dev-cache',
+        name: 'cache-dev',
+        enabled: true,
+        transport: { kind: 'direct', baseUrl: 'http://127.0.0.1:9' },
+        auth: { mode: 'none' },
+      })
+      expect(added.ok).toBe(true)
+      first.setDeviceCatalog(cachedCatalog)
+      first.saveToDisk()
+      first.dispose()
+      await first.flushPersistence()
 
-    const persisted = JSON.parse(readFileSync(dataFile, 'utf8')) as {
-      catalogs?: Record<string, { syncedAt: number }>
+      const persisted = JSON.parse(readFileSync(dataFile, 'utf8')) as {
+        catalogs?: Record<string, { syncedAt: number }>
+      }
+      const persistedCatalogs = JSON.parse(readFileSync(join(dir, 'catalogs.json'), 'utf8')) as {
+        version: number
+        catalogs: Record<string, { syncedAt: number }>
+      }
+      expect(persisted.catalogs).toBeUndefined()
+      expect(persistedCatalogs.version).toBe(2)
+      expect(persistedCatalogs.catalogs['dev-cache']?.syncedAt).toBe(cachedCatalog.syncedAt)
+
+      const second = new DeviceRegistry(dataFile, secretsFile, localHost, options)
+      expect(second.deviceCatalog(DeviceId('dev-cache'))?.sessions).toHaveLength(2)
+      second.startAll()
+      const client = second.client(DeviceId('dev-cache'))!
+      expect(client.toView().lastSyncedAt).toBe(cachedCatalog.syncedAt)
+      expect(client.toView().catalogStale).toBe(true)
+
+      // The offline device keeps last-known counts for its tab instead of
+      // pretending to have none, and reports them as stale.
+      const snapshot = second.snapshot()
+      expect(snapshot.devices[0]?.name).toBe('cache-dev')
+      expect(snapshot.attentionByDevice?.['dev-cache']?.fresh).toBe(false)
+      expect(snapshot.attentionByDevice?.['dev-cache']?.unreadSessionIds).toEqual([])
+      second.dispose()
+      await second.flushPersistence()
+    } finally {
+      startSpy.mockRestore()
     }
-    const persistedCatalogs = JSON.parse(readFileSync(join(dir, 'catalogs.json'), 'utf8')) as {
-      version: number
-      catalogs: Record<string, { syncedAt: number }>
-    }
-    expect(persisted.catalogs).toBeUndefined()
-    expect(persistedCatalogs.version).toBe(2)
-    expect(persistedCatalogs.catalogs['dev-cache']?.syncedAt).toBe(cachedCatalog.syncedAt)
-
-    const second = new DeviceRegistry(dataFile, secretsFile, localHost, options)
-    expect(second.deviceCatalog(DeviceId('dev-cache'))?.sessions).toHaveLength(2)
-    second.startAll()
-    const client = second.client(DeviceId('dev-cache'))!
-    expect(client.toView().lastSyncedAt).toBe(cachedCatalog.syncedAt)
-    expect(client.toView().catalogStale).toBe(true)
-
-    // The offline device keeps last-known counts for its tab instead of
-    // pretending to have none, and reports them as stale.
-    const snapshot = second.snapshot()
-    expect(snapshot.devices[0]?.name).toBe('cache-dev')
-    expect(snapshot.attentionByDevice?.['dev-cache']?.fresh).toBe(false)
-    expect(snapshot.attentionByDevice?.['dev-cache']?.unreadSessionIds).toEqual([])
-    second.dispose()
-    await second.flushPersistence()
   })
 
   it('stops stale spinners when a running device goes offline', () => {
@@ -2550,7 +2555,7 @@ describe('0e. Snapshot visibility inputs for unread counters', () => {
       devices: [{
         id: 'dev-a',
         name: 'A',
-        enabled: false,
+        enabled: true,
         transport: { kind: 'direct', baseUrl: 'http://127.0.0.1:9' },
         auth: { mode: 'none' },
       }],
@@ -2572,6 +2577,7 @@ describe('0e. Snapshot visibility inputs for unread counters', () => {
       },
     }))
 
+    const startSpy = vi.spyOn(RemoteDeviceClient.prototype, 'start').mockImplementation(() => {})
     const registry = new DeviceRegistry(
       dataFile,
       secretsFile,
@@ -2597,6 +2603,7 @@ describe('0e. Snapshot visibility inputs for unread counters', () => {
       ].sort())
     } finally {
       registry.dispose()
+      startSpy.mockRestore()
     }
   })
 

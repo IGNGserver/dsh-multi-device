@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DeviceId, type UpsertDeviceInput } from '../src/contract.ts'
 import { DeviceRegistry } from '../src/host/registry.ts'
+import { RemoteDeviceClient } from '../src/host/remote-client.ts'
 
 const cleanups: Array<() => void> = []
 afterEach(() => {
@@ -15,6 +16,7 @@ function deferred<T>() {
   return { promise, resolve }
 }
 function makeRegistry() {
+  vi.spyOn(RemoteDeviceClient.prototype, 'start').mockImplementation(() => {})
   const directory = mkdtempSync(join(process.cwd(), '.quality-mount-'))
   cleanups.push(() => rmSync(directory, { recursive: true, force: true }))
   const registry = new DeviceRegistry(join(directory, 'state.json'), join(directory, 'secrets.json'), {
@@ -25,7 +27,7 @@ function makeRegistry() {
 }
 function input(name: string): UpsertDeviceInput {
   return {
-    id: 'mount-fixture', name, enabled: false,
+    id: 'mount-fixture', name, enabled: true,
     transport: { kind: 'direct', baseUrl: 'http://192.0.2.1:3080' },
     auth: { mode: 'none' },
   }

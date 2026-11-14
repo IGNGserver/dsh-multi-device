@@ -114,6 +114,11 @@ export declare const zh: {
     readonly taskbarRunningSegment: "{count}跑";
     readonly taskbarPendingSegment: "{count}待";
     readonly taskbarUnreadSegment: "{count}结";
+    readonly enableDevice: "启用设备";
+    readonly disableDevice: "停用设备";
+    readonly deviceDisabledTag: "已停用";
+    readonly deviceEnabledNotice: "已启用设备 {name}";
+    readonly deviceDisabledNotice: "已停用设备 {name}";
 };
 export type MultiDeviceLocaleKey = keyof typeof zh;
 export declare const en: Record<MultiDeviceLocaleKey, string>;

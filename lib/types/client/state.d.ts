@@ -199,6 +199,10 @@ export declare class MultiDeviceClientStore {
         ok: boolean;
         error?: string;
     }>;
+    setDeviceEnabled(deviceId: DeviceId, enabled: boolean): Promise<{
+        ok: boolean;
+        error?: string;
+    }>;
     reconnectDevice(deviceId: DeviceId): Promise<{
         ok: boolean;
         error?: string;

@@ -116,6 +116,11 @@ export const zh = {
   taskbarRunningSegment: '{count}跑',
   taskbarPendingSegment: '{count}待',
   taskbarUnreadSegment: '{count}结',
+  enableDevice: '启用设备',
+  disableDevice: '停用设备',
+  deviceDisabledTag: '已停用',
+  deviceEnabledNotice: '已启用设备 {name}',
+  deviceDisabledNotice: '已停用设备 {name}',
 } as const
 
 export type MultiDeviceLocaleKey = keyof typeof zh
@@ -228,4 +233,9 @@ export const en: Record<MultiDeviceLocaleKey, string> = {
   taskbarRunningSegment: '{count} run',
   taskbarPendingSegment: '{count} wait',
   taskbarUnreadSegment: '{count} done',
+  enableDevice: 'Enable device',
+  disableDevice: 'Disable device',
+  deviceDisabledTag: 'Disabled',
+  deviceEnabledNotice: 'Enabled {name}',
+  deviceDisabledNotice: 'Disabled {name}',
 }

@@ -24,6 +24,7 @@ const mock = vi.hoisted(() => ({
     settingsModalOpen: boolean
   },
   removeDevice: vi.fn(async () => ({ ok: true as const }) as { ok: boolean; error?: string }),
+  setDeviceEnabled: vi.fn(async () => ({ ok: true as const }) as { ok: boolean; error?: string }),
   releaseKeepAliveDevice: vi.fn(),
   reloadNativeDevice: vi.fn(),
   selectNativeDevice: vi.fn(async () => ({ ok: true })),
@@ -43,6 +44,7 @@ vi.mock('../src/client/state.ts', async (importOriginal) => {
     clientStore: {
       getSnapshot: () => mock.state,
       removeDevice: mock.removeDevice,
+      setDeviceEnabled: mock.setDeviceEnabled,
       releaseKeepAliveDevice: mock.releaseKeepAliveDevice,
       reloadNativeDevice: mock.reloadNativeDevice,
       selectNativeDevice: mock.selectNativeDevice,

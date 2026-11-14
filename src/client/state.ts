@@ -433,22 +433,25 @@ export class MultiDeviceClientStore {
       this.resetActiveSessionReport()
       this.unreadClearInFlight.clear()
     }
-    const configuredIds = new Set(snap.devices.map(device => device.id))
+    const enabledDevices = snap.devices.filter(device => device.enabled !== false)
+    const configuredIds = new Set(enabledDevices.map(device => device.id))
     const keepAliveEligible = new Set(
-      snap.devices.filter(device => device.keepNativeAlive !== false).map(device => device.id),
+      enabledDevices.filter(device => device.keepNativeAlive !== false).map(device => device.id),
     )
 
+    const previousActiveNative = this.state.activeNativeDeviceId
     let activeNative: DeviceId | undefined
     if (activeOverride === null) {
       activeNative = undefined
     } else if (activeOverride !== undefined && configuredIds.has(activeOverride)) {
       activeNative = activeOverride
     } else if (
-      this.state.activeNativeDeviceId !== undefined &&
-      configuredIds.has(this.state.activeNativeDeviceId)
+      previousActiveNative !== undefined &&
+      configuredIds.has(previousActiveNative)
     ) {
-      activeNative = this.state.activeNativeDeviceId
+      activeNative = previousActiveNative
     }
+    const lostActiveNative = previousActiveNative !== undefined && activeNative === undefined
     // No "first device" fallback: 本机 is the stable default and the only tab
     // guaranteed to exist.
     storeActiveNativeDevice(activeNative)
@@ -466,9 +469,10 @@ export class MultiDeviceClientStore {
       error: undefined,
       activeNativeDeviceId: activeNative,
       keepAliveDeviceIds: keepAlive,
+      ...(lostActiveNative ? { activeSessionId: this.observedLocalMainSessionId } : {}),
     })
     this.clearUnreadForActiveSession(snap)
-    if (epochChanged) void this.setActiveSession(this.state.activeSessionId)
+    if (epochChanged || lostActiveNative) void this.setActiveSession(this.state.activeSessionId)
   }
 
   /**
@@ -502,11 +506,13 @@ export class MultiDeviceClientStore {
   }
 
   private activateNativeDevice(deviceId: DeviceId): void {
-    const device = this.state.snapshot.devices.find(candidate => candidate.id === deviceId)
+    const device = this.state.snapshot.devices.find(
+      candidate => candidate.id === deviceId && candidate.enabled !== false,
+    )
     if (device === undefined) return
     const keepAliveEligible = new Set(
       this.state.snapshot.devices
-        .filter(candidate => candidate.keepNativeAlive !== false)
+        .filter(candidate => candidate.enabled !== false && candidate.keepNativeAlive !== false)
         .map(candidate => candidate.id),
     )
     const keepAlive = this.state.keepAliveDeviceIds.filter(id => keepAliveEligible.has(id) && id !== deviceId)
@@ -524,7 +530,7 @@ export class MultiDeviceClientStore {
    */
   ensureKeepAliveDevice(deviceId: DeviceId): void {
     const device = this.state.snapshot.devices.find(candidate => candidate.id === deviceId)
-    if (device === undefined || device.keepNativeAlive === false) return
+    if (device === undefined || device.enabled === false || device.keepNativeAlive === false) return
     if (this.state.keepAliveDeviceIds.includes(deviceId)) return
     const keepAlive = [...this.state.keepAliveDeviceIds, deviceId]
     while (keepAlive.length > MAX_KEEP_ALIVE_PAGES) keepAlive.shift()
@@ -537,6 +543,10 @@ export class MultiDeviceClientStore {
 
   /** Switch to a remote device tab. */
   selectNativeDevice(deviceId: DeviceId): Promise<{ ok: boolean; error?: string }> {
+    const device = this.state.snapshot.devices.find(candidate => candidate.id === deviceId)
+    if (device === undefined || device.enabled === false) {
+      return Promise.resolve({ ok: false, error: 'Device is disabled' })
+    }
     this.activateNativeDevice(deviceId)
     return Promise.resolve({ ok: true })
   }
@@ -804,6 +814,21 @@ export class MultiDeviceClientStore {
     if (!this.isResponseCurrent(res)) return { ok: false, error: 'stale-response' }
     if (res.ok) {
       this.releaseKeepAliveDevice(deviceId)
+      this.applyIncomingSnapshot(res.value.snapshot)
+      this.setState({ error: undefined })
+      return { ok: true }
+    }
+    this.setState({ error: res.error })
+    return { ok: false, error: res.error }
+  }
+
+  async setDeviceEnabled(deviceId: DeviceId, enabled: boolean): Promise<{ ok: boolean; error?: string }> {
+    const res = await this.callControlPlane<{ snapshot: MultiDeviceSnapshot }>({
+      action: 'setDeviceEnabled',
+      payload: { deviceId, enabled },
+    })
+    if (!this.isResponseCurrent(res)) return { ok: false, error: 'stale-response' }
+    if (res.ok) {
       this.applyIncomingSnapshot(res.value.snapshot)
       this.setState({ error: undefined })
       return { ok: true }

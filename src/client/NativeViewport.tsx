@@ -325,6 +325,7 @@ export function NativeTabBar({
 }): React.ReactElement | null {
   const state = useMultiDeviceState()
   const { devices } = state.snapshot
+  const visibleDevices = devices.filter(device => device.enabled !== false)
   const [layout, setLayout] = useState<BarLayout | undefined>(undefined)
   const [obstructed, setObstructed] = useState<string | undefined>(undefined)
   const barRef = useRef<HTMLDivElement | null>(null)
@@ -431,7 +432,7 @@ export function NativeTabBar({
     }
     const handle = requestAnimationFrame(probe)
     return () => cancelAnimationFrame(handle)
-  }, [layout, devices.length, state.activeNativeDeviceId])
+  }, [layout, visibleDevices.length, state.activeNativeDeviceId])
 
   // Count only unread Sessions that DSH can actually show as rows: archived
   // completions and subagent children never appear in the sidebar, and a
@@ -447,7 +448,7 @@ export function NativeTabBar({
       )
   const unreadByDevice = groupUnreadSessionIds(unread)
 
-  const activeDevice = devices.find(device => device.id === state.activeNativeDeviceId)
+  const activeDevice = visibleDevices.find(device => device.id === state.activeNativeDeviceId)
   const localActive = activeDevice === undefined
 
   const compact = layout?.compact === true
@@ -506,7 +507,7 @@ export function NativeTabBar({
           />
         </div>
 
-        {devices.map((dev) => {
+        {visibleDevices.map((dev) => {
           const isSelected = dev.id === state.activeNativeDeviceId
           const isKeptAlive = state.keepAliveDeviceIds.includes(dev.id)
           return (
@@ -631,7 +632,8 @@ export function NativeViewport({
 }): React.ReactElement {
   const state = useMultiDeviceState()
   const { devices } = state.snapshot
-  const activeDevice = devices.find(device => device.id === state.activeNativeDeviceId)
+  const visibleDevices = devices.filter(device => device.enabled !== false)
+  const activeDevice = visibleDevices.find(device => device.id === state.activeNativeDeviceId)
   const stageRef = useRef<HTMLDivElement | null>(null)
 
   // A framed status page cannot recover on its own when the tunnel returns.
@@ -640,7 +642,7 @@ export function NativeViewport({
   useEffect(() => {
     const prevMap = previousStates.current
     const nextMap = new Map<DeviceId, DeviceView['state']>()
-    for (const dev of devices) {
+    for (const dev of visibleDevices) {
       nextMap.set(dev.id, dev.state)
       const prevState = prevMap.get(dev.id)
       if (
@@ -654,12 +656,12 @@ export function NativeViewport({
       }
     }
     previousStates.current = nextMap
-  }, [devices, state.keepAliveDeviceIds, activeDevice?.id])
+  }, [visibleDevices, state.keepAliveDeviceIds, activeDevice?.id])
 
   // Every keep-alive device and the active tab stay mounted.
   const mountedDeviceIds = new Set<DeviceId>(state.keepAliveDeviceIds)
   if (activeDevice !== undefined) mountedDeviceIds.add(activeDevice.id)
-  const mountedDevices = devices.filter(device => mountedDeviceIds.has(device.id))
+  const mountedDevices = visibleDevices.filter(device => mountedDeviceIds.has(device.id))
   const stageVisible = activeDevice !== undefined
 
   return (

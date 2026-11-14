@@ -376,6 +376,16 @@ export declare class DeviceRegistry {
         error: string;
     }>;
     removeDevice(deviceId: DeviceId): boolean;
+    /** Clear transient runtime projections/panes/timers while leaving persisted catalog & read state intact. */
+    private clearDeviceRuntimeTransientState;
+    /** Enable or disable a configured device without losing its saved config, credentials, catalog, or read state. */
+    setDeviceEnabled(deviceId: DeviceId, enabled: boolean): Promise<{
+        ok: true;
+        device: DeviceView;
+    } | {
+        ok: false;
+        error: string;
+    }>;
     reconnectDevice(deviceId: DeviceId): boolean;
     /** Current native-mode credential state for one device. */
     authStateOf(deviceId: DeviceId): DeviceAuthState;

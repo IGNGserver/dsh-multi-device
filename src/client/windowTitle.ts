@@ -56,7 +56,9 @@ export function resolveWindowTitle(input: WindowTitleInput): string | undefined 
   const summary = cleanTitle(input.summary)
   if (summary !== undefined) return summary
   if (input.activeNativeDeviceId === undefined) return undefined
-  const device = input.devices.find(candidate => candidate.id === input.activeNativeDeviceId)
+  const device = input.devices.find(
+    candidate => candidate.id === input.activeNativeDeviceId && candidate.enabled !== false,
+  )
   if (device === undefined) return undefined
   const remoteTitle = device.state === 'connected' ? cleanTitle(device.nativePaneTitle) : undefined
   return remoteTitle ?? cleanTitle(device.name)

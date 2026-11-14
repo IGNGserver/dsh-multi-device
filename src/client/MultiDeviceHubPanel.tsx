@@ -273,9 +273,9 @@ function DeviceEditorForm({
     setSaveError(null)
 
     // Saving without a preflight used to look successful while the remote
-    // rejected every request with a bare 401. Probe auth/tunnel first; on
-    // failure keep the form open and require an explicit "save anyway".
-    if (!saveAnyway) {
+    // rejected every request with a bare 401. Probe auth/tunnel first when
+    // enabled; saving as disabled skips connection probing intentionally.
+    if (!saveAnyway && deviceEnabled) {
       const preflight = await clientStore.testDevice(buildInput())
       if (!preflight.ok) {
         setSaving(false)
@@ -599,6 +599,7 @@ export function MultiDeviceHubPanel({
 
   const [addingNew, setAddingNew] = useState(false)
   const [editingDeviceId, setEditingDeviceId] = useState<DeviceId | null>(null)
+  const [togglingDeviceId, setTogglingDeviceId] = useState<DeviceId | null>(null)
   const [sshKeys, setSshKeys] = useState<readonly SshKeyEntry[]>([])
   const [deleteTarget, setDeleteTarget] = useState<DeviceView | null>(null)
   const [deleting, setDeleting] = useState(false)
@@ -643,6 +644,19 @@ export function MultiDeviceHubPanel({
     }
     setDeleteTarget(null)
     pushToast(t('savedNotice'), 'success')
+  }
+
+  const handleToggleDeviceEnabled = async (dev: DeviceView, nextEnabled: boolean): Promise<void> => {
+    if (togglingDeviceId === dev.id) return
+    setTogglingDeviceId(dev.id)
+    const res = await clientStore.setDeviceEnabled(dev.id, nextEnabled)
+    setTogglingDeviceId(prev => (prev === dev.id ? null : prev))
+    if (!res.ok) {
+      pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
+      return
+    }
+    const key = nextEnabled ? 'deviceEnabledNotice' : 'deviceDisabledNotice'
+    pushToast(t(key).replace('{name}', dev.name), 'success')
   }
 
   /**
@@ -787,56 +801,63 @@ export function MultiDeviceHubPanel({
           <ul className="dsh-md-rows">
             {snapshot.devices.map((dev) => {
               const isEditing = editingDeviceId === dev.id
+              const isDisabled = dev.enabled === false
               const deviceUnread = (unreadByDevice.get(dev.id) ?? EMPTY_UNREAD_SESSION_IDS).length
               return (
-                <li key={dev.id} className="dsh-md-card">
+                <li key={dev.id} className={isDisabled ? 'dsh-md-card isDisabled' : 'dsh-md-card'}>
                   <div className="dsh-md-row-head">
                     <div className="dsh-md-row-identity">
-                      <StateDot state={deviceStateToDotState(dev.state)} size={8} />
+                      <StateDot state={deviceStateToDotState(isDisabled ? 'disabled' : dev.state)} size={8} />
                       <span className="dsh-md-row-name">{dev.name}</span>
-                      <AttentionDetails
-                        view={snapshot.attentionByDevice?.[dev.id]}
-                        deviceName={dev.name}
-                        t={t}
-                        fallback={{
-                          runningCount: snapshot.attentionByDevice === undefined ? dev.runningSessionCount : undefined,
-                          pendingCount: snapshot.attentionByDevice === undefined ? dev.pendingApprovalCount : undefined,
-                          unreadSessionIds: unreadByDevice.get(dev.id) ?? EMPTY_UNREAD_SESSION_IDS,
-                          fresh: snapshot.attentionByDevice === undefined && dev.state === 'connected' && dev.catalogStale !== true,
-                        }}
-                      />
+                      {isDisabled ? (
+                        <Tag tone="outline">{t('deviceDisabledTag')}</Tag>
+                      ) : (
+                        <AttentionDetails
+                          view={snapshot.attentionByDevice?.[dev.id]}
+                          deviceName={dev.name}
+                          t={t}
+                          fallback={{
+                            runningCount: snapshot.attentionByDevice === undefined ? dev.runningSessionCount : undefined,
+                            pendingCount: snapshot.attentionByDevice === undefined ? dev.pendingApprovalCount : undefined,
+                            unreadSessionIds: unreadByDevice.get(dev.id) ?? EMPTY_UNREAD_SESSION_IDS,
+                            fresh: snapshot.attentionByDevice === undefined && dev.state === 'connected' && dev.catalogStale !== true,
+                          }}
+                        />
+                      )}
                       <span className="dsh-md-device-endpoint" title={formatCompactDeviceTarget(dev)}>
                         {formatCompactDeviceTarget(dev)}
                       </span>
-                      {dev.latencyMs !== undefined && dev.state === 'connected' && (
+                      {!isDisabled && dev.latencyMs !== undefined && dev.state === 'connected' && (
                         <span className="dsh-md-latency-text">{dev.latencyMs}ms</span>
                       )}
 
-                      {dev.authState === 'required' && (
+                      {!isDisabled && dev.authState === 'required' && (
                         <span className="dsh-md-auth-required-tag">{t('authRequired')}</span>
                       )}
                     </div>
 
                     <div className="dsh-md-row-actions">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        icon={<IconRightUpOutlineRegular size={13} />}
-                        onClick={() => {
-                          void clientStore.selectNativeDevice(dev.id).then((res) => {
-                            if (!res.ok) {
-                              pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
-                              return
-                            }
-                            onCloseSettings?.()
-                          })
-                        }}
-                      >
-                        {t('openDevice')}
-                      </Button>
+                      {!isDisabled && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          icon={<IconRightUpOutlineRegular size={13} />}
+                          onClick={() => {
+                            void clientStore.selectNativeDevice(dev.id).then((res) => {
+                              if (!res.ok) {
+                                pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
+                                return
+                              }
+                              onCloseSettings?.()
+                            })
+                          }}
+                        >
+                          {t('openDevice')}
+                        </Button>
+                      )}
 
                       <div className="dsh-md-icon-actions-group">
-                        {deviceUnread > 0 && (
+                        {!isDisabled && deviceUnread > 0 && (
                           <Tooltip label={t('clearUnread')} side="top">
                             <Button
                               variant="ghost"
@@ -861,25 +882,27 @@ export function MultiDeviceHubPanel({
                           </Tooltip>
                         )}
 
-                        <Tooltip label={t('reconnect')} side="top">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="dsh-md-icon-btn"
-                            aria-label={t('reconnect')}
-                            onClick={() => {
-                              void clientStore.reconnectDevice(dev.id).then((res) => {
-                                if (res.ok) {
-                                  pushToast(t('reconnectedNotice'), 'success')
-                                } else {
-                                  pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
-                                }
-                              })
-                            }}
-                          >
-                            <IconRefreshOutlineRegular size={14} />
-                          </Button>
-                        </Tooltip>
+                        {!isDisabled && (
+                          <Tooltip label={t('reconnect')} side="top">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="dsh-md-icon-btn"
+                              aria-label={t('reconnect')}
+                              onClick={() => {
+                                void clientStore.reconnectDevice(dev.id).then((res) => {
+                                  if (res.ok) {
+                                    pushToast(t('reconnectedNotice'), 'success')
+                                  } else {
+                                    pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
+                                  }
+                                })
+                              }}
+                            >
+                              <IconRefreshOutlineRegular size={14} />
+                            </Button>
+                          </Tooltip>
+                        )}
 
                         <Tooltip label={t('editDevice')} side="top">
                           <Button
@@ -912,10 +935,21 @@ export function MultiDeviceHubPanel({
                           </Button>
                         </Tooltip>
                       </div>
+
+                      <Tooltip label={t(isDisabled ? 'enableDevice' : 'disableDevice')} side="top">
+                        <span className="dsh-md-device-toggle">
+                          <Switch
+                            checked={!isDisabled}
+                            disabled={togglingDeviceId === dev.id}
+                            label={`${t(isDisabled ? 'enableDevice' : 'disableDevice')}: ${dev.name}`}
+                            onChange={(checked) => { void handleToggleDeviceEnabled(dev, checked) }}
+                          />
+                        </span>
+                      </Tooltip>
                     </div>
                   </div>
 
-                  {!isEditing && dev.lastError !== undefined && (
+                  {!isEditing && !isDisabled && dev.lastError !== undefined && (
                     <p className="dsh-md-error-text">{dev.lastError}</p>
                   )}
 
