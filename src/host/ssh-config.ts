@@ -12,6 +12,7 @@
  * @module dsh-multi-device/host/ssh-config
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { readdir, readFile, stat } from 'node:fs/promises'
 import { homedir, userInfo } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type { SshConfigHostEntry, SshKeyEntry, SshTransportConfig } from '../contract.ts'
@@ -253,23 +254,113 @@ export function loadSystemSshConfigBlocks(
 }
 
 let cachedDefaultHosts: { at: number; configFile: string; home: string; hosts: SshConfigHostEntry[] } | undefined
-const SSH_CONFIG_CACHE_TTL_MS = 3_000
+let pendingDefaultHostsRefresh: Promise<void> | undefined
+const SSH_CONFIG_CACHE_TTL_MS = 15_000
+
+async function expandIncludeFilesAsync(pattern: string): Promise<{ path: string; content: string }[]> {
+  const expandedPattern = resolveUserIncludePattern(pattern)
+  const dir = dirname(expandedPattern)
+  const filePattern = expandedPattern.slice(dir.length + 1)
+  try {
+    if (!filePattern.includes('*') && !filePattern.includes('?')) {
+      const info = await stat(expandedPattern)
+      if (!info.isFile()) return []
+      return [{ path: expandedPattern, content: await readFile(expandedPattern, 'utf8') }]
+    }
+    const regex = globToRegExp(filePattern)
+    const entries = (await readdir(dir)).sort()
+    const results: { path: string; content: string }[] = []
+    for (const entry of entries) {
+      if (!regex.test(entry)) continue
+      const fullPath = join(dir, entry)
+      try {
+        const info = await stat(fullPath)
+        if (info.isFile()) {
+          results.push({ path: fullPath, content: await readFile(fullPath, 'utf8') })
+        }
+      } catch {
+        // Ignore unreadable include file
+      }
+    }
+    return results
+  } catch {
+    return []
+  }
+}
+
+async function parseSshConfigTextAsync(
+  content: string,
+  sourceFile: string,
+  visited: Set<string>,
+): Promise<ParsedSshConfigBlock[]> {
+  const includeMap = new Map<string, { path: string; content: string }[]>()
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = stripSshComment(rawLine).trim()
+    if (line === '') continue
+    const parsed = splitDirective(line)
+    if (parsed?.key.toLowerCase() !== 'include') continue
+    for (const pattern of tokenizeArgs(parsed.value)) {
+      if (!includeMap.has(pattern)) {
+        includeMap.set(pattern, await expandIncludeFilesAsync(pattern))
+      }
+    }
+  }
+  return parseSshConfigText(
+    content,
+    sourceFile,
+    (pattern) => includeMap.get(pattern) ?? [],
+    visited,
+  )
+}
+
+function scheduleDefaultHostsRefresh(configFile: string, home: string): void {
+  if (pendingDefaultHostsRefresh !== undefined) return
+  const task = (async () => {
+    try {
+      const expanded = expandHomePath(configFile, home)
+      let blocks: ParsedSshConfigBlock[] = []
+      try {
+        const content = await readFile(expanded, 'utf8')
+        blocks = await parseSshConfigTextAsync(content, expanded, new Set<string>([expanded]))
+      } catch {
+        blocks = []
+      }
+      const hosts = extractConcreteHostsFromBlocks(blocks, home)
+      cachedDefaultHosts = { at: Date.now(), configFile, home, hosts }
+    } finally {
+      pendingDefaultHostsRefresh = undefined
+    }
+  })()
+  pendingDefaultHostsRefresh = task
+}
 
 /**
  * List concrete (non-wildcard) SSH host entries from `~/.ssh/config` for UI discovery/import.
+ *
+ * Steady-state calls on the default path return immediately from memory and
+ * refresh stale entries asynchronously on `fs/promises` so `registry.snapshot()`
+ * never blocks the Host event loop on disk metadata.
  */
 export function listSshConfigHosts(
   configFile = join(homedir(), '.ssh', 'config'),
   home = homedir(),
 ): SshConfigHostEntry[] {
+  const defaultHome = homedir()
+  const defaultConfigFile = join(defaultHome, '.ssh', 'config')
+  const isDefault = configFile === defaultConfigFile && home === defaultHome
   const now = Date.now()
   if (
     cachedDefaultHosts !== undefined &&
     cachedDefaultHosts.configFile === configFile &&
-    cachedDefaultHosts.home === home &&
-    now - cachedDefaultHosts.at < SSH_CONFIG_CACHE_TTL_MS
+    cachedDefaultHosts.home === home
   ) {
-    return cachedDefaultHosts.hosts
+    if (now - cachedDefaultHosts.at < SSH_CONFIG_CACHE_TTL_MS) {
+      return cachedDefaultHosts.hosts
+    }
+    if (isDefault) {
+      scheduleDefaultHostsRefresh(configFile, home)
+      return cachedDefaultHosts.hosts
+    }
   }
   const blocks = loadSystemSshConfigBlocks(configFile)
   const hosts = extractConcreteHostsFromBlocks(blocks, home)

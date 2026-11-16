@@ -137,16 +137,34 @@ export class DocumentTitleController {
     this.baseTitle = document.title
     if (typeof MutationObserver === 'undefined') return false
     try {
+      let observedTitle = typeof document.querySelector === 'function'
+        ? document.querySelector('head > title')
+        : null
+      const bindTarget = (obs: MutationObserver): void => {
+        const currentTitle = typeof document.querySelector === 'function'
+          ? document.querySelector('head > title')
+          : null
+        obs.disconnect()
+        observedTitle = currentTitle
+        if (currentTitle !== null) {
+          obs.observe(currentTitle, { childList: true, characterData: true, subtree: true })
+        } else {
+          obs.observe(document.head ?? document.documentElement, {
+            subtree: true,
+            childList: true,
+            characterData: true,
+          })
+        }
+      }
       this.observer = new MutationObserver(() => {
+        if ((observedTitle === null || !observedTitle.isConnected) && this.observer !== undefined) {
+          bindTarget(this.observer)
+        }
         if (this.override !== undefined && document.title !== this.override) {
           document.title = this.override
         }
       })
-      this.observer.observe(document.head ?? document.documentElement, {
-        subtree: true,
-        childList: true,
-        characterData: true,
-      })
+      bindTarget(this.observer)
       return true
     } catch {
       return false

@@ -212,6 +212,8 @@ export class RemoteDeviceClient {
   private running = false
   private loopAbort: AbortController | undefined
   private iterationAbort: AbortController | undefined
+  private verified02TargetKey: string | undefined
+  private verified02Version: string | undefined
 
   constructor(
     config: DeviceConfig,
@@ -553,9 +555,22 @@ export class RemoteDeviceClient {
     this.pendingInteractions.clear()
   }
 
+  private currentTargetKey(): string {
+    const t = this.config.transport
+    if (t.kind === 'ssh') {
+      return `ssh:${t.username ?? ''}@${t.host}:${String(t.port ?? 22)}->${t.remoteBindHost ?? '127.0.0.1'}:${String(t.remotePort ?? 3080)}`
+    }
+    return `direct:${t.baseUrl.replace(/\/+$/, '')}`
+  }
+
   updateConfig(next: DeviceConfig): void {
+    const previousTarget = this.currentTargetKey()
     this.stop()
     this.config = next
+    if (this.currentTargetKey() !== previousTarget) {
+      this.verified02TargetKey = undefined
+      this.verified02Version = undefined
+    }
     if (next.enabled) {
       this.start()
     } else {
@@ -773,7 +788,7 @@ export class RemoteDeviceClient {
         }
 
         // Step 2: Ensure authentication
-        const authRes = await this.authManager.ensureAuthenticated(this.config, baseUrl)
+        const authRes = await this.authManager.ensureAuthenticated(this.config, baseUrl, false, signal)
         if (signal.aborted || !this.catalog.isCurrent(epoch)) return
         if (!authRes.ok) {
           throw new Error(authRes.error)
@@ -848,12 +863,15 @@ export class RemoteDeviceClient {
     const base = tunnel.baseUrl()
     if (base !== undefined) return base
 
-    // Wait briefly if tunnel is still connecting
-    for (let i = 0; i < 20 && !signal.aborted; i++) {
+    // Poll exponentially (25 -> 50 -> 100 -> 200 -> 250ms) up to 5s while tunnel connects
+    const deadline = Date.now() + 5_000
+    let delayMs = 25
+    while (!signal.aborted && Date.now() < deadline) {
       const current = tunnel.baseUrl()
       if (current !== undefined) return current
       if (tunnel.status().state === 'error') break
-      await sleepWithSignal(250, signal)
+      await sleepWithSignal(Math.min(delayMs, Math.max(1, deadline - Date.now())), signal)
+      delayMs = Math.min(250, delayMs * 2)
     }
     return signal.aborted ? undefined : tunnel.baseUrl()
   }
@@ -863,42 +881,75 @@ export class RemoteDeviceClient {
     signal: AbortSignal,
     epoch = this.catalog.epoch,
   ): Promise<{ protocolVersion: '0.2' | '0.1'; remoteDshVersion?: string }> {
-    // Try DSH 0.2 `/api/session/list` first
-    let res02 = await this.rawRpcPost('session/list', { args: { _request: {} } }, signal)
-    if (signal.aborted || !this.catalog.isCurrent(epoch)) throw new Error('Remote connection superseded')
-    if (!res02.ok && (res02.httpStatus === 401 || res02.httpStatus === 403)) {
-      // Force re-auth and retry once
-      this.authManager.invalidate(this.config.id)
-      await this.authManager.ensureAuthenticated(this.config, baseUrl, true)
-      if (signal.aborted || !this.catalog.isCurrent(epoch)) throw new Error('Remote connection superseded')
+    const targetKey = this.currentTargetKey()
+    const known02 = this.verified02TargetKey === targetKey
+
+    let res02: Awaited<ReturnType<RemoteDeviceClient['rawRpcPost']>>
+    let res01: Awaited<ReturnType<RemoteDeviceClient['rawRpcPost']>> | undefined
+
+    if (known02) {
+      // Fast reconnect path: target already proved DSH 0.2, skip host.describe RTT
       res02 = await this.rawRpcPost('session/list', { args: { _request: {} } }, signal)
       if (signal.aborted || !this.catalog.isCurrent(epoch)) throw new Error('Remote connection superseded')
       if (!res02.ok && (res02.httpStatus === 401 || res02.httpStatus === 403)) {
-        this.callbacks.onAuthState?.(this.id, 'required', res02.error.message)
+        this.authManager.invalidate(this.config.id)
+        await this.authManager.ensureAuthenticated(this.config, baseUrl, true, signal)
+        if (signal.aborted || !this.catalog.isCurrent(epoch)) throw new Error('Remote connection superseded')
+        res02 = await this.rawRpcPost('session/list', { args: { _request: {} } }, signal)
       }
+    } else {
+      // Cold connect: run session/list and host.describe concurrently in 1 RTT
+      ;[res02, res01] = await Promise.all([
+        this.rawRpcPost('session/list', { args: { _request: {} } }, signal),
+        this.rawRpcPost('host.describe', {}, signal, 'host.describe'),
+      ])
+      if (signal.aborted || !this.catalog.isCurrent(epoch)) throw new Error('Remote connection superseded')
+      if (!res02.ok && (res02.httpStatus === 401 || res02.httpStatus === 403)) {
+        this.authManager.invalidate(this.config.id)
+        await this.authManager.ensureAuthenticated(this.config, baseUrl, true, signal)
+        if (signal.aborted || !this.catalog.isCurrent(epoch)) throw new Error('Remote connection superseded')
+        ;[res02, res01] = await Promise.all([
+          this.rawRpcPost('session/list', { args: { _request: {} } }, signal),
+          this.rawRpcPost('host.describe', {}, signal, 'host.describe'),
+        ])
+      }
+    }
+
+    if (signal.aborted || !this.catalog.isCurrent(epoch)) throw new Error('Remote connection superseded')
+    if (!res02.ok && (res02.httpStatus === 401 || res02.httpStatus === 403)) {
+      this.callbacks.onAuthState?.(this.id, 'required', res02.error.message)
     }
     if (res02.ok) {
       this.callbacks.onAuthState?.(this.id, 'ok')
     }
 
-    if (signal.aborted || !this.catalog.isCurrent(epoch)) throw new Error('Remote connection superseded')
     const body02 = res02.ok ? res02.value : undefined
     const listGen = classifyRemoteProtocol(body02)
-    // A versionless `items` body is the normal 0.2 list. Ask host.describe
-    // before trusting it, because a 0.1 server can return `items` too.
-    let hostValue: unknown
-    if (listGen !== '0.2') {
-      const res01 = await this.rawRpcPost('host.describe', {}, signal, 'host.describe')
-      if (res01.ok) hostValue = res01.value
+    let hostValue: unknown = listGen === '0.2' ? undefined : (res01?.ok ? res01.value : undefined)
+
+    // If a cached 0.2 target unexpectedly stopped returning a valid 0.2/items shape, fall back to host.describe
+    if (known02 && listGen !== '0.2' && !(isRecord(body02) && Array.isArray(body02.items))) {
+      this.verified02TargetKey = undefined
+      this.verified02Version = undefined
+      const fallback01 = await this.rawRpcPost('host.describe', {}, signal, 'host.describe')
+      if (fallback01.ok) hostValue = fallback01.value
     }
+
     signal.throwIfAborted()
     const resolved = resolveProbedProtocol(body02, hostValue)
     if (signal.aborted || !this.catalog.isCurrent(epoch)) throw new Error('Remote connection superseded')
     if (resolved?.protocol === '0.2') {
       // Probe only: the authoritative list is fetched after `$events` ready.
+      this.verified02TargetKey = targetKey
+      if (resolved.version !== undefined) this.verified02Version = resolved.version
       this.realtime = true
-      return { protocolVersion: '0.2', remoteDshVersion: resolved.version ?? '0.2.x' }
+      return {
+        protocolVersion: '0.2',
+        remoteDshVersion: resolved.version ?? this.verified02Version ?? '0.2.x',
+      }
     }
+    this.verified02TargetKey = undefined
+    this.verified02Version = undefined
     if (resolved?.protocol === '0.1') {
       if (isRecord(hostValue) && typeof hostValue.cwd === 'string') {
         this.remoteHome = hostValue.cwd

@@ -10,6 +10,7 @@
  * @module dsh-multi-device/runtime
  */
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http'
+import { constants as zlibConstants, createGzip, gzipSync, type Gzip } from 'node:zlib'
 import type { Context } from '@deepseek-ai/cordis'
 import type {
   DeviceId,
@@ -22,6 +23,42 @@ import type { DeviceRegistry } from './host/registry.ts'
 
 export const MULTI_DEVICE_API_PATH = '/multi-device/api'
 export const MULTI_DEVICE_EVENTS_PATH = '/multi-device/events'
+
+const GZIP_MIN_BYTES = 1024
+
+function acceptsGzip(req: IncomingMessage): boolean {
+  const raw = req.headers?.['accept-encoding']
+  const encoding = Array.isArray(raw) ? raw.join(',') : raw
+  return typeof encoding === 'string' && /\bgzip\b(?!\s*;\s*q=0(?:\.0+)?\b)/i.test(encoding)
+}
+
+function sendJsonResponse(
+  req: IncomingMessage,
+  res: ServerResponse,
+  status: number,
+  payload: unknown,
+  extraHeaders?: Record<string, string>,
+): void {
+  const json = JSON.stringify(payload)
+  const buf = Buffer.from(json, 'utf8')
+  if (buf.byteLength >= GZIP_MIN_BYTES && acceptsGzip(req)) {
+    const compressed = gzipSync(buf)
+    res.writeHead(status, {
+      'content-type': 'application/json; charset=utf-8',
+      'content-encoding': 'gzip',
+      'vary': 'accept-encoding',
+      ...extraHeaders,
+    })
+    res.end(compressed)
+    return
+  }
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'vary': 'accept-encoding',
+    ...extraHeaders,
+  })
+  res.end(buf)
+}
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024
 const MAX_ACTIVE_CONTROL_REQUESTS = 64
@@ -462,6 +499,7 @@ export class MultiDeviceControlPlane {
         }
 
         case 'upsertDevice': {
+          await this.registry.waitForPendingPersistence()
           const input = payload as unknown as UpsertDeviceInput
           const res = await this.registry.upsertDevice(input)
           if (!res.ok) return res
@@ -471,6 +509,7 @@ export class MultiDeviceControlPlane {
         case 'removeDevice': {
           const deviceId = String(payload.deviceId ?? '') as DeviceId
           if (deviceId === '') return { ok: false, error: 'Device id is required' }
+          await this.registry.waitForPendingPersistence()
           const removed = this.registry.removeDevice(deviceId)
           if (!removed) return { ok: false, error: 'Device is not configured' }
           return { ok: true, value: { removed, snapshot: this.registry.snapshot(clientId) } }
@@ -480,6 +519,7 @@ export class MultiDeviceControlPlane {
           const deviceId = String(payload.deviceId ?? '') as DeviceId
           if (deviceId === '') return { ok: false, error: 'Device id is required' }
           if (typeof payload.enabled !== 'boolean') return { ok: false, error: 'enabled must be a boolean' }
+          await this.registry.waitForPendingPersistence()
           const res = await this.registry.setDeviceEnabled(deviceId, payload.enabled)
           if (!res.ok) return res
           return { ok: true, value: { device: res.device, snapshot: this.registry.snapshot(clientId) } }
@@ -523,6 +563,7 @@ export class MultiDeviceControlPlane {
         }
 
         case 'setUiPreferences': {
+          await this.registry.waitForPendingPersistence()
           this.registry.updateUiPreferences({
             ...(typeof payload.crossHostReadState === 'boolean'
               ? { crossHostReadState: payload.crossHostReadState }
@@ -559,11 +600,9 @@ export class MultiDeviceControlPlane {
     if (req.method === 'GET') {
       const clientId = readClientId(req)
       const snapshot: MultiDeviceSnapshot = this.registry.snapshot(clientId)
-      res.writeHead(200, {
-        'content-type': 'application/json; charset=utf-8',
+      sendJsonResponse(req, res, 200, { ok: true, value: snapshot }, {
         'cache-control': 'no-store',
       })
-      res.end(JSON.stringify({ ok: true, value: snapshot }))
       return
     }
 
@@ -628,11 +667,9 @@ export class MultiDeviceControlPlane {
         return
       }
       if (res.destroyed) return
-      res.writeHead(200, {
-        'content-type': 'application/json; charset=utf-8',
+      sendJsonResponse(req, res, 200, outcome, {
         'cache-control': 'no-store',
       })
-      res.end(JSON.stringify(outcome))
     } finally {
       if (!dispatchStarted) this.activeControlRequests = Math.max(0, this.activeControlRequests - 1)
     }
@@ -646,16 +683,39 @@ export class MultiDeviceControlPlane {
       return
     }
 
-    res.writeHead(200, {
-      'content-type': 'text/event-stream; charset=utf-8',
-      'cache-control': 'no-cache, no-transform',
-      'connection': 'keep-alive',
-    })
+    const useGzip = acceptsGzip(req)
+    let gzipStream: Gzip | undefined
+    let lastDownstreamOk = true
+    if (useGzip) {
+      res.writeHead(200, {
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-cache',
+        'connection': 'keep-alive',
+        'content-encoding': 'gzip',
+        'vary': 'accept-encoding',
+      })
+      gzipStream = createGzip({ flush: zlibConstants.Z_SYNC_FLUSH })
+      gzipStream.on('data', (chunk: Buffer) => {
+        if (!closed) {
+          lastDownstreamOk = res.write(chunk)
+        }
+      })
+      gzipStream.on('error', () => {
+        if (!closed) res.destroy()
+      })
+    } else {
+      res.writeHead(200, {
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-cache, no-transform',
+        'connection': 'keep-alive',
+      })
+    }
 
     const clientId = readClientId(req)
     let closed = false
     let queued = false
     let flushing = false
+    let microtaskScheduled = false
     let heartbeat: ReturnType<typeof setInterval> | undefined
     let unsubscribe: (() => void) | undefined
     const cleanup = (): void => {
@@ -664,7 +724,25 @@ export class MultiDeviceControlPlane {
       queued = false
       if (heartbeat !== undefined) clearInterval(heartbeat)
       unsubscribe?.()
+      if (gzipStream !== undefined) {
+        gzipStream.removeAllListeners()
+        gzipStream.destroy()
+        gzipStream = undefined
+      }
     }
+    const writeGzipFrame = (stream: Gzip, frame: string): Promise<boolean> =>
+      new Promise((resolve, reject) => {
+        lastDownstreamOk = true
+        stream.write(frame, 'utf8', (writeErr) => {
+          if (writeErr) {
+            reject(writeErr)
+            return
+          }
+          stream.flush(zlibConstants.Z_SYNC_FLUSH, () => {
+            resolve(lastDownstreamOk)
+          })
+        })
+      })
     const waitForDrain = (): Promise<void> => new Promise(resolve => {
       const done = (): void => {
         res.off('drain', done)
@@ -683,7 +761,11 @@ export class MultiDeviceControlPlane {
         while (queued && !closed) {
           queued = false
           const snap = this.registry.snapshot(clientId)
-          if (!res.write(`event: snapshot\ndata: ${JSON.stringify(snap)}\n\n`) && !closed) {
+          const payload = `event: snapshot\ndata: ${JSON.stringify(snap)}\n\n`
+          const ok = gzipStream === undefined
+            ? res.write(payload)
+            : await writeGzipFrame(gzipStream, payload)
+          if (!ok && !closed) {
             await waitForDrain()
           }
         }
@@ -694,20 +776,34 @@ export class MultiDeviceControlPlane {
         if (queued && !closed) void flush()
       }
     }
-    const sendSnapshot = (): void => {
-      // One pending snapshot per socket: a slow consumer cannot build an
-      // unbounded event queue, and changes during a blocked write coalesce.
+    const scheduleCoalescedSnapshot = (): void => {
+      // Coalesce multiple synchronous revision bumps within the same tick into
+      // a single snapshot computation & SSE write, even without TCP backpressure.
       queued = true
-      void flush()
+      if (flushing || microtaskScheduled || closed) return
+      microtaskScheduled = true
+      queueMicrotask(() => {
+        microtaskScheduled = false
+        if (!closed && queued) void flush()
+      })
     }
 
     req.once('close', cleanup)
     res.once('close', cleanup)
     res.on('error', cleanup)
-    unsubscribe = this.registry.onSnapshotChanged(sendSnapshot)
-    sendSnapshot()
+    unsubscribe = this.registry.onSnapshotChanged(scheduleCoalescedSnapshot)
+    queued = true
+    void flush()
     heartbeat = setInterval(() => {
-      if (!closed && !res.writableNeedDrain) res.write(': ping\n\n')
+      if (!closed && !res.writableNeedDrain) {
+        if (gzipStream === undefined) {
+          res.write(': ping\n\n')
+        } else {
+          void writeGzipFrame(gzipStream, ': ping\n\n').catch(() => {
+            if (!closed) res.destroy()
+          })
+        }
+      }
     }, 15_000)
   }
 

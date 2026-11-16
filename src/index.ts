@@ -268,11 +268,18 @@ function applyHost(
   // never request bodies. If DSH changes the private map shape we publish no
   // invented requests; remote devices use their supported $events protocol.
   ctx.effect(() => {
+    let lastHadPending = true
     const sample = (): void => {
       let gateway: { pendingRemoteEvents?: unknown } | undefined
       try { gateway = (ctx as unknown as { get?: (key: string) => unknown }).get?.('typertGateway') as typeof gateway } catch { return }
       const pending = gateway?.pendingRemoteEvents
       if (!(pending instanceof Map)) return
+      if (pending.size === 0) {
+        if (!lastHadPending) return
+        lastHadPending = false
+        registry.observeLocalPending([])
+        return
+      }
       const requests: Array<{ eventId: string; sessionId: string; kind: 'approval' | 'question' | 'plan-review' }> = []
       for (const [id, value] of pending) {
         const frame = (value as { frame?: { event?: string; agentId?: string; request?: { questions?: Array<{ intent?: { kind?: string } }> } } })?.frame
@@ -282,6 +289,7 @@ function applyHost(
           : frame.event === 'user-questions/request' ? 'question' : undefined
         if (kind !== undefined) requests.push({ eventId: id, sessionId: frame.agentId, kind })
       }
+      lastHadPending = requests.length > 0
       registry.observeLocalPending(requests)
     }
     sample()

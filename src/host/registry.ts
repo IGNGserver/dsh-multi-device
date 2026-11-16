@@ -342,6 +342,9 @@ export class DeviceRegistry {
 
   private readonly storage: JsonSnapshotFile
   private readonly catalogStorage: JsonSnapshotFile
+  private stateWrite: Promise<void> | undefined
+  private stateWriteAgain = false
+  private stateDirty = false
   private catalogWrite: Promise<void> | undefined
   private catalogWriteAgain = false
   private catalogDirty = false
@@ -1292,13 +1295,19 @@ export class DeviceRegistry {
   }
 
   private schedulePersist(): void {
-    if (this.persistTimer !== undefined) return
+    this.stateDirty = true
+    if (this.persistTimer !== undefined || this.disposed) return
     const timer = setTimeout(() => {
       this.persistTimer = undefined
-      try { this.saveToDisk() } catch { /* persistence is best-effort */ }
+      void this.persistStateAsync().catch(() => {})
     }, 800)
     timer.unref?.()
     this.persistTimer = timer
+  }
+
+  /** Wait for any in-flight asynchronous state write before running a synchronous CAS mutation. */
+  async waitForPendingPersistence(): Promise<void> {
+    await this.stateWrite?.catch(() => {})
   }
 
   /**
@@ -1445,7 +1454,12 @@ export class DeviceRegistry {
     // Persist the last captured catalogs before the timers are torn down.
     try {
       this.flushCatalogCache()
-      this.saveToDisk()
+      if (this.stateWrite === undefined) {
+        this.saveToDisk()
+      } else {
+        this.stateDirty = true
+        this.stateWriteAgain = true
+      }
     } catch {
       // Shutdown must stay best-effort.
     }
@@ -1521,6 +1535,7 @@ export class DeviceRegistry {
     if (id === LOCAL_DEVICE_ID) {
       return { ok: false, error: '"local" is a reserved device ID' }
     }
+    await this.waitForPendingPersistence()
     this.storage.assertWritable()
     this.authManager.assertWritable()
     const previous = this.configs.get(id)
@@ -1659,6 +1674,7 @@ export class DeviceRegistry {
         return { ok: true, device: this.withNativePane(this.withAuthState(existingClient.toView())) }
       }
     }
+    await this.waitForPendingPersistence()
     this.storage.assertWritable()
     const updated: DeviceConfig = {
       ...existing,
@@ -1835,12 +1851,38 @@ export class DeviceRegistry {
         'content-type': 'application/json',
       }
 
-      // Self-loop check by Host identity over any IP/alias
-      const selfProbe = await requestRemote(new URL('/multi-device/api', baseUrl).href, {
-        method: 'GET',
-        headers,
-        timeoutMs: 3_000,
-      }).catch(() => undefined)
+      // Run self-loop identity check, 0.2 session/list probe, and 0.1 host.describe
+      // concurrently in a single RTT while preserving exact self-loop & 0.2 precedence.
+      const [selfProbe, res02, res01] = await Promise.all([
+        requestRemote(new URL('/multi-device/api', baseUrl).href, {
+          method: 'GET',
+          headers,
+          timeoutMs: 3_000,
+        }).catch(() => undefined),
+        requestRemote(new URL('/api/session/list', baseUrl).href, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            type: 'client-request',
+            rpcId: randomUUID(),
+            method: 'session/list',
+            payload: { args: { _request: {} } },
+          }),
+          timeoutMs: 15_000,
+        }).catch(() => undefined),
+        requestRemote(new URL('/api/host.describe', baseUrl).href, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            type: 'client-request',
+            rpcId: randomUUID(),
+            method: 'host.describe',
+            payload: {},
+          }),
+          timeoutMs: 15_000,
+        }).catch(() => undefined),
+      ])
+
       if (selfProbe !== undefined && selfProbe.status === 200) {
         try {
           const parsedSelf = JSON.parse(selfProbe.body.toString('utf8')) as {
@@ -1855,19 +1897,6 @@ export class DeviceRegistry {
         }
       }
 
-      // Probe 0.2
-      const res02 = await requestRemote(new URL('/api/session/list', baseUrl).href, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          type: 'client-request',
-          rpcId: randomUUID(),
-          method: 'session/list',
-          payload: { args: { _request: {} } },
-        }),
-        timeoutMs: 15_000,
-      }).catch(() => undefined)
-
       const listValue = res02 !== undefined && res02.status >= 200 && res02.status < 300
         ? parseProbeBody(res02.body).result?.value
         : undefined
@@ -1875,23 +1904,9 @@ export class DeviceRegistry {
 
       // Probe 0.1 only when session/list did not already declare 0.2.
       // A versionless items body stays 0.2 unless host.describe says 0.1.
-      let describeValue: unknown
-      if (listGen !== '0.2') {
-        const res01 = await requestRemote(new URL('/api/host.describe', baseUrl).href, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            type: 'client-request',
-            rpcId: randomUUID(),
-            method: 'host.describe',
-            payload: {},
-          }),
-          timeoutMs: 15_000,
-        }).catch(() => undefined)
-        if (res01 !== undefined && res01.status >= 200 && res01.status < 300) {
-          describeValue = parseProbeBody(res01.body).result?.value
-        }
-      }
+      const describeValue = listGen !== '0.2' && res01 !== undefined && res01.status >= 200 && res01.status < 300
+        ? parseProbeBody(res01.body).result?.value
+        : undefined
 
       const resolved = resolveProbedProtocol(listValue, describeValue)
       if (resolved !== undefined) {
@@ -1941,23 +1956,23 @@ export class DeviceRegistry {
     if (cached?.revision === this.revision) return cached.value
     const archivedSessionIds = new Set<string>(this.localArchivedIds())
     const subagentSessionIds = new Set<string>(this.localSubagentIds())
-    const attentionFacts: SessionAttentionFact[] = (this.localCatalog ?? []).map(row => ({
-      ...row,
-      deviceId: LOCAL_DEVICE_ID,
-      archived: archivedSessionIds.has(row.sessionId),
-      origin: subagentSessionIds.has(row.sessionId) ? 'subagent' : row.origin,
-    }))
     const localPendingBySession = new Map<string, { count: number; kind: string }>()
     for (const pending of this.localPending.values()) {
       const old = localPendingBySession.get(pending.sessionId)
       localPendingBySession.set(pending.sessionId, { count: (old?.count ?? 0) + 1, kind: pending.kind })
     }
-    for (let index = 0; index < attentionFacts.length; index += 1) {
-      const row = attentionFacts[index]!
+    const localFacts: SessionAttentionFact[] = (this.localCatalog ?? []).map(row => {
       const pending = localPendingBySession.get(row.sessionId)
-      if (pending !== undefined) attentionFacts[index] = { ...row, pendingInteractionKind: pending.kind, pendingRequestCount: pending.count }
-    }
+      return {
+        ...row,
+        deviceId: LOCAL_DEVICE_ID,
+        archived: archivedSessionIds.has(row.sessionId),
+        origin: subagentSessionIds.has(row.sessionId) ? 'subagent' : row.origin,
+        ...(pending !== undefined ? { pendingInteractionKind: pending.kind, pendingRequestCount: pending.count } : {}),
+      }
+    })
 
+    const factsByDevice = new Map<DeviceId, SessionAttentionFact[]>()
     for (const client of this.clients.values()) {
       if (!client.deviceConfig.enabled) continue
       const summaries = client.sessionSummaries()
@@ -1974,17 +1989,19 @@ export class DeviceRegistry {
       for (const archivedId of archived) {
         archivedSessionIds.add(encodeRemoteSessionId(client.id, archivedId))
       }
+      const deviceFacts: SessionAttentionFact[] = []
       for (const summary of summaries) {
         const namespacedId = encodeRemoteSessionId(client.id, summary.sessionId)
         if (summary.origin === 'subagent') subagentSessionIds.add(namespacedId)
         const pending = pendingBySession.get(summary.sessionId)
-        attentionFacts.push({
+        deviceFacts.push({
           sessionId: namespacedId, deviceId: client.id, running: summary.running,
           blank: summary.blank, origin: summary.origin, archived: archived.has(summary.sessionId),
           runningSubagentCount: childrenByParent.get(summary.sessionId) ?? 0,
           ...(pending !== undefined ? { pendingInteractionKind: pending.kind, pendingRequestCount: pending.count } : {}),
         })
       }
+      factsByDevice.set(client.id, deviceFacts)
     }
 
     const isSessionVisibleInSnapshot = (sessionId: string): boolean => {
@@ -1993,16 +2010,17 @@ export class DeviceRegistry {
     }
     const visibleUnreadSessionIds = this.readTracker.unreadIds().filter(isSessionVisibleInSnapshot)
     const visibleUnreadSet = new Set(visibleUnreadSessionIds)
-    const attentionByDevice = selectDeviceAttention(attentionFacts, visibleUnreadSet, {
+    const attentionByDevice = selectDeviceAttention(localFacts, visibleUnreadSet, {
       currentSessionId: this.activeSessions.get(clientId)?.sessionId,
+      fresh: this.localCatalogFresh,
     })
-    attentionByDevice[LOCAL_DEVICE_ID] = { ...(attentionByDevice[LOCAL_DEVICE_ID] ?? emptyDeviceAttention()), fresh: this.localCatalogFresh }
+    attentionByDevice[LOCAL_DEVICE_ID] = attentionByDevice[LOCAL_DEVICE_ID] ?? emptyDeviceAttention(this.localCatalogFresh)
     for (const client of this.clients.values()) {
       if (!client.deviceConfig.enabled) continue
       const fresh = client.catalogFresh
       const rawSelected = this.nativePanes.get(this.paneKey(client.id, clientId))?.sessionId
       const currentSessionId = rawSelected === undefined ? this.activeSessions.get(clientId)?.sessionId : encodeRemoteSessionId(client.id, rawSelected)
-      const projected = selectDeviceAttention(attentionFacts.filter(fact => fact.deviceId === client.id), visibleUnreadSet, { currentSessionId, fresh })
+      const projected = selectDeviceAttention(factsByDevice.get(client.id) ?? [], visibleUnreadSet, { currentSessionId, fresh })
       attentionByDevice[client.id] = projected[client.id] ?? emptyDeviceAttention(fresh)
     }
 
@@ -2380,6 +2398,7 @@ export class DeviceRegistry {
           await this.catalogStorage.writeAsync(encodeCatalogDocument(this.catalogs))
           if (this.catalogMigrationPending) {
             // The new file is durable before legacy embedded catalogs are removed.
+            await this.waitForPendingPersistence()
             this.catalogMigrationPending = false
             try { this.saveToDisk() } catch (error) { this.catalogMigrationPending = true; throw error }
           }
@@ -2403,11 +2422,41 @@ export class DeviceRegistry {
     return operation
   }
 
-  /** Wait for the final asynchronous catalog write during Host shutdown. */
+  /** Coalesce steady-state read/UI/port updates off the Node event loop. */
+  private persistStateAsync(): Promise<void> {
+    if (!this.stateDirty) return this.stateWrite ?? Promise.resolve()
+    this.stateWriteAgain = true
+    if (this.stateWrite !== undefined) return this.stateWrite
+    const operation = (async () => {
+      try {
+        do {
+          this.stateWriteAgain = false
+          this.stateDirty = false
+          await this.storage.writeAsync(this.buildPersistedDocument())
+        } while (this.stateWriteAgain || this.stateDirty)
+      } catch (error) {
+        this.stateDirty = true
+        throw error
+      } finally {
+        this.stateWrite = undefined
+      }
+    })()
+    this.stateWrite = operation
+    return operation
+  }
+
+  /** Wait for the final asynchronous state and catalog writes during Host shutdown. */
   async flushPersistence(): Promise<void> {
+    if (this.persistTimer !== undefined) {
+      clearTimeout(this.persistTimer)
+      this.persistTimer = undefined
+    }
     if (this.catalogPersistTimer !== undefined) {
       clearTimeout(this.catalogPersistTimer)
       this.catalogPersistTimer = undefined
+    }
+    if (this.stateDirty || this.stateWrite !== undefined) {
+      await this.persistStateAsync()
     }
     this.flushCatalogCache()
     await this.persistCatalogsAsync()
@@ -2423,9 +2472,9 @@ export class DeviceRegistry {
     }
   }
 
-  saveToDisk(): void {
+  private buildPersistedDocument(): PersistedRegistryDocument {
     const readEntries = this.readTracker.entriesSnapshot()
-    const doc: PersistedRegistryDocument = {
+    return {
       version: 1,
       devices: [...this.configs.values()],
       ui: this.uiPreferences,
@@ -2443,7 +2492,16 @@ export class DeviceRegistry {
         ? { workspaceViews: { version: 1, scopes: Object.fromEntries(this.uiScopes) } }
         : {}),
     }
-    this.storage.write(doc)
+  }
+
+  saveToDisk(): void {
+    if (this.persistTimer !== undefined) {
+      clearTimeout(this.persistTimer)
+      this.persistTimer = undefined
+    }
+    this.stateDirty = false
+    this.stateWriteAgain = false
+    this.storage.write(this.buildPersistedDocument())
   }
 }
 

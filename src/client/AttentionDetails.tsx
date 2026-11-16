@@ -161,6 +161,67 @@ export function attentionSegments(
   ))
 }
 
+interface OpenAttentionMenuGroupProps {
+  readonly label: string
+  readonly ids: readonly string[]
+  readonly snapshot: MultiDeviceSnapshot
+  readonly deviceName: string
+  readonly t: (key: MultiDeviceLocaleKey) => string
+  readonly unavailableText: string
+  readonly onOpenRow: (row: AttentionSessionRow) => Promise<void>
+}
+
+function OpenAttentionMenuGroup({
+  label,
+  ids,
+  snapshot,
+  deviceName,
+  t,
+  unavailableText,
+  onOpenRow,
+}: OpenAttentionMenuGroupProps): React.ReactElement {
+  // Subscribed only while a capsule menu is open so closed tab badges pay zero
+  // per-session-list-mutation React subscription or row-projection cost.
+  const sessionList = useSessionListSnapshot()
+  const titleFor = (sessionId: string): string | undefined =>
+    resolveAttentionTitle(sessionId, sessionList?.byId[sessionId], snapshot.sessionTitles)
+
+  const renderRows = (): React.ReactNode => {
+    if (ids.length === 0) {
+      // Legacy Host: the projection knew a count but never sent member IDs.
+      return <div className="dsh-md-attention-note">{unavailableText}</div>
+    }
+    const rows = resolveAttentionSessions(ids, snapshot, {
+      localDeviceName: t('nativeLocalTab'),
+      owningDeviceName: deviceName,
+      title: titleFor,
+    })
+    return rows.map(row => {
+      const meta = [row.cwd, row.deviceName]
+        .filter((part): part is string => part !== undefined && part !== '')
+      const minimal = row.title === ''
+      return (
+        <MenuItemButton
+          key={row.sessionId}
+          icon={row.deviceId === LOCAL_DEVICE_ID
+            ? <IconGlobeOutlineRegular size={12} />
+            : <StateDot state={deviceStateToDotState(deviceStateOf(snapshot, row.deviceId))} size={8} />}
+          onSelect={() => { void onOpenRow(row) }}
+        >
+          <span className="dsh-md-attention-row" title={`${row.sessionId}\n${t('attentionOpenHint')}`}>
+            <span className={`dsh-md-attention-row-title${minimal ? ' isId' : ''}`}>
+              {minimal ? row.rawSessionId : row.title}
+            </span>
+            {meta.length > 0 && <span className="dsh-md-attention-row-meta">{meta.join(' · ')}</span>}
+          </span>
+        </MenuItemButton>
+      )
+    })
+  }
+
+  return <MenuGroup label={label}>{renderRows()}</MenuGroup>
+}
+
 export function AttentionDetails({
   view,
   deviceName,
@@ -171,19 +232,12 @@ export function AttentionDetails({
   const state = useMultiDeviceState()
   const snapshot = state.snapshot
   const words = attentionLabels(t)
-  // One subscription for the whole menu: hooks cannot run per row, and the tab
-  // strip would otherwise re-subscribe for every device it renders.
-  const sessionList = useSessionListSnapshot()
   const [openCategory, setOpenCategory] = useState<AttentionCategory | null>(null)
   const [failure, setFailure] = useState<{ seq: number; message: string } | null>(null)
 
   const fresh = view?.fresh ?? fallback?.fresh ?? false
   const segments = attentionSegments(view, fallback)
   const stale = !fresh
-
-  /** Local store first, then the Host's projection for remote conversations. */
-  const titleFor = (sessionId: string): string | undefined =>
-    resolveAttentionTitle(sessionId, sessionList?.byId[sessionId], snapshot.sessionTitles)
 
   /** Never wrap the strip: past two digits the count collapses to `99+`. */
   const chipCount = (count: number): string => (count > 99 ? '99+' : String(count))
@@ -228,39 +282,6 @@ export function AttentionDetails({
     } catch (error) {
       fail(error instanceof Error ? error.message : String(error))
     }
-  }
-
-  const renderRows = (ids: readonly string[]): React.ReactNode => {
-    if (ids.length === 0) {
-      // Legacy Host: the projection knew a count but never sent member IDs.
-      return <div className="dsh-md-attention-note">{words.unavailable}</div>
-    }
-    const rows = resolveAttentionSessions(ids, snapshot, {
-      localDeviceName: t('nativeLocalTab'),
-      owningDeviceName: deviceName,
-      title: titleFor,
-    })
-    return rows.map(row => {
-      const meta = [row.cwd, row.deviceName]
-        .filter((part): part is string => part !== undefined && part !== '')
-      const minimal = row.title === ''
-      return (
-        <MenuItemButton
-          key={row.sessionId}
-          icon={row.deviceId === LOCAL_DEVICE_ID
-            ? <IconGlobeOutlineRegular size={12} />
-            : <StateDot state={deviceStateToDotState(deviceStateOf(snapshot, row.deviceId))} size={8} />}
-          onSelect={() => { void openRow(row) }}
-        >
-          <span className="dsh-md-attention-row" title={`${row.sessionId}\n${t('attentionOpenHint')}`}>
-            <span className={`dsh-md-attention-row-title${minimal ? ' isId' : ''}`}>
-              {minimal ? row.rawSessionId : row.title}
-            </span>
-            {meta.length > 0 && <span className="dsh-md-attention-row-meta">{meta.join(' · ')}</span>}
-          </span>
-        </MenuItemButton>
-      )
-    })
   }
 
   const capsuleLabel = stale
@@ -321,7 +342,17 @@ export function AttentionDetails({
                 dense={nativeBar}
                 listClassName="dsh-md-attention-menu"
               >
-                <MenuGroup label={label}>{renderRows(segment.ids)}</MenuGroup>
+                {open ? (
+                  <OpenAttentionMenuGroup
+                    label={label}
+                    ids={segment.ids}
+                    snapshot={snapshot}
+                    deviceName={deviceName}
+                    t={t}
+                    unavailableText={words.unavailable}
+                    onOpenRow={openRow}
+                  />
+                ) : null}
               </Menu>
             )
           })}

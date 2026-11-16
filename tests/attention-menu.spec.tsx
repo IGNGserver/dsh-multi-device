@@ -28,6 +28,7 @@ const mock = vi.hoisted(() => ({
   setActiveSession: vi.fn(async () => {}),
   selectNativeDevice: vi.fn(async () => ({ ok: true })),
   selectLocalNativeTab: vi.fn(),
+  useSessionListSnapshot: vi.fn(() => mock.sessionList),
 }))
 
 vi.mock('../src/client/state.ts', () => ({
@@ -43,7 +44,7 @@ vi.mock('../src/client/state.ts', () => ({
 
 vi.mock('../src/client/clientServices.ts', () => ({
   getClientServices: () => ({ uiWorkspace: { openSession: mock.openSession } }),
-  useSessionListSnapshot: () => mock.sessionList,
+  useSessionListSnapshot: () => mock.useSessionListSnapshot(),
 }))
 
 const t = (key: MultiDeviceLocaleKey): string => (zh as Record<string, string>)[key] ?? key
@@ -236,5 +237,12 @@ describe('attention menu', () => {
     })
     await openMenu(renderer)
     expect(markupOf(renderer)).toContain('旧版 Host 未提供成员 ID')
+  })
+
+  it('does not subscribe to useSessionListSnapshot while the capsule menu is closed', async () => {
+    const renderer = render()
+    expect(mock.useSessionListSnapshot).not.toHaveBeenCalled()
+    await openMenu(renderer)
+    expect(mock.useSessionListSnapshot).toHaveBeenCalled()
   })
 })
