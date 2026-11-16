@@ -18,6 +18,9 @@ export declare function collectAttentionSessionTitles(attention: Readonly<Record
  * Say so, instead of pointing the user at the private key.
  */
 export declare function describeProbeFailure(status: number | undefined, input: UpsertDeviceInput): string;
+export declare const ACTIVE_RECONCILE_BASE_MS = 45000;
+export declare const IDLE_RECONCILE_BASE_MS = 180000;
+export declare function computeAdaptiveReconcileDelayMs(hasActiveWork: boolean, randomFn?: () => number): number;
 export interface LocalHostProvider {
     /** Full persisted + live identities. Undefined means unavailable, never an authoritative empty list. */
     readonly localSessionCatalog?: (signal?: AbortSignal) => Promise<readonly SessionAttentionFact[] | undefined>;
@@ -95,6 +98,8 @@ export declare class DeviceRegistry {
     private readonly hostEpoch;
     /** Low-frequency catalog refresh that heals lost running-status frames. */
     private runningReconcileTimer;
+    private readonly nextDeviceReconcileAt;
+    private nextLocalReconcileAt;
     private uiPreferences;
     private catalogPersistTimer;
     private persistTimer;
@@ -289,7 +294,13 @@ export declare class DeviceRegistry {
      * (and prunes read state for Sessions that disappeared).
      */
     private startRunningReconcile;
-    private refreshConnectedCatalogs;
+    /**
+     * Evaluate adaptive per-device reconcile deadlines:
+     * - Active / stale / non-realtime devices reconcile every `45s ± 15%`.
+     * - Quiet live 0.2 devices (`catalogFresh` & 0 running sessions) back off to `180s ± 15%`.
+     * - If an idle device starts running work, its distant deadline immediately tightens back to active cadence.
+     */
+    tickConnectedCatalogReconcile(now?: number, randomFn?: () => number): void;
     /** Observe one remote event before it is forwarded to the local mirror. */
     private observeRemoteFrame;
     /**

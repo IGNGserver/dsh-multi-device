@@ -201,14 +201,26 @@ function sanitizeKeepAliveIdleMinutes(value: unknown, fallback = 30): number {
 }
 
 /**
- * How often a connected device re-reads `session/list`.
- *
- * `api-session/status` is a single frame: one lost across a stream gap would
- * leave a finished Session "running" forever. The list is the authoritative
- * repair path (`reconcileSessionSummaries` → `reconcileRunningForDevice`), so a
- * low-frequency refresh bounds how long a stale count can survive.
+ * Adaptive per-device `session/list` reconcile cadence:
+ * - Active devices (running sessions, non-realtime 0.1, or stale catalog): `45s ± 15%`.
+ * - Quiet live 0.2 devices (healthy `$events` stream, fresh catalog, 0 running sessions): `180s ± 15%`.
+ * Per-device jitter desynchronizes fleet-wide RPC traffic and immediately tightens back to active cadence
+ * when a session starts running.
  */
-const RUNNING_RECONCILE_INTERVAL_MS = 45_000
+const RECONCILE_TICK_INTERVAL_MS = 5_000
+export const ACTIVE_RECONCILE_BASE_MS = 45_000
+export const IDLE_RECONCILE_BASE_MS = 180_000
+const RECONCILE_JITTER_RATIO = 0.15
+
+export function computeAdaptiveReconcileDelayMs(
+  hasActiveWork: boolean,
+  randomFn: () => number = Math.random,
+): number {
+  const base = hasActiveWork ? ACTIVE_RECONCILE_BASE_MS : IDLE_RECONCILE_BASE_MS
+  const clamped = Math.max(0, Math.min(1, randomFn()))
+  const factor = 1 - RECONCILE_JITTER_RATIO + clamped * (2 * RECONCILE_JITTER_RATIO)
+  return Math.round(base * factor)
+}
 
 /** Structural equality for a bounded workspace fold map. */
 function sameGroupState(
@@ -344,6 +356,8 @@ export class DeviceRegistry {
   private readonly hostEpoch: string = randomUUID()
   /** Low-frequency catalog refresh that heals lost running-status frames. */
   private runningReconcileTimer: ReturnType<typeof setInterval> | undefined
+  private readonly nextDeviceReconcileAt = new Map<DeviceId, number>()
+  private nextLocalReconcileAt = 0
   private uiPreferences: MultiDeviceUiPreferences = { ...DEFAULT_UI_PREFERENCES }
   private catalogPersistTimer: ReturnType<typeof setTimeout> | undefined
   private persistTimer: ReturnType<typeof setTimeout> | undefined
@@ -860,21 +874,61 @@ export class DeviceRegistry {
    */
   private startRunningReconcile(): void {
     if (this.runningReconcileTimer !== undefined) return
+    this.nextLocalReconcileAt = Date.now() + ACTIVE_RECONCILE_BASE_MS
     const timer = setInterval(() => {
-      this.refreshConnectedCatalogs()
-    }, RUNNING_RECONCILE_INTERVAL_MS)
+      this.tickConnectedCatalogReconcile()
+    }, RECONCILE_TICK_INTERVAL_MS)
     timer.unref?.()
     this.runningReconcileTimer = timer
   }
 
-  private refreshConnectedCatalogs(): void {
+  /**
+   * Evaluate adaptive per-device reconcile deadlines:
+   * - Active / stale / non-realtime devices reconcile every `45s ± 15%`.
+   * - Quiet live 0.2 devices (`catalogFresh` & 0 running sessions) back off to `180s ± 15%`.
+   * - If an idle device starts running work, its distant deadline immediately tightens back to active cadence.
+   */
+  tickConnectedCatalogReconcile(
+    now = Date.now(),
+    randomFn: () => number = Math.random,
+  ): void {
     if (this.disposed) return
-    void this.refreshLocalCatalog()
-    for (const client of this.clients.values()) {
-      if (!client.isConnected()) continue
-      void client.refreshSessionCatalog(this.lifetime.signal).catch(() => {
-        // The next tick retries; client owns single-flight and generation fences.
-      })
+    if (this.nextLocalReconcileAt === 0) {
+      this.nextLocalReconcileAt = now + ACTIVE_RECONCILE_BASE_MS
+    } else if (now >= this.nextLocalReconcileAt) {
+      this.nextLocalReconcileAt = now + ACTIVE_RECONCILE_BASE_MS
+      void this.refreshLocalCatalog()
+    }
+
+    for (const [deviceId, client] of this.clients) {
+      if (!client.isConnected()) {
+        this.nextDeviceReconcileAt.delete(deviceId)
+        continue
+      }
+      const view = client.toView()
+      const hasActiveWork =
+        !client.catalogFresh ||
+        view.realtime !== true ||
+        client.sessionSummaries().some(summary => summary.running)
+
+      const scheduledAt = this.nextDeviceReconcileAt.get(deviceId)
+      if (scheduledAt === undefined) {
+        this.nextDeviceReconcileAt.set(deviceId, now + computeAdaptiveReconcileDelayMs(hasActiveWork, randomFn))
+        continue
+      }
+
+      const maxActiveLeadMs = Math.round(ACTIVE_RECONCILE_BASE_MS * (1 + RECONCILE_JITTER_RATIO))
+      if (hasActiveWork && scheduledAt - now > maxActiveLeadMs) {
+        this.nextDeviceReconcileAt.set(deviceId, now + computeAdaptiveReconcileDelayMs(true, randomFn))
+        continue
+      }
+
+      if (now >= scheduledAt) {
+        this.nextDeviceReconcileAt.set(deviceId, now + computeAdaptiveReconcileDelayMs(hasActiveWork, randomFn))
+        void client.refreshSessionCatalog(this.lifetime.signal).catch(() => {
+          // The next tick retries; client owns single-flight and generation fences.
+        })
+      }
     }
   }
 
@@ -1540,6 +1594,7 @@ export class DeviceRegistry {
       clearInterval(this.runningReconcileTimer)
       this.runningReconcileTimer = undefined
     }
+    this.nextDeviceReconcileAt.clear()
     for (const timer of this.sharedReadStatePushTimers.values()) clearTimeout(timer)
     this.sharedReadStatePushTimers.clear()
     this.nativeProxyManager.dispose()
@@ -1689,6 +1744,7 @@ export class DeviceRegistry {
   private clearDeviceRuntimeTransientState(deviceId: DeviceId): void {
     this.authStates.delete(deviceId)
     this.sessionListErrors.delete(deviceId)
+    this.nextDeviceReconcileAt.delete(deviceId)
     for (const [clientId, selection] of this.activeSessions) {
       const owner = decodeSessionId(selection.sessionId ?? '')
       if (owner.isRemote && owner.deviceId === deviceId) this.activeSessions.set(clientId, { seq: selection.seq })

@@ -59,6 +59,8 @@ export interface NativeProxyHooks {
     readonly getReadCompletions?: (deviceId: DeviceId) => Readonly<Record<string, string>> | undefined;
     /** Accept a read for precisely this completion (omitted token is legacy). */
     readonly onBridgeRead?: (deviceId: DeviceId, sessionId: string, expectedCompletionId?: string) => void | NativeBridgeReadResult;
+    /** Optional `/__md/bridge` WebSocket ping sweep interval in ms (defaults to 25_000). */
+    readonly bridgePingIntervalMs?: number;
 }
 /** Backwards-compatible alias for callers that only cared about auth hooks. */
 export type NativeProxyAuthHooks = NativeProxyHooks;
@@ -89,8 +91,10 @@ export declare class NativeDeviceProxy {
     private authRecoveryInFlight;
     private readonly token;
     private bridgeServer;
+    private bridgePingTimer;
     private readonly cookieName;
     private readonly bridgeClients;
+    private readonly aliveBridgeClients;
     private readonly clientStates;
     private readonly bridgeVisibility;
     private readonly readyBridgeClients;
@@ -115,6 +119,7 @@ export declare class NativeDeviceProxy {
     private isAllowedCallerOrigin;
     port(): number | undefined;
     start(preferredPort?: number): Promise<void>;
+    private sweepBridgeLiveness;
     stop(): void;
     /** Keep recent disconnected panes/pending navigation without evicting live bridges. */
     private trimClientStates;

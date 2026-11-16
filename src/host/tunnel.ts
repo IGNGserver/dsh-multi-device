@@ -100,6 +100,77 @@ const BACKOFF_MAX_MS = 15_000
 const READY_TIMEOUT_MS = 15_000
 const KEEPALIVE_INTERVAL_SEC = 15
 
+export const MAX_CONCURRENT_SSH_HANDSHAKES = 4
+
+let maxConcurrentSshHandshakes = MAX_CONCURRENT_SSH_HANDSHAKES
+let activeSshHandshakes = 0
+const sshHandshakeQueue: Array<{ grant: () => void; cancel: () => void }> = []
+
+/** Test seam to override or reset (`null`) the global SSH handshake concurrency ceiling. */
+export function setMaxConcurrentSshHandshakes(limit: number | null): void {
+  maxConcurrentSshHandshakes =
+    limit !== null && Number.isInteger(limit) && limit >= 1 ? limit : MAX_CONCURRENT_SSH_HANDSHAKES
+  while (activeSshHandshakes < maxConcurrentSshHandshakes && sshHandshakeQueue.length > 0) {
+    const next = sshHandshakeQueue.shift()!
+    activeSshHandshakes += 1
+    next.grant()
+  }
+}
+
+function makeSshHandshakeRelease(): () => void {
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    activeSshHandshakes = Math.max(0, activeSshHandshakes - 1)
+    while (activeSshHandshakes < maxConcurrentSshHandshakes && sshHandshakeQueue.length > 0) {
+      const next = sshHandshakeQueue.shift()!
+      activeSshHandshakes += 1
+      next.grant()
+    }
+  }
+}
+
+function tryAcquireSshHandshakeSlotSync(signal?: AbortSignal): (() => void) | undefined {
+  if (signal?.aborted === true) return undefined
+  if (activeSshHandshakes >= maxConcurrentSshHandshakes) return undefined
+  activeSshHandshakes += 1
+  return makeSshHandshakeRelease()
+}
+
+/**
+ * Acquire a bounded global SSH handshake slot (`MAX_CONCURRENT_SSH_HANDSHAKES = 4`)
+ * so waking 10+ SSH devices simultaneously never spikes local CPU/FD usage.
+ * Resolves to an idempotent release callback, or `undefined` if `signal` aborts while queued.
+ */
+export function acquireSshHandshakeSlot(signal?: AbortSignal): Promise<(() => void) | undefined> {
+  if (signal?.aborted === true) return Promise.resolve(undefined)
+
+  const immediate = tryAcquireSshHandshakeSlotSync(signal)
+  if (immediate !== undefined) return Promise.resolve(immediate)
+
+  return new Promise<(() => void) | undefined>((resolve) => {
+    const entry = {
+      grant: () => {
+        signal?.removeEventListener('abort', onAbort)
+        resolve(makeSshHandshakeRelease())
+      },
+      cancel: () => {
+        signal?.removeEventListener('abort', onAbort)
+        resolve(undefined)
+      },
+    }
+    const onAbort = (): void => {
+      const idx = sshHandshakeQueue.indexOf(entry)
+      if (idx !== -1) sshHandshakeQueue.splice(idx, 1)
+      entry.cancel()
+    }
+    sshHandshakeQueue.push(entry)
+    signal?.addEventListener('abort', onAbort, { once: true })
+    if (signal?.aborted === true) onAbort()
+  })
+}
+
 /** Allocate an ephemeral free TCP port on `127.0.0.1`. */
 export async function allocateLoopbackPort(): Promise<number> {
   return new Promise<number>((resolve, reject) => {
@@ -167,6 +238,11 @@ export function buildSystemSshArgs(
     '-o', 'ConnectTimeout=10',
     '-o', strictHostKeyCheckingArg(),
     ...sshControlMultiplexArgs(),
+    ...(transport.compress === true
+      ? ['-o', 'Compression=yes']
+      : transport.compress === false
+        ? ['-o', 'Compression=no']
+        : []),
     '-L', `127.0.0.1:${localPort}:${forward.host}:${forward.port}`,
   ]
 
@@ -208,14 +284,25 @@ export async function execSshCommand(
   const resolved = resolveSshConfigForTransport(transport)
   const useSsh2 = transport.engine === 'ssh2'
 
-  if (useSsh2) {
-    if (resolved.proxyJump !== undefined || resolved.proxyCommand !== undefined) {
-      return {
-        ok: false,
-        error: 'ssh2 engine cannot honor ProxyJump/ProxyCommand; use system-ssh with an SSH agent',
-      }
+  if (useSsh2 && (resolved.proxyJump !== undefined || resolved.proxyCommand !== undefined)) {
+    return {
+      ok: false,
+      error: 'ssh2 engine cannot honor ProxyJump/ProxyCommand; use system-ssh with an SSH agent',
     }
-    return execViaSsh2(transport, resolved, command, timeoutMs, signal)
+  }
+
+  const releaseSlot = tryAcquireSshHandshakeSlotSync(signal) ?? (await acquireSshHandshakeSlot(signal))
+  if (releaseSlot === undefined || Boolean(signal?.aborted)) {
+    releaseSlot?.()
+    return { ok: false, error: 'ssh command aborted' }
+  }
+
+  if (useSsh2) {
+    try {
+      return await execViaSsh2(transport, resolved, command, timeoutMs, signal)
+    } finally {
+      releaseSlot()
+    }
   }
 
   const parsedSpec = parseSshTargetSpec(transport.host)
@@ -225,6 +312,11 @@ export async function execSshCommand(
     '-o', 'ConnectTimeout=6',
     '-o', strictHostKeyCheckingArg(),
     ...sshControlMultiplexArgs(),
+    ...(transport.compress === true
+      ? ['-o', 'Compression=yes']
+      : transport.compress === false
+        ? ['-o', 'Compression=no']
+        : []),
   ]
   const explicitPort = transport.port ?? parsedSpec.port
   if (explicitPort !== undefined) args.push('-p', String(explicitPort))
@@ -259,6 +351,7 @@ export async function execSshCommand(
       clearTimeout(killTimer)
       if (exitDrainTimer !== undefined) clearTimeout(exitDrainTimer)
       signal?.removeEventListener('abort', onAbort)
+      releaseSlot()
       resolve(res)
     }
     const completeWithCode = (code: number | null): void => {
@@ -404,6 +497,7 @@ async function execViaSsh2(
       ...(privateKey !== undefined ? { privateKey } : {}),
       ...(transport.passphrase !== undefined ? { passphrase: transport.passphrase } : {}),
       ...(process.env.SSH_AUTH_SOCK !== undefined ? { agent: process.env.SSH_AUTH_SOCK } : {}),
+      ...(transport.compress !== undefined ? { compress: transport.compress } : {}),
       hostVerifier: (key: Buffer) => verifySsh2HostKey(resolved.hostName, resolved.port, key),
       readyTimeout: timeoutMs,
     })
@@ -448,11 +542,17 @@ export class SshTunnel {
   /** Monotonic generation so a late `close`/`fail` cannot tear down a newer tunnel. */
   private generation = 0
   private openInFlight = false
+  private openAbort: AbortController | undefined
 
   constructor(
-    private readonly transport: SshTransportConfig,
+    private transport: SshTransportConfig,
     private readonly notify: () => void,
   ) {}
+
+  /** Update transport parameters (e.g. adaptive compression) for future tunnel handshakes. */
+  updateTransport(next: SshTransportConfig): void {
+    this.transport = next
+  }
 
   baseUrl(): string | undefined {
     return this.localPort === undefined || this.state !== 'up'
@@ -469,6 +569,28 @@ export class SshTunnel {
       ...(this.lastError !== undefined ? { error: this.lastError } : {}),
       attempt: this.attempt,
     }
+  }
+
+  /** Fast local liveness check of the tunnel child process and loopback port listener. */
+  async verifyReachable(timeoutMs = 600): Promise<boolean> {
+    if (this.stopped || this.state !== 'up' || this.localPort === undefined) return false
+    if (this.sshProc !== undefined && this.sshProc.exitCode !== null) return false
+    return tryTcpConnect(this.localPort, timeoutMs)
+  }
+
+  /** Tear down a hung/dead tunnel immediately and open a fresh forward without waiting on retry backoff. */
+  async restartNow(): Promise<void> {
+    if (this.stopped) return
+    if (this.retryTimer !== undefined) {
+      clearTimeout(this.retryTimer)
+      this.retryTimer = undefined
+    }
+    this.generation += 1
+    this.openInFlight = false
+    this.teardown()
+    this.attempt = 0
+    this.state = 'connecting'
+    await this.open()
   }
 
   async start(): Promise<void> {
@@ -500,6 +622,9 @@ export class SshTunnel {
   }
 
   private teardown(): void {
+    this.openAbort?.abort()
+    this.openAbort = undefined
+
     for (const socket of this.sockets) socket.destroy()
     this.sockets.clear()
 
@@ -556,7 +681,9 @@ export class SshTunnel {
     try {
       await this.openOnce(generation)
     } finally {
-      this.openInFlight = false
+      if (generation === this.generation) {
+        this.openInFlight = false
+      }
     }
   }
 
@@ -574,13 +701,7 @@ export class SshTunnel {
     }
 
     const preferSsh2 = this.transport.engine === 'ssh2'
-
-    if (!preferSsh2) {
-      await this.openWithSystemSsh(resolved, generation)
-      return
-    }
-
-    if (resolved.proxyJump !== undefined || resolved.proxyCommand !== undefined) {
+    if (preferSsh2 && (resolved.proxyJump !== undefined || resolved.proxyCommand !== undefined)) {
       this.fail(
         'ssh2 engine cannot honor ProxyJump/ProxyCommand; use system-ssh with an SSH agent',
         generation,
@@ -589,7 +710,23 @@ export class SshTunnel {
       return
     }
 
-    await this.openWithSsh2(resolved, forward, generation)
+    const openController = new AbortController()
+    this.openAbort = openController
+    const releaseSlot = await acquireSshHandshakeSlot(openController.signal)
+    if (releaseSlot === undefined || this.stopped || generation !== this.generation) {
+      releaseSlot?.()
+      return
+    }
+
+    try {
+      if (!preferSsh2) {
+        await this.openWithSystemSsh(resolved, generation)
+        return
+      }
+      await this.openWithSsh2(resolved, forward, generation)
+    } finally {
+      releaseSlot()
+    }
   }
 
   private async openWithSystemSsh(resolved: ResolvedSshParameters, generation: number): Promise<boolean> {
@@ -735,6 +872,7 @@ export class SshTunnel {
         ...(privateKey !== undefined ? { privateKey } : {}),
         ...(this.transport.passphrase !== undefined ? { passphrase: this.transport.passphrase } : {}),
         ...(process.env.SSH_AUTH_SOCK !== undefined ? { agent: process.env.SSH_AUTH_SOCK } : {}),
+        ...(this.transport.compress !== undefined ? { compress: this.transport.compress } : {}),
         hostVerifier: (key: Buffer, verify?: (valid: boolean) => void) => {
           if (typeof verify === 'function') {
             void verifySsh2HostKeyAsync(resolved.hostName, resolved.port, key).then(

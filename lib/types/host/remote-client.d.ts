@@ -1,4 +1,4 @@
-import { type DeviceAuthState, type DeviceCatalogCache, type DeviceConfig, type DeviceConnectionState, type DeviceId, type DeviceView, type PendingInteractionKind } from '../contract.ts';
+import { type DeviceAuthState, type DeviceCatalogCache, type DeviceConfig, type DeviceConnectionState, type DeviceId, type DeviceTransportConfig, type DeviceView, type PendingInteractionKind } from '../contract.ts';
 import { DeviceAuthManager } from './auth.ts';
 /** Map a remote waterfall event name (and payload) to the pending kind shown in the UI. */
 export declare function pendingInteractionKind(event: string, request?: Record<string, unknown>): PendingInteractionKind | undefined;
@@ -82,9 +82,15 @@ export interface RemoteDeviceCallbacks {
     /** False when no local consumer subscribes to control projections; trims non-hint projection memory. */
     readonly hasControlProjectionSubscribers?: () => boolean;
 }
+export declare const ADAPTIVE_SSH_COMPRESS_RTT_MS = 60;
+export interface RemoteClientOptions {
+    readonly muxPingIntervalMs?: number;
+    readonly muxPongTimeoutMs?: number;
+}
 export declare class RemoteDeviceClient {
     private readonly authManager;
     private readonly callbacks;
+    private readonly options;
     private config;
     private tunnel;
     private state;
@@ -122,9 +128,14 @@ export declare class RemoteDeviceClient {
     private iterationAbort;
     private verified02TargetKey;
     private verified02Version;
-    constructor(config: DeviceConfig, authManager: DeviceAuthManager, callbacks: RemoteDeviceCallbacks);
+    private adaptiveSshCompress;
+    constructor(config: DeviceConfig, authManager: DeviceAuthManager, callbacks: RemoteDeviceCallbacks, options?: RemoteClientOptions);
     get id(): DeviceId;
     get deviceConfig(): DeviceConfig;
+    /** Effective transport including adaptive RTT-based SSH compression when `compress` was omitted. */
+    effectiveTransportConfig(): DeviceTransportConfig;
+    private effectiveSshTransport;
+    private maybeEnableAdaptiveSshCompression;
     setNativeProxyUrl(url: string | undefined): void;
     effectiveBaseUrl(): string | undefined;
     targetSummary(): string;

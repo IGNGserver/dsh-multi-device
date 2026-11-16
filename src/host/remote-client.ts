@@ -24,6 +24,7 @@ import {
   type DeviceConfig,
   type DeviceConnectionState,
   type DeviceId,
+  type DeviceTransportConfig,
   type DeviceView,
   encodeRemoteEventId,
   encodeRemoteSessionId,
@@ -31,6 +32,7 @@ import {
   isNamespacedSessionId,
   type PendingInteractionKind,
   type RemoteProtocolVersion,
+  type SshTransportConfig,
 } from '../contract.ts'
 import { DeviceCatalog } from './device-catalog.ts'
 import { DeviceAuthManager } from './auth.ts'
@@ -165,6 +167,14 @@ function isConnectedState(state: DeviceConnectionState): boolean {
 const BACKOFF_BASE_MS = 600
 const BACKOFF_MAX_MS = 12_000
 const MAX_MUX_PAYLOAD_BYTES = 16 * 1024 * 1024
+const DEFAULT_MUX_PING_INTERVAL_MS = 15_000
+const DEFAULT_MUX_PONG_TIMEOUT_MS = 10_000
+export const ADAPTIVE_SSH_COMPRESS_RTT_MS = 60
+
+export interface RemoteClientOptions {
+  readonly muxPingIntervalMs?: number
+  readonly muxPongTimeoutMs?: number
+}
 
 type RawRpcResult =
   | { ok: true; value: unknown; httpStatus: number }
@@ -217,11 +227,13 @@ export class RemoteDeviceClient {
   private iterationAbort: AbortController | undefined
   private verified02TargetKey: string | undefined
   private verified02Version: string | undefined
+  private adaptiveSshCompress = false
 
   constructor(
     config: DeviceConfig,
     private readonly authManager: DeviceAuthManager,
     private readonly callbacks: RemoteDeviceCallbacks,
+    private readonly options: RemoteClientOptions = {},
   ) {
     this.config = config
     if (!config.enabled) {
@@ -235,6 +247,27 @@ export class RemoteDeviceClient {
 
   get deviceConfig(): DeviceConfig {
     return this.config
+  }
+
+  /** Effective transport including adaptive RTT-based SSH compression when `compress` was omitted. */
+  effectiveTransportConfig(): DeviceTransportConfig {
+    if (this.config.transport.kind !== 'ssh') return this.config.transport
+    return this.effectiveSshTransport(this.config.transport)
+  }
+
+  private effectiveSshTransport(transport: SshTransportConfig): SshTransportConfig {
+    if (transport.compress !== undefined) return transport
+    if (!this.adaptiveSshCompress) return transport
+    return { ...transport, compress: true }
+  }
+
+  private maybeEnableAdaptiveSshCompression(): void {
+    if (this.config.transport.kind !== 'ssh') return
+    if (this.config.transport.compress !== undefined || this.adaptiveSshCompress) return
+    if (this.latencyMs !== undefined && this.latencyMs >= ADAPTIVE_SSH_COMPRESS_RTT_MS) {
+      this.adaptiveSshCompress = true
+      this.tunnel?.updateTransport(this.effectiveSshTransport(this.config.transport))
+    }
   }
 
   setNativeProxyUrl(url: string | undefined): void {
@@ -291,6 +324,7 @@ export class RemoteDeviceClient {
                 : {}),
               bootstrapFromRemoteCredentials: this.config.transport.bootstrapFromRemoteCredentials === true,
               ...(this.config.transport.engine !== undefined ? { engine: this.config.transport.engine } : {}),
+              ...(this.config.transport.compress !== undefined ? { compress: this.config.transport.compress } : {}),
             },
           }
         : {}),
@@ -581,6 +615,7 @@ export class RemoteDeviceClient {
     if (this.currentTargetKey() !== previousTarget) {
       this.verified02TargetKey = undefined
       this.verified02Version = undefined
+      this.adaptiveSshCompress = false
     }
     if (seed02 !== undefined) {
       this.seedVerifiedProtocol02(seed02.remoteDshVersion)
@@ -817,6 +852,7 @@ export class RemoteDeviceClient {
         const probed = await this.handshakeAndLoadInitial(baseUrl, signal, epoch)
         if (signal.aborted || !this.catalog.isCurrent(epoch)) return
         this.latencyMs = Date.now() - t0
+        this.maybeEnableAdaptiveSshCompression()
         this.protocolVersion = probed.protocolVersion
         this.realtime = probed.protocolVersion === '0.2'
         if (probed.remoteDshVersion !== undefined) {
@@ -871,11 +907,25 @@ export class RemoteDeviceClient {
     if (this.config.transport.kind === 'direct') {
       return this.config.transport.baseUrl.replace(/\/+$/, '')
     }
+    const effectiveTransport = this.effectiveSshTransport(this.config.transport)
     if (this.tunnel === undefined) {
-      this.tunnel = new SshTunnel(this.config.transport, () => {
+      this.tunnel = new SshTunnel(effectiveTransport, () => {
         this.callbacks.onStateChanged(this.id)
       })
       await this.tunnel.start()
+    } else {
+      this.tunnel.updateTransport?.(effectiveTransport)
+      const pingTimedOut = this.lastError?.includes('ping timed out') === true
+      const tunnelErrored = this.tunnel.status().state === 'error'
+      const tunnelUnreachable =
+        !pingTimedOut &&
+        !tunnelErrored &&
+        this.reconnectAttempt > 0 &&
+        typeof this.tunnel.verifyReachable === 'function' &&
+        !(await this.tunnel.verifyReachable(600))
+      if ((pingTimedOut || tunnelErrored || tunnelUnreachable) && !signal.aborted) {
+        await this.tunnel.restartNow?.()
+      }
     }
     const tunnel = this.tunnel
     const base = tunnel.baseUrl()
@@ -1029,7 +1079,28 @@ export class RemoteDeviceClient {
       onReady?.()
     }
 
+    let awaitingPongSince: number | undefined
+    let pongTimer: ReturnType<typeof setTimeout> | undefined
+    let pingTimedOut = false
+    const clearPendingPong = (): void => {
+      awaitingPongSince = undefined
+      if (pongTimer !== undefined) {
+        clearTimeout(pongTimer)
+        pongTimer = undefined
+      }
+    }
+
+    socket.on('pong', () => {
+      if (awaitingPongSince !== undefined) {
+        const rtt = Math.max(1, Date.now() - awaitingPongSince)
+        this.latencyMs = this.latencyMs === undefined ? rtt : Math.round(this.latencyMs * 0.7 + rtt * 0.3)
+        this.maybeEnableAdaptiveSshCompression()
+      }
+      clearPendingPong()
+    })
+
     socket.on('message', (data) => {
+      clearPendingPong()
       if (signal.aborted || !this.catalog.isCurrent(epoch)) return
       try {
         const frame = JSON.parse(data.toString('utf8')) as {
@@ -1048,15 +1119,31 @@ export class RemoteDeviceClient {
       }
     })
 
+    const pingIntervalMs = this.options.muxPingIntervalMs ?? DEFAULT_MUX_PING_INTERVAL_MS
+    const pongTimeoutMs = this.options.muxPongTimeoutMs ?? DEFAULT_MUX_PONG_TIMEOUT_MS
     const pingInterval = setInterval(() => {
-      if (socket.readyState === WebSocket.OPEN) {
-        try { socket.ping() } catch { /* ignore */ }
+      if (socket.readyState !== WebSocket.OPEN) return
+      if (awaitingPongSince === undefined) {
+        awaitingPongSince = Date.now()
+        pongTimer = setTimeout(() => {
+          pongTimer = undefined
+          if (awaitingPongSince !== undefined && socket.readyState === WebSocket.OPEN) {
+            pingTimedOut = true
+            try { socket.terminate() } catch { /* ignore */ }
+          }
+        }, pongTimeoutMs)
+        pongTimer.unref?.()
       }
-    }, 15_000)
+      try { socket.ping() } catch { /* ignore */ }
+    }, pingIntervalMs)
     pingInterval.unref?.()
 
     const closed = new Promise<void>((_, reject) => {
       socket.once('close', (code, reason) => {
+        if (pingTimedOut) {
+          reject(new Error('Remote stream WebSocket ping timed out'))
+          return
+        }
         reject(new Error(`Remote stream WebSocket closed (${String(code)} ${reason.toString()})`))
       })
       socket.once('error', (err) => reject(err))
@@ -1076,6 +1163,7 @@ export class RemoteDeviceClient {
       ])
     } finally {
       clearInterval(pingInterval)
+      clearPendingPong()
       clearTimeout(baselineTimer)
     }
   }
