@@ -50,6 +50,10 @@ export declare function parseSshConfigText(content: string, sourceFile?: string,
 export declare function loadSystemSshConfigBlocks(configFile?: string): ParsedSshConfigBlock[];
 /**
  * List concrete (non-wildcard) SSH host entries from `~/.ssh/config` for UI discovery/import.
+ *
+ * Steady-state calls on the default path return immediately from memory and
+ * refresh stale entries asynchronously on `fs/promises` so `registry.snapshot()`
+ * never blocks the Host event loop on disk metadata.
  */
 export declare function listSshConfigHosts(configFile?: string, home?: string): SshConfigHostEntry[];
 /**

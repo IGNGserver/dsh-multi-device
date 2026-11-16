@@ -117,6 +117,8 @@ export declare class RemoteDeviceClient {
     private running;
     private loopAbort;
     private iterationAbort;
+    private verified02TargetKey;
+    private verified02Version;
     constructor(config: DeviceConfig, authManager: DeviceAuthManager, callbacks: RemoteDeviceCallbacks);
     get id(): DeviceId;
     get deviceConfig(): DeviceConfig;
@@ -174,6 +176,7 @@ export declare class RemoteDeviceClient {
     private markDisconnected;
     /** Drop every pending waterfall and close its local card. */
     private clearPendingInteractions;
+    private currentTargetKey;
     updateConfig(next: DeviceConfig): void;
     reconnectNow(): void;
     /**

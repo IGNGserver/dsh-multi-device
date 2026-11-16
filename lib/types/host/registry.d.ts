@@ -110,6 +110,9 @@ export declare class DeviceRegistry {
     private readonly uiSyncFailures;
     private readonly storage;
     private readonly catalogStorage;
+    private stateWrite;
+    private stateWriteAgain;
+    private stateDirty;
     private catalogWrite;
     private catalogWriteAgain;
     private catalogDirty;
@@ -339,6 +342,8 @@ export declare class DeviceRegistry {
     /** Start/stop the 30s remote scan when the preference changes. */
     private syncSharedReadStateTimer;
     private schedulePersist;
+    /** Wait for any in-flight asynchronous state write before running a synchronous CAS mutation. */
+    waitForPendingPersistence(): Promise<void>;
     /**
      * Push the Client's selected remote Session into that device's framed page.
      *
@@ -463,9 +468,12 @@ export declare class DeviceRegistry {
     private scheduleCatalogPersist;
     /** Coalesce bursts into the newest document while one async write is active. */
     private persistCatalogsAsync;
-    /** Wait for the final asynchronous catalog write during Host shutdown. */
+    /** Coalesce steady-state read/UI/port updates off the Node event loop. */
+    private persistStateAsync;
+    /** Wait for the final asynchronous state and catalog writes during Host shutdown. */
     flushPersistence(): Promise<void>;
     /** Copy each client's current catalog into the durable map. */
     private flushCatalogCache;
+    private buildPersistedDocument;
     saveToDisk(): void;
 }

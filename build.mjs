@@ -28,6 +28,8 @@ await build({
   platform: 'node',
   target: ['node22'],
   sourcemap: true,
+  minifySyntax: true,
+  minifyWhitespace: true,
   external: dshExternal,
   logLevel: 'info',
 })
@@ -40,6 +42,8 @@ await build({
   platform: 'neutral',
   target: ['es2022'],
   sourcemap: true,
+  minifySyntax: true,
+  minifyWhitespace: true,
   external: dshExternal,
   logLevel: 'info',
 })
@@ -52,6 +56,8 @@ await build({
   platform: 'browser',
   target: ['es2022'],
   sourcemap: true,
+  minifySyntax: true,
+  minifyWhitespace: true,
   jsx: 'automatic',
   external: [
     ...dshExternal,

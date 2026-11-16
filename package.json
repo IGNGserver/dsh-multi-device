@@ -170,8 +170,7 @@
     }
   },
   "dependencies": {
-    "ws": "^8.21.0",
-    "zod": "^4.4.3"
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "@types/node": "^22.19.0",

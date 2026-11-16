@@ -72,7 +72,7 @@ export declare function buildRemoteCredentialsCatCommand(dshHome: string): strin
  * `%USERPROFILE%` before giving up. Failures include both attempts so the UI
  * can explain what actually went wrong.
  */
-export declare function readRemoteCredentials(transport: SshTransportConfig, dshHome: string): Promise<{
+export declare function readRemoteCredentials(transport: SshTransportConfig, dshHome: string, signal?: AbortSignal): Promise<{
     ok: true;
     text: string;
 } | {
@@ -122,7 +122,7 @@ export declare class DeviceAuthManager {
      * Ensure valid authentication credentials exist for `device` against `effectiveBaseUrl`.
      * Called before connecting or whenever a `401 Unauthorized` response is encountered.
      */
-    ensureAuthenticated(device: DeviceConfig, effectiveBaseUrl: string, forceRefresh?: boolean): Promise<{
+    ensureAuthenticated(device: DeviceConfig, effectiveBaseUrl: string, forceRefresh?: boolean, signal?: AbortSignal): Promise<{
         ok: true;
     } | {
         ok: false;

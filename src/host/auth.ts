@@ -241,15 +241,24 @@ export function buildRemoteCredentialsCatCommand(dshHome: string): string {
 export async function readRemoteCredentials(
   transport: SshTransportConfig,
   dshHome: string,
+  signal?: AbortSignal,
 ): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
   const posix = await execSshCommand(
     transport,
     buildRemoteCredentialsCatCommand(dshHome),
     6_000,
+    signal,
   )
-  const posixText = posix.ok ? posix.stdout : ''
-  if (parseSigningSecretFromCredentialsYaml(posixText) !== undefined) {
-    return { ok: true, text: posixText }
+  if (posix.ok) {
+    if (parseSigningSecretFromCredentialsYaml(posix.stdout) !== undefined) {
+      return { ok: true, text: posix.stdout }
+    }
+    // `cat ... 2>/dev/null || true` exits 0 only on a POSIX shell where `$HOME`
+    // was already checked; avoid spawning a slow PowerShell cold start on POSIX hosts.
+    return {
+      ok: false,
+      error: 'the file is empty or has no client-connection/browser-session secret',
+    }
   }
 
   const pathExpr = remoteCredentialsPathForPowerShell(dshHome)
@@ -258,16 +267,16 @@ export async function readRemoteCredentials(
     '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; ' +
     `$p=${pathExpr}; ` +
     'if (Test-Path -LiteralPath $p) { Get-Content -LiteralPath $p -Raw }"'
-  const windows = await execSshCommand(transport, windowsCommand, 8_000)
+  const windows = await execSshCommand(transport, windowsCommand, 8_000, signal)
   const windowsText = windows.ok ? windows.stdout : ''
   if (parseSigningSecretFromCredentialsYaml(windowsText) !== undefined) {
     return { ok: true, text: windowsText }
   }
 
   const details: string[] = []
-  if (!posix.ok) details.push(`POSIX: ${posix.error}`)
+  details.push(`POSIX: ${posix.error}`)
   if (!windows.ok) details.push(`PowerShell: ${windows.error}`)
-  if (details.length === 0) {
+  if (windows.ok) {
     details.push('the file is empty or has no client-connection/browser-session secret')
   }
   return { ok: false, error: details.join('; ') }
@@ -481,6 +490,7 @@ export class DeviceAuthManager {
     device: DeviceConfig,
     effectiveBaseUrl: string,
     forceRefresh = false,
+    signal?: AbortSignal,
   ): Promise<{ ok: true } | { ok: false; error: string }> {
     const authority = resolveRemoteAuthority(device)
     const cookieAuthority = resolveRemoteCookieAuthority(device)
@@ -524,7 +534,7 @@ export class DeviceAuthManager {
       device.transport.bootstrapFromRemoteCredentials === true
     ) {
       const dshHome = device.transport.remoteDshHome?.trim() || '~/.dsh'
-      const read = await readRemoteCredentials(device.transport, dshHome)
+      const read = await readRemoteCredentials(device.transport, dshHome, signal)
       if (!read.ok) {
         return {
           ok: false,

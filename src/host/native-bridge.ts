@@ -199,19 +199,40 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
     sendTitle(false);
   }
 
-  function installTitleReporter() {
-    if (titleObserver === null && typeof MutationObserver === 'function') {
-      try {
-        titleObserver = new MutationObserver(function () { reportTitle(); });
+  var observedTitleEl = null;
+
+  function bindTitleObserver() {
+    if (typeof MutationObserver !== 'function') return;
+    var titleEl = null;
+    try { titleEl = document.querySelector && document.querySelector('head > title'); } catch (error) { titleEl = null; }
+    if (titleObserver !== null) {
+      if (titleEl && observedTitleEl === titleEl) return;
+      try { titleObserver.disconnect(); } catch (error) {}
+    } else {
+      titleObserver = new MutationObserver(function () {
+        if (!observedTitleEl || !observedTitleEl.isConnected) bindTitleObserver();
+        reportTitle();
+      });
+    }
+    observedTitleEl = titleEl || null;
+    try {
+      if (titleEl) {
+        titleObserver.observe(titleEl, { childList: true, characterData: true, subtree: true });
+      } else {
         titleObserver.observe(document.head || document.documentElement, {
           subtree: true,
           childList: true,
           characterData: true
         });
-      } catch (error) {
-        titleObserver = null;
       }
+    } catch (error) {
+      titleObserver = null;
+      observedTitleEl = null;
     }
+  }
+
+  function installTitleReporter() {
+    bindTitleObserver();
     reportTitle();
   }
 
@@ -1032,32 +1053,68 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
     return true;
   }
 
+  var observedSidebar = null;
+  var observedFrame = null;
+
+  function bindSidebarObserverTargets() {
+    if (!sidebarObserver) return;
+    var sidebar = findSidebar();
+    var frame = sidebar ? sidebar.parentElement : null;
+    if (sidebar && observedSidebar === sidebar && observedFrame === frame) return;
+    try { sidebarObserver.disconnect(); } catch (error) {}
+    observedSidebar = sidebar || null;
+    observedFrame = frame || null;
+    try {
+      if (sidebar) {
+        sidebarObserver.observe(sidebar, {
+          subtree: false,
+          attributes: true,
+          attributeFilter: ['style', 'class']
+        });
+        if (frame) {
+          sidebarObserver.observe(frame, {
+            subtree: false,
+            childList: true,
+            attributes: true,
+            attributeFilter: ['style', 'class']
+          });
+        }
+      } else {
+        sidebarObserver.observe(document.body || document.documentElement, {
+          subtree: true,
+          childList: true
+        });
+      }
+    } catch (error) {}
+  }
+
   function startSidebarObserver() {
     if (sidebarObserver || typeof MutationObserver === 'undefined') return;
     // React can rewrite the inline grid template on resize/theme changes.
     // Reapply on an animation frame (never synchronously in the observer,
-    // which would loop on our own style writes). The observer only exists
-    // while the pane is embedded; native mode pays nothing.
+    // which would loop on our own style writes). Once the sidebar is found,
+    // observe only the sidebar and frame container so conversation streaming
+    // never triggers MutationObserver callbacks.
     var scheduleHide = function () {
       if (!embedded || sidebarScheduled) return;
       sidebarScheduled = true;
       var run = function () {
         sidebarScheduled = false;
-        try { applyEmbedded(); } catch (error) {}
+        try {
+          applyEmbedded();
+          if (!observedSidebar || !observedSidebar.isConnected) bindSidebarObserverTargets();
+        } catch (error) {}
       };
       if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
       else setTimeout(run, 16);
     };
     try {
       sidebarObserver = new MutationObserver(scheduleHide);
-      sidebarObserver.observe(document.documentElement, {
-        subtree: true,
-        childList: true,
-        attributes: true,
-        attributeFilter: ['style', 'class']
-      });
+      bindSidebarObserverTargets();
     } catch (error) {
       sidebarObserver = null;
+      observedSidebar = null;
+      observedFrame = null;
     }
   }
 
@@ -1065,6 +1122,8 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
     if (!sidebarObserver) return;
     try { sidebarObserver.disconnect(); } catch (error) {}
     sidebarObserver = null;
+    observedSidebar = null;
+    observedFrame = null;
   }
 
   function setEmbedded(enabled) {

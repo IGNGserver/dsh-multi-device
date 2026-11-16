@@ -11,8 +11,9 @@
  *
  * @module dsh-multi-device/host/tunnel
  */
-import { execFileSync, spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
+import { execFile, execFileSync, spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
+import { access } from 'node:fs/promises'
 import { createConnection, createServer, type Server, type Socket } from 'node:net'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -677,7 +678,16 @@ export class SshTunnel {
         ...(privateKey !== undefined ? { privateKey } : {}),
         ...(this.transport.passphrase !== undefined ? { passphrase: this.transport.passphrase } : {}),
         ...(process.env.SSH_AUTH_SOCK !== undefined ? { agent: process.env.SSH_AUTH_SOCK } : {}),
-        hostVerifier: (key: Buffer) => verifySsh2HostKey(resolved.hostName, resolved.port, key),
+        hostVerifier: (key: Buffer, verify?: (valid: boolean) => void) => {
+          if (typeof verify === 'function') {
+            void verifySsh2HostKeyAsync(resolved.hostName, resolved.port, key).then(
+              verify,
+              () => verify(false),
+            )
+            return true
+          }
+          return verifySsh2HostKey(resolved.hostName, resolved.port, key)
+        },
         readyTimeout: READY_TIMEOUT_MS,
         keepaliveInterval: KEEPALIVE_INTERVAL_SEC * 1000,
       })
@@ -753,6 +763,7 @@ async function waitForLocalForwardReady(
   proc.once('error', onError)
 
   try {
+    let pollDelayMs = 10
     while (Date.now() < deadline) {
       if (exited !== undefined) {
         return {
@@ -760,9 +771,10 @@ async function waitForLocalForwardReady(
           error: exited.error?.message ?? `ssh exited early with code ${String(exited.code)}`,
         }
       }
-      const reachable = await tryTcpConnect(port, 350)
+      const reachable = await tryTcpConnect(port, 200)
       if (reachable) return { ok: true }
-      await new Promise(r => setTimeout(r, 120))
+      await new Promise(r => setTimeout(r, pollDelayMs))
+      pollDelayMs = Math.min(120, pollDelayMs * 2)
     }
     return { ok: false, error: 'timed out waiting for SSH local port forward' }
   } finally {
@@ -837,6 +849,36 @@ function verifySsh2HostKey(host: string, port: number, key: Buffer): boolean {
     // Missing ssh-keygen or unknown host: reject rather than trust blindly.
   }
   return false
+}
+
+async function verifySsh2HostKeyAsync(host: string, port: number, key: Buffer): Promise<boolean> {
+  const knownHosts = join(homedir(), '.ssh', 'known_hosts')
+  try {
+    await access(knownHosts)
+  } catch {
+    return false
+  }
+  const target = port === 22 ? host : `[${host}]:${String(port)}`
+  return await new Promise<boolean>((resolve) => {
+    execFile(
+      'ssh-keygen',
+      ['-F', target, '-f', knownHosts],
+      { encoding: 'utf8', timeout: 5_000, maxBuffer: 512 * 1024 },
+      (error, stdout) => {
+        if (error || typeof stdout !== 'string') {
+          resolve(false)
+          return
+        }
+        for (const line of stdout.split(/\r?\n/)) {
+          if (hostKeyMatchesKnownHostsLine(line, key)) {
+            resolve(true)
+            return
+          }
+        }
+        resolve(false)
+      },
+    )
+  })
 }
 
 /** One-shot tunnel probe for the "Test Connection" button. */
