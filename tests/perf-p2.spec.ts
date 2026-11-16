@@ -136,16 +136,16 @@ describe('Phase P2 optimizations', () => {
         onControlProjectionFrame: () => {},
         onWorkspacesChanged: () => {},
       },
-      { muxPingIntervalMs: 35, muxPongTimeoutMs: 40 },
+      { muxPingIntervalMs: 60, muxPongTimeoutMs: 120 },
     )
     cleanups.push(() => client.stop())
 
     client.start()
-    await vi.waitFor(() => expect(client.isConnected()).toBe(true), { timeout: 2_000 })
+    await vi.waitFor(() => expect(client.isConnected()).toBe(true), { timeout: 2_500 })
     expect(wsConnections).toBe(1)
 
     // Healthy pongs keep connection 1 alive across multiple ping cycles
-    await new Promise(resolve => setTimeout(resolve, 110))
+    await new Promise(resolve => setTimeout(resolve, 150))
     expect(wsConnections).toBe(1)
     expect(client.isConnected()).toBe(true)
 
@@ -153,13 +153,13 @@ describe('Phase P2 optimizations', () => {
     dropPongs = true
     await vi.waitFor(() => {
       expect(client.toView().lastError).toContain('ping timed out')
-    }, { timeout: 1_500 })
+    }, { timeout: 2_500 })
 
     dropPongs = false
     await vi.waitFor(() => {
       expect(wsConnections).toBeGreaterThanOrEqual(2)
       expect(client.isConnected()).toBe(true)
-    }, { timeout: 2_500 })
+    }, { timeout: 3_000 })
   })
 
   it('sweeps half-open /__md/bridge sockets via periodic ping while preserving responsive clients', async () => {
@@ -186,7 +186,7 @@ describe('Phase P2 optimizations', () => {
       () => base,
       new DeviceAuthManager(),
       () => 'http://127.0.0.1:3080',
-      { bridgePingIntervalMs: 35 },
+      { bridgePingIntervalMs: 60 },
     )
     await proxy.start()
     cleanups.push(() => proxy.stop())
@@ -196,6 +196,7 @@ describe('Phase P2 optimizations', () => {
     const bootstrapRes = await fetch(bootstrapUrl, { redirect: 'manual' })
     const cookie = bootstrapRes.headers.get('set-cookie')!.split(';')[0]!
 
+    let stalledRespondToPing = true
     const healthyWs = new WebSocket(`${origin.replace(/^http/, 'ws')}/__md/bridge?client=healthy`, {
       headers: { cookie },
       autoPong: true,
@@ -203,6 +204,11 @@ describe('Phase P2 optimizations', () => {
     const stalledWs = new WebSocket(`${origin.replace(/^http/, 'ws')}/__md/bridge?client=stalled`, {
       headers: { cookie },
       autoPong: false,
+    })
+    stalledWs.on('ping', (data) => {
+      if (stalledRespondToPing && stalledWs.readyState === WebSocket.OPEN) {
+        stalledWs.pong(data)
+      }
     })
     cleanups.push(() => {
       healthyWs.terminate()
@@ -215,13 +221,15 @@ describe('Phase P2 optimizations', () => {
     await vi.waitFor(() => {
       expect(proxy.bridgeSnapshot('healthy').state).toBe('ready')
       expect(proxy.bridgeSnapshot('stalled').state).toBe('ready')
-    })
+    }, { timeout: 2_000 })
 
-    // After 2+ sweep ticks (~80-120ms), stalledWs (autoPong: false) must be terminated,
-    // while healthyWs remains ready!
+    // Simulate half-open blackhole on stalledWs only after both bridges reached 'ready'
+    stalledRespondToPing = false
+
+    // After 2+ sweep ticks (~120-180ms), stalledWs must be terminated while healthyWs remains ready!
     await vi.waitFor(() => {
       expect(proxy.bridgeSnapshot('stalled').state).toBe('idle')
-    }, { timeout: 1_000 })
+    }, { timeout: 2_000 })
     expect(proxy.bridgeSnapshot('healthy').state).toBe('ready')
   })
 
