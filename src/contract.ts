@@ -54,6 +54,8 @@ export interface SshTransportConfig {
   readonly bootstrapFromRemoteCredentials?: boolean
   /** Preferred SSH tunnel engine (`auto` prefers `system-ssh` for 100% `~/.ssh/config` fidelity). */
   readonly engine?: SshTunnelEngine
+  /** Enable SSH stream compression (`Compression=yes`); omit for adaptive RTT-based auto-compression. */
+  readonly compress?: boolean
 }
 
 /** Direct HTTP or HTTPS connection parameters. */
@@ -163,6 +165,7 @@ export interface DeviceView {
     /** Whether auto auth may mint a cookie from the remote signing secret. */
     readonly bootstrapFromRemoteCredentials?: boolean
     readonly engine?: SshTunnelEngine
+    readonly compress?: boolean
   }
   /** Display target summary, e.g. `ssh://root@10.0.0.5:22 -> 127.0.0.1:3080` or `https://dev.internal:3080`. */
   readonly targetSummary: string

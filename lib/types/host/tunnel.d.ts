@@ -37,6 +37,15 @@ export interface TunnelStatus {
 export type SpawnFn = (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
 /** Replace or restore the process spawner. Tests pass `null` to restore. */
 export declare function setSshSpawn(spawnFn: SpawnFn | null): void;
+export declare const MAX_CONCURRENT_SSH_HANDSHAKES = 4;
+/** Test seam to override or reset (`null`) the global SSH handshake concurrency ceiling. */
+export declare function setMaxConcurrentSshHandshakes(limit: number | null): void;
+/**
+ * Acquire a bounded global SSH handshake slot (`MAX_CONCURRENT_SSH_HANDSHAKES = 4`)
+ * so waking 10+ SSH devices simultaneously never spikes local CPU/FD usage.
+ * Resolves to an idempotent release callback, or `undefined` if `signal` aborts while queued.
+ */
+export declare function acquireSshHandshakeSlot(signal?: AbortSignal): Promise<(() => void) | undefined>;
 /** Allocate an ephemeral free TCP port on `127.0.0.1`. */
 export declare function allocateLoopbackPort(): Promise<number>;
 /**
@@ -69,7 +78,7 @@ export declare function execSshCommand(transport: SshTransportConfig, command: s
  * Managed SSH local-forward tunnel with automatic supervision and exponential backoff.
  */
 export declare class SshTunnel {
-    private readonly transport;
+    private transport;
     private readonly notify;
     private state;
     private localPort;
@@ -85,9 +94,16 @@ export declare class SshTunnel {
     /** Monotonic generation so a late `close`/`fail` cannot tear down a newer tunnel. */
     private generation;
     private openInFlight;
+    private openAbort;
     constructor(transport: SshTransportConfig, notify: () => void);
+    /** Update transport parameters (e.g. adaptive compression) for future tunnel handshakes. */
+    updateTransport(next: SshTransportConfig): void;
     baseUrl(): string | undefined;
     status(): TunnelStatus;
+    /** Fast local liveness check of the tunnel child process and loopback port listener. */
+    verifyReachable(timeoutMs?: number): Promise<boolean>;
+    /** Tear down a hung/dead tunnel immediately and open a fresh forward without waiting on retry backoff. */
+    restartNow(): Promise<void>;
     start(): Promise<void>;
     stop(): void;
     /** Kill a child and wait until it exits, escalating to SIGKILL. */

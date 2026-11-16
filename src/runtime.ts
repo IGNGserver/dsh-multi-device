@@ -246,6 +246,7 @@ function validateDeviceInput(payload: Payload): void {
     payloadString(transport, 'passphrase', false, 1024 * 1024, true)
     payloadPort(transport, 'port'); payloadPort(transport, 'remotePort')
     payloadBoolean(transport, 'bootstrapFromRemoteCredentials')
+    payloadBoolean(transport, 'compress')
     if (transport.engine !== undefined && !['auto', 'system-ssh', 'ssh2'].includes(String(transport.engine))) throw new Error('Invalid SSH engine')
   } else if (transport.kind === 'direct') {
     payloadString(transport, 'baseUrl', true, 16_384)

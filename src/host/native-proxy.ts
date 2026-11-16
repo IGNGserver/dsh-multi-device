@@ -211,6 +211,8 @@ export interface NativeProxyHooks {
   readonly getReadCompletions?: (deviceId: DeviceId) => Readonly<Record<string, string>> | undefined
   /** Accept a read for precisely this completion (omitted token is legacy). */
   readonly onBridgeRead?: (deviceId: DeviceId, sessionId: string, expectedCompletionId?: string) => void | NativeBridgeReadResult
+  /** Optional `/__md/bridge` WebSocket ping sweep interval in ms (defaults to 25_000). */
+  readonly bridgePingIntervalMs?: number
 }
 
 /** Backwards-compatible alias for callers that only cared about auth hooks. */
@@ -220,6 +222,8 @@ export type NativeProxyAuthHooks = NativeProxyHooks
 const MAX_INJECTABLE_HTML_BYTES = 20 * 1024 * 1024
 /** How long a framed page may take to report bridge readiness. */
 const BRIDGE_READY_TIMEOUT_MS = 15_000
+/** Periodic ping sweep interval to terminate half-open `/__md/bridge` sockets. */
+const BRIDGE_PING_INTERVAL_MS = 25_000
 
 export interface NativeBridgeSnapshot {
   state: NativePaneState
@@ -254,10 +258,12 @@ export class NativeDeviceProxy {
   private authRecoveryInFlight: Promise<boolean> | undefined
   private readonly token = randomUUID().replaceAll('-', '')
   private bridgeServer: WebSocketServer | undefined
+  private bridgePingTimer: ReturnType<typeof setInterval> | undefined
   // Cookies ignore ports: one name per proxy prevents device A/B overwriting
   // each other's loopback bootstrap cookie in the same browser cookie jar.
   private readonly cookieName = `${PROXY_COOKIE_PREFIX}${randomUUID().replaceAll('-', '')}`
   private readonly bridgeClients = new Map<WebSocket, string>()
+  private readonly aliveBridgeClients = new WeakSet<WebSocket>()
   private readonly clientStates = new Map<string, ClientBridgeState>()
   private readonly bridgeVisibility = new Map<WebSocket, boolean>()
   private readonly readyBridgeClients = new Set<WebSocket>()
@@ -472,6 +478,14 @@ export class NativeDeviceProxy {
         const addr = server.address()
         if (addr !== null && typeof addr === 'object') this.localPort = addr.port
         this.bridgeServer = new WebSocketServer({ noServer: true })
+        const pingIntervalMs = this.hooks.bridgePingIntervalMs ?? BRIDGE_PING_INTERVAL_MS
+        if (pingIntervalMs > 0) {
+          const pingTimer = setInterval(() => {
+            this.sweepBridgeLiveness()
+          }, pingIntervalMs)
+          pingTimer.unref?.()
+          this.bridgePingTimer = pingTimer
+        }
         if (this.localPort !== undefined) {
           try { this.hooks.onPortAllocated?.(this.device.id, this.localPort) } catch { /* optional persistence */ }
         }
@@ -489,11 +503,32 @@ export class NativeDeviceProxy {
     return promise
   }
 
+  private sweepBridgeLiveness(): void {
+    if (this.stopped) return
+    for (const ws of [...this.bridgeClients.keys()]) {
+      if (ws.readyState !== WebSocket.OPEN) continue
+      if (!this.aliveBridgeClients.has(ws)) {
+        try { ws.terminate() } catch { /* ignore */ }
+        continue
+      }
+      this.aliveBridgeClients.delete(ws)
+      try {
+        ws.ping()
+      } catch {
+        try { ws.terminate() } catch { /* ignore */ }
+      }
+    }
+  }
+
   stop(): void {
     if (this.stopped) return
     this.stopped = true
     ++this.generation
     this.startAbort?.abort()
+    if (this.bridgePingTimer !== undefined) {
+      clearInterval(this.bridgePingTimer)
+      this.bridgePingTimer = undefined
+    }
     for (const cancel of [...this.cancelUpstreams]) cancel()
     this.cancelUpstreams.clear()
     for (const [clientId, state] of [...this.clientStates]) {
@@ -1124,6 +1159,7 @@ export class NativeDeviceProxy {
     const ownerChanged = state.navigationOwner !== ws
     state.navigationOwner = ws
     this.bridgeClients.set(ws, clientId)
+    this.aliveBridgeClients.add(ws)
     this.bridgeVisibility.set(ws, false)
     if (ownerChanged) {
       // Navigation ownership is per socket; selection/title belong to the
@@ -1134,8 +1170,13 @@ export class NativeDeviceProxy {
       this.armBridgeTimer(clientId)
     }
 
+    ws.on('pong', () => {
+      this.aliveBridgeClients.add(ws)
+    })
+
     ws.on('message', (raw) => {
       if (this.stopped || !this.bridgeClients.has(ws)) return
+      this.aliveBridgeClients.add(ws)
       let message: NativeBridgeInbound
       try {
         const parsed: unknown = JSON.parse(raw.toString())
