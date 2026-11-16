@@ -1,10 +1,10 @@
 import type { Locale } from '../types'
 
-export const RELEASE_VERSION = 'v0.3.6'
+export const RELEASE_VERSION = 'v0.3.7'
 export const RELEASE_TAG_URL =
-  'https://github.com/IGNGserver/dsh-multi-device/releases/tag/v0.3.6'
+  `https://github.com/IGNGserver/dsh-multi-device/releases/tag/${RELEASE_VERSION}`
 export const RELEASE_TGZ_URL =
-  'https://github.com/IGNGserver/dsh-multi-device/releases/download/v0.3.6/dsh-multi-device-v0.3.6.tgz'
+  `https://github.com/IGNGserver/dsh-multi-device/releases/download/${RELEASE_VERSION}/dsh-multi-device-${RELEASE_VERSION}.tgz`
 export const REPO_URL = 'https://github.com/IGNGserver/dsh-multi-device'
 
 export interface SiteCopy {
@@ -272,7 +272,7 @@ export const SITE_COPY: Record<Locale, SiteCopy> = {
       eyebrow: '开始使用',
       title: '三步装进你的 DSH',
       subtitle: '不需要配置繁琐环境，直接在 DSH 插件设置里粘贴下方安装包地址即可。',
-      urlLabel: `v0.3.6 插件安装包地址（GitHub Release .tgz）`,
+      urlLabel: `${RELEASE_VERSION} 插件安装包地址（GitHub Release .tgz）`,
       copyBtn: '复制链接',
       copiedBtn: '已复制',
       releasesLink: '前往 GitHub Releases',
@@ -478,7 +478,7 @@ export const SITE_COPY: Record<Locale, SiteCopy> = {
       eyebrow: 'Setup',
       title: 'Install in three quick steps',
       subtitle: 'Paste the official release package URL directly inside DSH Settings.',
-      urlLabel: `v0.3.6 Package URL (GitHub Release .tgz)`,
+      urlLabel: `${RELEASE_VERSION} Package URL (GitHub Release .tgz)`,
       copyBtn: 'Copy URL',
       copiedBtn: 'Copied',
       releasesLink: 'Open GitHub Releases',
