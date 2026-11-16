@@ -18,6 +18,11 @@ export interface StoredDeviceSecret {
     readonly sshPassphrase?: string;
     readonly updatedAt: number;
 }
+export interface VerifiedAuthCacheEntry {
+    readonly cookie?: string;
+    readonly cookieAuthority?: string;
+    readonly bearerToken?: string;
+}
 /** Compute the exact DSH 0.2 cookie name for an HTTP Host authority (`127.0.0.1:3080`). */
 export declare function dshCookieName(authority: string): string;
 /**
@@ -113,6 +118,14 @@ export declare class DeviceAuthManager {
      * the stored passphrase. Callers that intend to clear it pass `null`.
      */
     setSshPassphrase(deviceId: DeviceId, passphrase: string | null | undefined): void;
+    /** Export derived cookie/bearer material verified during a preflight connection test. */
+    exportVerifiedAuth(deviceId: DeviceId): VerifiedAuthCacheEntry | undefined;
+    /**
+     * Seed preflight-verified derived authentication material onto a saved device
+     * so saving immediately after a successful `testDeviceConnection` skips repeating
+     * SSH `.credentials.yaml` bootstrap or token exchange.
+     */
+    importVerifiedAuth(device: DeviceConfig, verified: VerifiedAuthCacheEntry): void;
     /**
      * Build the HTTP headers (`Host`, `Origin`, `Cookie`, `Authorization`) needed to authenticate
      * against `device` over `effectiveBaseUrl`.

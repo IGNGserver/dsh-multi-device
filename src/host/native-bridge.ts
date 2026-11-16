@@ -77,6 +77,9 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
   var lastTitle = '';
   var lastSentTitle = null;
   var titleObserver = null;
+  var hasDraft = false;
+  var lastSentDraft = null;
+  var draftTimer = null;
   // A keep-alive page is often display:none. Read clearing must only happen
   // while this page is actually visible, or a background device would consume
   // another device's unread marker.
@@ -236,6 +239,54 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
     reportTitle();
   }
 
+  function computeDraftDirty() {
+    if (!document || typeof document.querySelectorAll !== 'function') return false;
+    var nodes = null;
+    try { nodes = document.querySelectorAll('textarea, [contenteditable="true"], [role="textbox"]'); } catch (error) { return false; }
+    if (!nodes) return false;
+    for (var i = 0; i < nodes.length; i += 1) {
+      var el = nodes[i];
+      if (!el || el.disabled === true || el.readOnly === true) continue;
+      if (el.getAttribute && (el.getAttribute('readonly') !== null || el.getAttribute('aria-readonly') === 'true')) continue;
+      if (el.style && el.style.top === '-1000px') continue;
+      var text = '';
+      try {
+        if (typeof el.value === 'string') text = el.value;
+        else if (typeof el.textContent === 'string') text = el.textContent;
+      } catch (error) { text = ''; }
+      if (text && text.trim() !== '') return true;
+    }
+    return false;
+  }
+
+  function sendDraft(force) {
+    if (!force && lastSentDraft === hasDraft) return;
+    if (!force && lastSentDraft === null && hasDraft === false) return;
+    if (send({ type: 'draft', dirty: hasDraft })) lastSentDraft = hasDraft;
+  }
+
+  function reportDraft() {
+    var next = computeDraftDirty();
+    if (next !== hasDraft) hasDraft = next;
+    sendDraft(false);
+  }
+
+  function scheduleDraftCheck() {
+    if (draftTimer !== null) return;
+    draftTimer = setTimeout(function () {
+      draftTimer = null;
+      reportDraft();
+    }, 250);
+  }
+
+  function installDraftTracking() {
+    if (!document || typeof document.addEventListener !== 'function') return;
+    var events = ['input', 'change', 'drop', 'keyup'];
+    for (var i = 0; i < events.length; i += 1) {
+      try { document.addEventListener(events[i], scheduleDraftCheck, true); } catch (error) {}
+    }
+  }
+
   function copyTextFallback(text) {
     var area = null;
     var selection = null;
@@ -360,6 +411,7 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
     if (sessionId !== lastSelection) {
       lastSelection = sessionId;
       send({ type: 'selection', sessionId: sessionId });
+      scheduleDraftCheck();
     }
     // A completion that arrives while its conversation is already on screen
     // must not leave a reminder behind. Clearing here also covers the Host
@@ -1209,6 +1261,7 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
       reportTitle();
       sendTitle(true);
       sendVisibility(true);
+      if (hasDraft) sendDraft(true);
       if (groupSyncInstalled) sendUiState();
     });
     socket.addEventListener('message', function (event) {
@@ -1236,6 +1289,7 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
       lastSelection = null;
       lastSentTitle = null;
       lastSentVisibility = null;
+      lastSentDraft = null;
       schedule();
     });
     socket.addEventListener('error', function () {
@@ -1352,6 +1406,10 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
 
   try {
     installVisibilityTracking();
+  } catch (error) {}
+
+  try {
+    installDraftTracking();
   } catch (error) {}
 
   try {

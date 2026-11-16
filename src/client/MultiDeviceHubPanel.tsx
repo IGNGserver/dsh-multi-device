@@ -753,6 +753,54 @@ export function MultiDeviceHubPanel({
             }}
           />
         </div>
+        <div className="dsh-md-pref-row">
+          <div>
+            <div className="dsh-md-pref-title">{t('keepAliveMaxPagesTitle')}</div>
+            <div className="dsh-md-pref-desc">{t('keepAliveMaxPagesDesc')}</div>
+          </div>
+          <DshSelect
+            compact
+            ariaLabel={t('keepAliveMaxPagesTitle')}
+            style={{ minWidth: 132 }}
+            value={String(snapshot.ui?.maxKeepAlivePages ?? 6)}
+            options={[1, 2, 3, 4, 6, 8, 12].map(count => ({
+              value: String(count),
+              label: t('keepAlivePagesOption').replace('{count}', String(count)),
+            }))}
+            onChange={(val) => {
+              const parsed = Number(val)
+              if (!Number.isInteger(parsed)) return
+              void clientStore.setUiPreferences({ maxKeepAlivePages: parsed }).then((res) => {
+                if (!res.ok) pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
+              })
+            }}
+          />
+        </div>
+        <div className="dsh-md-pref-row">
+          <div>
+            <div className="dsh-md-pref-title">{t('keepAliveIdleTitle')}</div>
+            <div className="dsh-md-pref-desc">{t('keepAliveIdleDesc')}</div>
+          </div>
+          <DshSelect
+            compact
+            ariaLabel={t('keepAliveIdleTitle')}
+            style={{ minWidth: 132 }}
+            value={String(snapshot.ui?.keepAliveIdleMinutes ?? 30)}
+            options={[0, 10, 15, 30, 60, 120].map(minutes => ({
+              value: String(minutes),
+              label: minutes === 0
+                ? t('keepAliveIdleNever')
+                : t('keepAliveIdleMinutesOption').replace('{minutes}', String(minutes)),
+            }))}
+            onChange={(val) => {
+              const parsed = Number(val)
+              if (!Number.isInteger(parsed)) return
+              void clientStore.setUiPreferences({ keepAliveIdleMinutes: parsed }).then((res) => {
+                if (!res.ok) pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
+              })
+            }}
+          />
+        </div>
       </div>
       <div className="dsh-md-devices-block">
         <div className="dsh-md-devices-header">

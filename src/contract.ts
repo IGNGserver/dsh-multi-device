@@ -173,6 +173,11 @@ export interface DeviceView {
    * Pre-authenticated and header-normalized so `<webview>` and `<iframe>` load the remote DSH Web UI directly.
    */
   readonly nativeProxyUrl?: string
+  /**
+   * True as soon as the transport and authentication cookie are ready so the
+   * local Native Mode proxy can serve the framed page in parallel with catalog baseline loading.
+   */
+  readonly proxyReady?: boolean
   readonly keepNativeAlive: boolean
   readonly protocolVersion: RemoteProtocolVersion
   /**
@@ -232,6 +237,11 @@ export interface DeviceView {
    * uses it for the window/taskbar title while that device is the active tab.
    */
   readonly nativePaneTitle?: string
+  /**
+   * True when the framed page's composer currently holds unsent draft text, so
+   * Keep-Alive LRU / idle eviction never discards a user's in-progress prompt.
+   */
+  readonly nativePaneHasDraft?: boolean
 }
 
 /** One cached remote Session summary; projections are never persisted. */
@@ -407,6 +417,17 @@ export interface MultiDeviceUiPreferences {
    * aggregate leaves the title to DSH.
    */
   readonly taskbarSummary: boolean
+  /**
+   * Maximum number of background Native Mode device frames kept alive in the DOM (`1..12`, defaults to `6`).
+   * Dirty-draft pages are protected from eviction.
+   */
+  readonly maxKeepAlivePages?: number
+  /**
+   * Idle minutes (`0..240`, `0` = never hibernate, defaults to `30`) after which
+   * inactive clean Keep-Alive frames release their DOM/WebSocket memory while
+   * remembering their last active Session for seamless restoration.
+   */
+  readonly keepAliveIdleMinutes?: number
 }
 
 /** Complete Hub snapshot returned to the Client UI. */

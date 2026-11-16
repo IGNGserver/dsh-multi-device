@@ -153,6 +153,8 @@ export interface RemoteDeviceCallbacks {
   readonly onWorkspacesChanged: (deviceId: DeviceId) => void
   /** Optional auth-state callback so 401/403 on control/RPC surfaces in the UI. */
   readonly onAuthState?: (deviceId: DeviceId, state: DeviceAuthState, error?: string) => void
+  /** False when no local consumer subscribes to control projections; trims non-hint projection memory. */
+  readonly hasControlProjectionSubscribers?: () => boolean
 }
 
 /** Plain predicate keeps callers from narrowing a live lifecycle field. */
@@ -172,6 +174,7 @@ export class RemoteDeviceClient {
   private config: DeviceConfig
   private tunnel: SshTunnel | undefined
   private state: DeviceConnectionState = 'connecting'
+  private proxyReady = false
   private protocolVersion: RemoteProtocolVersion = 'unknown'
   /** 0.1 has no live stream. The UI uses this to show a list-only device. */
   private realtime = false
@@ -294,6 +297,7 @@ export class RemoteDeviceClient {
       targetSummary: this.targetSummary(),
       ...(this.effectiveBaseUrl() !== undefined ? { effectiveBaseUrl: this.effectiveBaseUrl() } : {}),
       ...(this.nativeProxyUrl !== undefined ? { nativeProxyUrl: this.nativeProxyUrl } : {}),
+      ...(this.proxyReady ? { proxyReady: true } : {}),
       keepNativeAlive: this.config.keepNativeAlive !== false,
       protocolVersion: this.protocolVersion,
       realtime: this.realtime,
@@ -528,6 +532,7 @@ export class RemoteDeviceClient {
     this.generationAbort.abort()
     this.generationAbort = new AbortController()
     this.catalog.beginEpoch()
+    this.proxyReady = false
     this.baselineFlight = undefined
     this.authRecovery = undefined
     this.baselineGeneration = undefined
@@ -563,13 +568,22 @@ export class RemoteDeviceClient {
     return `direct:${t.baseUrl.replace(/\/+$/, '')}`
   }
 
-  updateConfig(next: DeviceConfig): void {
+  /** Reuse a recent preflight probe result so the initial mount skips redundant 0.1 fallback probing. */
+  seedVerifiedProtocol02(remoteDshVersion?: string): void {
+    this.verified02TargetKey = this.currentTargetKey()
+    if (remoteDshVersion !== undefined) this.verified02Version = remoteDshVersion
+  }
+
+  updateConfig(next: DeviceConfig, seed02?: { readonly remoteDshVersion?: string }): void {
     const previousTarget = this.currentTargetKey()
     this.stop()
     this.config = next
     if (this.currentTargetKey() !== previousTarget) {
       this.verified02TargetKey = undefined
       this.verified02Version = undefined
+    }
+    if (seed02 !== undefined) {
+      this.seedVerifiedProtocol02(seed02.remoteDshVersion)
     }
     if (next.enabled) {
       this.start()
@@ -792,6 +806,10 @@ export class RemoteDeviceClient {
         if (signal.aborted || !this.catalog.isCurrent(epoch)) return
         if (!authRes.ok) {
           throw new Error(authRes.error)
+        }
+        if (!this.proxyReady) {
+          this.proxyReady = true
+          this.callbacks.onStateChanged(this.id)
         }
 
         // Step 3: Probe protocol & fetch initial session list
@@ -1152,8 +1170,9 @@ export class RemoteDeviceClient {
         if (!this.catalog.applySessionEvent(epoch, event, args)) break
         if (event === 'api-session/removed') this.prunePendingInteractions(new Set(this.summaries.map(summary => summary.sessionId)))
         const raw = args[0]
-        const summary = event === 'api-session/added' && isRecord(raw)
-          ? this.summaries.find(row => row.sessionId === raw.sessionId) : undefined
+        const summary = event === 'api-session/added' && isRecord(raw) && typeof raw.sessionId === 'string'
+          ? this.catalog.getSession(raw.sessionId)
+          : undefined
         this.callbacks.onStateChanged(this.id)
         this.callbacks.onWorkspacesChanged(this.id)
         this.callbacks.onRemoteEventFrame(this.id, {
@@ -1203,12 +1222,62 @@ export class RemoteDeviceClient {
   private async pump02SessionControl(signal: AbortSignal, epoch = this.catalog.epoch, onReady = (): void => {}): Promise<void> {
     for await (const frame of this.openStream('session/control', {}, signal)) {
       if (signal.aborted || !this.catalog.isCurrent(epoch)) return
+      const retainOnlyHintKeys =
+        this.callbacks.hasControlProjectionSubscribers !== undefined &&
+        !this.callbacks.hasControlProjectionSubscribers()
+
+      if (isRecord(frame) && frame.type === 'projection' && typeof frame.sessionId === 'string') {
+        const prevRow = this.catalog.getSession(frame.sessionId)
+        const updates = this.catalog.applyControlFrame(
+          epoch,
+          frame,
+          (key, value) => this.namespaceProjectionValue(key, value),
+          retainOnlyHintKeys,
+        )
+        if (updates === undefined) continue
+        if (!retainOnlyHintKeys) {
+          for (const update of updates) {
+            this.callbacks.onControlProjectionFrame(this.id, {
+              ...update,
+              sessionId: encodeRemoteSessionId(this.id, update.sessionId),
+            })
+          }
+        }
+        if (updates.some(update => update.key === 'title' || update.key === 'sessionListMetadata')) {
+          const nextRow = this.catalog.getSession(frame.sessionId)
+          if (
+            nextRow !== undefined &&
+            (prevRow === undefined || !projectionsEqual(prevRow.projections, nextRow.projections))
+          ) {
+            this.callbacks.onRemoteEventFrame(this.id, {
+              type: 'emit',
+              event: 'api-session/added',
+              args: [this.namespaceSummary(nextRow)],
+            })
+          }
+          this.callbacks.onWorkspacesChanged(this.id)
+          this.callbacks.onStateChanged(this.id)
+        }
+        onReady()
+        continue
+      }
+
       const previous = new Map(this.summaries.map(summary => [summary.sessionId, summary]))
-      const updates = this.catalog.applyControlFrame(epoch, frame, (key, value) => this.namespaceProjectionValue(key, value))
+      const updates = this.catalog.applyControlFrame(
+        epoch,
+        frame,
+        (key, value) => this.namespaceProjectionValue(key, value),
+        retainOnlyHintKeys,
+      )
       if (updates === undefined) continue
-      for (const update of updates) this.callbacks.onControlProjectionFrame(this.id, {
-        ...update, sessionId: encodeRemoteSessionId(this.id, update.sessionId),
-      })
+      if (!retainOnlyHintKeys) {
+        for (const update of updates) {
+          this.callbacks.onControlProjectionFrame(this.id, {
+            ...update,
+            sessionId: encodeRemoteSessionId(this.id, update.sessionId),
+          })
+        }
+      }
       if (updates.some(update => update.key === 'title' || update.key === 'sessionListMetadata')) {
         this.reconcileSessionSummaries(previous)
         this.callbacks.onWorkspacesChanged(this.id)
@@ -1216,7 +1285,6 @@ export class RemoteDeviceClient {
       }
       onReady()
     }
-
   }
 
   // ==========================================================================

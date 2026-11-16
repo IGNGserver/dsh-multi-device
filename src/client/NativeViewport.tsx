@@ -637,18 +637,27 @@ export function NativeViewport({
   const stageRef = useRef<HTMLDivElement | null>(null)
 
   // A framed status page cannot recover on its own when the tunnel returns.
-  // Reload exactly once on any mounted device's non-connected -> connected edge.
+  // Reload as soon as proxyReady flips true (parallel with Step 3/4 catalog
+  // baseline), or on non-connected -> connected if proxyReady was already set.
   const previousStates = useRef<Map<DeviceId, DeviceView['state']>>(new Map())
+  const previousProxyReady = useRef<Map<DeviceId, boolean>>(new Map())
   useEffect(() => {
     const prevMap = previousStates.current
+    const prevReadyMap = previousProxyReady.current
     const nextMap = new Map<DeviceId, DeviceView['state']>()
+    const nextReadyMap = new Map<DeviceId, boolean>()
     for (const dev of visibleDevices) {
+      const readyNow = dev.proxyReady === true
       nextMap.set(dev.id, dev.state)
+      nextReadyMap.set(dev.id, readyNow)
       const prevState = prevMap.get(dev.id)
+      const prevReady = prevReadyMap.get(dev.id)
+      const proxyJustBecameReady = prevReady === false && readyNow
+      const stateJustConnected = prevState !== undefined && prevState !== 'connected' && dev.state === 'connected' && !readyNow
+      const stateConnectedWithoutPriorProxyReload =
+        prevState !== undefined && prevState !== 'connected' && dev.state === 'connected' && prevReady !== true
       if (
-        prevState !== undefined &&
-        prevState !== 'connected' &&
-        dev.state === 'connected' &&
+        (proxyJustBecameReady || stateJustConnected || stateConnectedWithoutPriorProxyReload) &&
         (dev.nativePaneState === 'idle' || dev.nativePaneState === 'failed' || dev.nativePaneState === undefined) &&
         (state.keepAliveDeviceIds.includes(dev.id) || activeDevice?.id === dev.id)
       ) {
@@ -656,6 +665,7 @@ export function NativeViewport({
       }
     }
     previousStates.current = nextMap
+    previousProxyReady.current = nextReadyMap
   }, [visibleDevices, state.keepAliveDeviceIds, activeDevice?.id])
 
   // Every keep-alive device and the active tab stay mounted.

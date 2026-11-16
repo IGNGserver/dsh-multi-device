@@ -73,6 +73,7 @@ export declare class MultiDeviceClientStore {
     private readonly listeners;
     private eventSource;
     private pollTimer;
+    private lastKeepAliveSweepAt;
     private sseRetryTimer;
     private sseAttempt;
     private started;
@@ -88,6 +89,8 @@ export declare class MultiDeviceClientStore {
     private readonly responseFences;
     /** Epochs are opaque identities, never lexically or numerically ordered. */
     private readonly retiredEpochs;
+    private readonly lastActiveAtByDevice;
+    private readonly evictedSessionByDevice;
     private visibilityDocument;
     private readonly onVisibilityChange;
     /** Latest Session reported to the Host, used to dedupe mount/cleanup races. */
@@ -114,6 +117,12 @@ export declare class MultiDeviceClientStore {
     private stop;
     /** Final teardown (including HMR): a disposed store cannot be restarted. */
     dispose(): void;
+    private maxKeepAlivePages;
+    private keepAliveIdleMs;
+    private rememberEvictedSession;
+    private trimKeepAlive;
+    /** Evict background Keep-Alive frames idle longer than `keepAliveIdleMinutes` (sparing active & draft tabs). */
+    sweepIdleKeepAlive(now?: number): void;
     private connectSse;
     private applyIncomingSnapshot;
     /**

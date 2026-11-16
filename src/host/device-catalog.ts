@@ -68,6 +68,7 @@ export class DeviceCatalog {
   private request = 0
   private flight: ListFlight | undefined
   private rows: RemoteSessionSummary[] = []
+  private readonly rowIndexById = new Map<string, number>()
   private workspaceRows: RemoteWorkspaceItem[] = []
   private archived: string[] = []
   private pinned: string[] = []
@@ -89,6 +90,20 @@ export class DeviceCatalog {
   get ready(): boolean { return this.readyParts.size === 4 }
   get eventsReady(): boolean { return this.readyParts.has('events') }
   isCurrent(epoch: number): boolean { return epoch === this.generation }
+
+  /** O(1) session summary lookup by raw sessionId. */
+  getSession(id: string): RemoteSessionSummary | undefined {
+    const idx = this.rowIndexById.get(id)
+    return idx === undefined ? undefined : this.rows[idx]
+  }
+
+  private setRows(nextRows: RemoteSessionSummary[]): void {
+    this.rows = nextRows
+    this.rowIndexById.clear()
+    for (let i = 0; i < nextRows.length; i += 1) {
+      this.rowIndexById.set(nextRows[i]!.sessionId, i)
+    }
+  }
 
   beginEpoch(): number {
     this.generation += 1
@@ -116,9 +131,11 @@ export class DeviceCatalog {
   }
   hydrate(cache: DeviceCatalogCache): boolean {
     if (this.rows.length || this.workspaceRows.length || this.readyParts.size) return false
-    this.rows = cache.sessions
-      .map(row => parseSessionSummary(row))
-      .filter((row): row is RemoteSessionSummary => row !== undefined)
+    this.setRows(
+      cache.sessions
+        .map(row => parseSessionSummary(row))
+        .filter((row): row is RemoteSessionSummary => row !== undefined),
+    )
     this.workspaceRows = cache.workspaces.map(row => parseWorkspace(row)).filter((row): row is RemoteWorkspaceItem => row !== undefined)
     this.setArchivedIds(cache.archivedSessionIds)
     this.setPinnedIds(cache.pinnedSessionIds)
@@ -131,7 +148,7 @@ export class DeviceCatalog {
 
   /** Replace validated facts without introducing a second transport-side table. */
   replaceSessions(items: readonly unknown[]): void {
-    this.rows = items.map(item => parseSessionSummary(item)).filter((row): row is RemoteSessionSummary => row !== undefined)
+    this.setRows(items.map(item => parseSessionSummary(item)).filter((row): row is RemoteSessionSummary => row !== undefined))
   }
 
   /** Explicit freshness override for hydration/test adapters; readiness stays independent. */
@@ -154,10 +171,9 @@ export class DeviceCatalog {
       if (flight.overflow) throw new Error('Remote catalog changed too quickly during baseline; reconnect required')
       const rows = value.items.map(row => parseSessionSummary(row, legacy)).filter((row): row is RemoteSessionSummary => row !== undefined)
       onBeforeCommit?.()
-      this.rows = [...new Map(rows.map(row => [row.sessionId, this.withControlHints(row, true)])).values()]
+      this.setRows([...new Map(rows.map(row => [row.sessionId, this.withControlHints(row, true)])).values()])
       for (const delta of flight.journal) this.reduceSession(delta)
-      const present = new Set(this.rows.map(row => row.sessionId))
-      for (const id of this.projections.keys()) if (!present.has(id)) {
+      for (const id of this.projections.keys()) if (!this.rowIndexById.has(id)) {
         this.projections.delete(id)
         this.projectionSequences.delete(id)
         this.projectionBaselines.delete(id)
@@ -227,24 +243,55 @@ export class DeviceCatalog {
       asOfSeq: Math.max(row.projections?.asOfSeq ?? -1, control.asOfSeq), values } }
   }
 
-  private syncControlHints(): void {
-    this.rows = this.rows.map(row => this.withControlHints(row))
+  private syncControlHints(targetSessionId?: string): void {
+    if (targetSessionId !== undefined) {
+      const idx = this.rowIndexById.get(targetSessionId)
+      if (idx === undefined) return
+      const existing = this.rows[idx]!
+      const updated = this.withControlHints(existing)
+      if (updated === existing) return
+      const next = this.rows.slice()
+      next[idx] = updated
+      this.rows = next
+      return
+    }
+    this.setRows(this.rows.map(row => this.withControlHints(row)))
   }
 
   private reduceSession(delta: SessionDelta): void {
     if (delta.type === 'upsert') {
       const summary = this.withControlHints(delta.summary, true)
-      const index = this.rows.findIndex(row => row.sessionId === summary.sessionId)
-      this.rows = index < 0 ? [summary, ...this.rows] : this.rows.map((row, i) => i === index ? summary : row)
+      const index = this.rowIndexById.get(summary.sessionId)
+      if (index === undefined) {
+        this.setRows([summary, ...this.rows])
+      } else {
+        const next = this.rows.slice()
+        next[index] = summary
+        this.rows = next
+      }
     } else if (delta.type === 'remove') {
-      this.rows = this.rows.filter(row => row.sessionId !== delta.id)
+      if (this.rowIndexById.has(delta.id)) {
+        this.setRows(this.rows.filter(row => row.sessionId !== delta.id))
+      }
       this.projections.delete(delta.id)
       this.projectionSequences.delete(delta.id)
       this.projectionBaselines.delete(delta.id)
     } else {
-      this.rows = this.rows.map(row => row.sessionId !== delta.id ? row : delta.type === 'status'
-        ? { ...row, running: delta.running, agentAvailable: true }
-        : { ...row, updatedAt: Math.max(row.updatedAt, delta.updatedAt) })
+      const index = this.rowIndexById.get(delta.id)
+      if (index === undefined) return
+      const row = this.rows[index]!
+      if (delta.type === 'status') {
+        if (row.running === delta.running && row.agentAvailable === true) return
+        const next = this.rows.slice()
+        next[index] = { ...row, running: delta.running, agentAvailable: true }
+        this.rows = next
+      } else {
+        const nextUpdatedAt = Math.max(row.updatedAt, delta.updatedAt)
+        if (nextUpdatedAt === row.updatedAt) return
+        const next = this.rows.slice()
+        next[index] = { ...row, updatedAt: nextUpdatedAt }
+        this.rows = next
+      }
     }
   }
 
@@ -271,8 +318,14 @@ export class DeviceCatalog {
     return true
   }
 
-  applyControlFrame(epoch: number, frame: unknown, namespace: (key: string, value: unknown) => unknown): CatalogProjectionUpdate[] | undefined {
+  applyControlFrame(
+    epoch: number,
+    frame: unknown,
+    namespace: (key: string, value: unknown) => unknown,
+    retainOnlyHintKeys = false,
+  ): CatalogProjectionUpdate[] | undefined {
     if (!this.isCurrent(epoch) || !isCatalogRecord(frame)) return undefined
+    const isHintKey = (key: string): boolean => key === 'title' || key === 'sessionListMetadata'
     const updates: CatalogProjectionUpdate[] = []
     if (frame.type === 'baseline' && isCatalogRecord(frame.value) && isCatalogRecord(frame.value.projections)) {
       // beginEpoch already cleared old projections; even the first baseline cannot rewind deltas.
@@ -284,12 +337,13 @@ export class DeviceCatalog {
         const values: Record<string, unknown> = { ...existing?.values }
         // A baseline is a complete cut, except for keys already advanced past that cut.
         for (const key of Object.keys(values)) {
-          if (!Object.hasOwn(block.values, key) && (sequences.get(key) ?? -1) <= block.asOfSeq) {
+          if ((retainOnlyHintKeys && !isHintKey(key)) || (!Object.hasOwn(block.values, key) && (sequences.get(key) ?? -1) <= block.asOfSeq)) {
             delete values[key]
             sequences.delete(key)
           }
         }
         for (const [key, raw] of Object.entries(block.values)) {
+          if (retainOnlyHintKeys && !isHintKey(key)) continue
           if ((sequences.get(key) ?? -Infinity) > block.asOfSeq) continue
           const value = namespace(key, raw)
           values[key] = value
@@ -305,6 +359,7 @@ export class DeviceCatalog {
       return updates
     }
     if (frame.type !== 'projection' || !sessionId(frame.sessionId) || typeof frame.key !== 'string' || !sequence(frame.seq) || frame.seq < 0) return undefined
+    if (retainOnlyHintKeys && !isHintKey(frame.key)) return undefined
     const existing = this.projections.get(frame.sessionId)
     const sequences = this.projectionSequences.get(frame.sessionId) ?? new Map<string, number>()
     const watermark = sequences.get(frame.key) ?? this.projectionBaselines.get(frame.sessionId) ?? -1
@@ -313,7 +368,7 @@ export class DeviceCatalog {
     sequences.set(frame.key, frame.seq)
     this.projectionSequences.set(frame.sessionId, sequences)
     this.projections.set(frame.sessionId, { asOfSeq: Math.max(existing?.asOfSeq ?? -1, frame.seq), values: { ...existing?.values, [frame.key]: value } })
-    if (frame.key === 'title' || frame.key === 'sessionListMetadata') this.syncControlHints()
+    if (isHintKey(frame.key)) this.syncControlHints(frame.sessionId)
     return [{ sessionId: frame.sessionId, key: frame.key, value, seq: frame.seq }]
   }
 }

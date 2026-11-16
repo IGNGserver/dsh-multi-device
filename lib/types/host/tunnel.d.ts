@@ -16,6 +16,15 @@ import type { SshTransportConfig } from '../contract.ts';
 import { type ResolvedSshParameters } from './ssh-config.ts';
 export type TunnelState = 'connecting' | 'up' | 'error' | 'stopped';
 export declare const SSH2_MISSING_MESSAGE = "The optional ssh2 engine is not installed. Use system-ssh with an SSH agent, or explicitly install ssh2 in this DSH Profile through dsh plugin and approve only its reported build scripts.";
+/**
+ * Return OpenSSH multiplexing CLI flags (`ControlMaster=auto`, `ControlPersist=60`,
+ * `ControlPath=...`) on POSIX platforms so `execSshCommand` (credential read /
+ * cross-Host sync) and `SshTunnel` share a single authenticated SSH connection.
+ *
+ * Uses `%C` (40-char SHA-1 of `%l%h%p%r`) inside a private `0700` per-UID temp dir
+ * so total `sun_path` stays ~64 bytes (well below macOS 104B / Linux 108B limits).
+ */
+export declare function sshControlMultiplexArgs(): string[];
 export interface TunnelStatus {
     readonly state: TunnelState;
     readonly localPort?: number;
