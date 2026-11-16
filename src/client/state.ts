@@ -186,7 +186,10 @@ export interface MultiDeviceClientState {
   readonly settingsModalOpen: boolean
 }
 
-const MAX_KEEP_ALIVE_PAGES = 6
+const DEFAULT_MAX_KEEP_ALIVE_PAGES = 6
+const HARD_KEEP_ALIVE_CEILING = 12
+const DEFAULT_KEEP_ALIVE_IDLE_MINUTES = 30
+const KEEP_ALIVE_SWEEP_INTERVAL_MS = 30_000
 
 /** Identify this browser instance so two tabs cannot starve each other's sequences. */
 const CLIENT_INSTANCE_ID =
@@ -199,7 +202,13 @@ const EMPTY_SNAPSHOT: MultiDeviceSnapshot = {
   devices: [],
   sshConfigHosts: [],
   unreadSessionIds: [],
-  ui: { crossHostReadState: false, crossHostUiState: false, taskbarSummary: false },
+  ui: {
+    crossHostReadState: false,
+    crossHostUiState: false,
+    taskbarSummary: false,
+    maxKeepAlivePages: DEFAULT_MAX_KEEP_ALIVE_PAGES,
+    keepAliveIdleMinutes: DEFAULT_KEEP_ALIVE_IDLE_MINUTES,
+  },
 }
 
 interface ResponseFence {
@@ -219,6 +228,7 @@ export class MultiDeviceClientStore {
   private readonly listeners = new Set<() => void>()
   private eventSource: EventSource | undefined
   private pollTimer: ReturnType<typeof setInterval> | undefined
+  private lastKeepAliveSweepAt = 0
   private sseRetryTimer: ReturnType<typeof setTimeout> | undefined
   private sseAttempt = 0
   private started = false
@@ -234,6 +244,8 @@ export class MultiDeviceClientStore {
   private readonly responseFences = new WeakMap<object, ResponseFence>()
   /** Epochs are opaque identities, never lexically or numerically ordered. */
   private readonly retiredEpochs = new Set<string>()
+  private readonly lastActiveAtByDevice = new Map<DeviceId, number>()
+  private readonly evictedSessionByDevice = new Map<DeviceId, string>()
   private visibilityDocument: Document | undefined
   private readonly onVisibilityChange = (): void => {
     this.clearUnreadForActiveSession(this.state.snapshot)
@@ -312,6 +324,7 @@ export class MultiDeviceClientStore {
     this.resetActiveSessionReport()
     this.sseAttempt = 0
     this.lastPollAt = 0
+    this.lastKeepAliveSweepAt = Date.now()
     if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
       this.visibilityDocument = document
       document.addEventListener('visibilitychange', this.onVisibilityChange)
@@ -322,9 +335,13 @@ export class MultiDeviceClientStore {
     this.clearUnreadForActiveSession(this.state.snapshot)
     this.pollTimer = setInterval(() => {
       if (!this.started || lifecycle !== this.lifecycleGeneration) return
+      const now = Date.now()
+      if (now - this.lastKeepAliveSweepAt >= KEEP_ALIVE_SWEEP_INTERVAL_MS) {
+        this.lastKeepAliveSweepAt = now
+        this.sweepIdleKeepAlive(now)
+      }
       const sseOpen = typeof EventSource !== 'undefined' && this.eventSource?.readyState === EventSource.OPEN
       if (sseOpen) return
-      const now = Date.now()
       if (now - this.lastPollAt < 4_000) return
       this.lastPollAt = now
       void this.refreshSnapshot()
@@ -360,6 +377,82 @@ export class MultiDeviceClientStore {
     this.disposed = true
     this.stop()
     this.listeners.clear()
+  }
+
+  private maxKeepAlivePages(snap: MultiDeviceSnapshot): number {
+    const raw = snap.ui?.maxKeepAlivePages
+    if (typeof raw !== 'number' || !Number.isInteger(raw)) return DEFAULT_MAX_KEEP_ALIVE_PAGES
+    return Math.max(1, Math.min(HARD_KEEP_ALIVE_CEILING, raw))
+  }
+
+  private keepAliveIdleMs(snap: MultiDeviceSnapshot): number {
+    const raw = snap.ui?.keepAliveIdleMinutes
+    const minutes = typeof raw === 'number' && Number.isInteger(raw)
+      ? Math.max(0, Math.min(240, raw))
+      : DEFAULT_KEEP_ALIVE_IDLE_MINUTES
+    return minutes <= 0 ? 0 : minutes * 60_000
+  }
+
+  private rememberEvictedSession(snap: MultiDeviceSnapshot, deviceId: DeviceId): void {
+    const dev = snap.devices.find(candidate => candidate.id === deviceId)
+    if (dev?.nativePaneSessionId !== undefined && dev.nativePaneSessionId !== '') {
+      this.evictedSessionByDevice.set(deviceId, dev.nativePaneSessionId)
+    }
+  }
+
+  private trimKeepAlive(
+    candidates: readonly DeviceId[],
+    snap: MultiDeviceSnapshot,
+    activeId: DeviceId | undefined,
+  ): DeviceId[] {
+    const maxPages = this.maxKeepAlivePages(snap)
+    const byId = new Map(snap.devices.map(dev => [dev.id, dev]))
+    const next = [...candidates]
+    // Pass 1: evict oldest non-active, draft-clean pages until within maxPages.
+    while (next.length > maxPages) {
+      const victimIdx = next.findIndex(id => id !== activeId && byId.get(id)?.nativePaneHasDraft !== true)
+      if (victimIdx === -1) break
+      const [evicted] = next.splice(victimIdx, 1)
+      if (evicted !== undefined) this.rememberEvictedSession(snap, evicted)
+    }
+    // Pass 2: enforce hard ceiling (12) even if every background tab has a draft, still sparing activeId.
+    while (next.length > HARD_KEEP_ALIVE_CEILING) {
+      const victimIdx = next.findIndex(id => id !== activeId)
+      if (victimIdx === -1) break
+      const [evicted] = next.splice(victimIdx, 1)
+      if (evicted !== undefined) this.rememberEvictedSession(snap, evicted)
+    }
+    return next
+  }
+
+  /** Evict background Keep-Alive frames idle longer than `keepAliveIdleMinutes` (sparing active & draft tabs). */
+  sweepIdleKeepAlive(now = Date.now()): void {
+    if (this.disposed) return
+    const snap = this.state.snapshot
+    const idleMs = this.keepAliveIdleMs(snap)
+    if (idleMs <= 0 || this.state.keepAliveDeviceIds.length === 0) return
+    const activeId = this.state.activeNativeDeviceId
+    const byId = new Map(snap.devices.map(dev => [dev.id, dev]))
+    let changed = false
+    const nextKeepAlive: DeviceId[] = []
+    for (const id of this.state.keepAliveDeviceIds) {
+      if (id === activeId || byId.get(id)?.nativePaneHasDraft === true) {
+        nextKeepAlive.push(id)
+        continue
+      }
+      const lastActive = this.lastActiveAtByDevice.get(id) ?? now
+      if (!this.lastActiveAtByDevice.has(id)) this.lastActiveAtByDevice.set(id, now)
+      if (now - lastActive >= idleMs) {
+        this.rememberEvictedSession(snap, id)
+        this.lastActiveAtByDevice.delete(id)
+        changed = true
+        continue
+      }
+      nextKeepAlive.push(id)
+    }
+    if (changed) {
+      this.setState({ keepAliveDeviceIds: nextKeepAlive })
+    }
   }
 
   private connectSse(): void {
@@ -435,6 +528,12 @@ export class MultiDeviceClientStore {
     }
     const enabledDevices = snap.devices.filter(device => device.enabled !== false)
     const configuredIds = new Set(enabledDevices.map(device => device.id))
+    for (const id of [...this.lastActiveAtByDevice.keys()]) {
+      if (!configuredIds.has(id)) this.lastActiveAtByDevice.delete(id)
+    }
+    for (const id of [...this.evictedSessionByDevice.keys()]) {
+      if (!configuredIds.has(id)) this.evictedSessionByDevice.delete(id)
+    }
     const keepAliveEligible = new Set(
       enabledDevices.filter(device => device.keepNativeAlive !== false).map(device => device.id),
     )
@@ -451,18 +550,23 @@ export class MultiDeviceClientStore {
     ) {
       activeNative = previousActiveNative
     }
+    const now = Date.now()
+    if (previousActiveNative !== undefined && previousActiveNative !== activeNative && configuredIds.has(previousActiveNative)) {
+      this.lastActiveAtByDevice.set(previousActiveNative, now)
+    }
+    if (activeNative !== undefined) {
+      this.lastActiveAtByDevice.set(activeNative, now)
+    }
     const lostActiveNative = previousActiveNative !== undefined && activeNative === undefined
     // No "first device" fallback: 本机 is the stable default and the only tab
     // guaranteed to exist.
     storeActiveNativeDevice(activeNative)
 
-    const keepAlive = this.state.keepAliveDeviceIds
-      .filter(id => keepAliveEligible.has(id))
-      .slice(-MAX_KEEP_ALIVE_PAGES)
-    if (activeNative !== undefined && keepAliveEligible.has(activeNative) && !keepAlive.includes(activeNative)) {
-      keepAlive.push(activeNative)
-      while (keepAlive.length > MAX_KEEP_ALIVE_PAGES) keepAlive.shift()
+    const rawKeepAlive = this.state.keepAliveDeviceIds.filter(id => keepAliveEligible.has(id))
+    if (activeNative !== undefined && keepAliveEligible.has(activeNative) && !rawKeepAlive.includes(activeNative)) {
+      rawKeepAlive.push(activeNative)
     }
+    const keepAlive = this.trimKeepAlive(rawKeepAlive, snap, activeNative)
     this.setState({
       snapshot: snap,
       loading: false,
@@ -506,20 +610,27 @@ export class MultiDeviceClientStore {
   }
 
   private activateNativeDevice(deviceId: DeviceId): void {
-    const device = this.state.snapshot.devices.find(
+    const snap = this.state.snapshot
+    const device = snap.devices.find(
       candidate => candidate.id === deviceId && candidate.enabled !== false,
     )
     if (device === undefined) return
+    const now = Date.now()
+    const previousActive = this.state.activeNativeDeviceId
+    if (previousActive !== undefined && previousActive !== deviceId) {
+      this.lastActiveAtByDevice.set(previousActive, now)
+    }
+    this.lastActiveAtByDevice.set(deviceId, now)
     const keepAliveEligible = new Set(
-      this.state.snapshot.devices
+      snap.devices
         .filter(candidate => candidate.enabled !== false && candidate.keepNativeAlive !== false)
         .map(candidate => candidate.id),
     )
-    const keepAlive = this.state.keepAliveDeviceIds.filter(id => keepAliveEligible.has(id) && id !== deviceId)
+    const candidates = this.state.keepAliveDeviceIds.filter(id => keepAliveEligible.has(id) && id !== deviceId)
     if (keepAliveEligible.has(deviceId)) {
-      keepAlive.push(deviceId)
-      while (keepAlive.length > MAX_KEEP_ALIVE_PAGES) keepAlive.shift()
+      candidates.push(deviceId)
     }
+    const keepAlive = this.trimKeepAlive(candidates, snap, deviceId)
     storeActiveNativeDevice(deviceId)
     this.setState({ activeNativeDeviceId: deviceId, keepAliveDeviceIds: keepAlive })
   }
@@ -529,11 +640,18 @@ export class MultiDeviceClientStore {
    * Idempotent; unknown/disabled devices are ignored.
    */
   ensureKeepAliveDevice(deviceId: DeviceId): void {
-    const device = this.state.snapshot.devices.find(candidate => candidate.id === deviceId)
+    const snap = this.state.snapshot
+    const device = snap.devices.find(candidate => candidate.id === deviceId)
     if (device === undefined || device.enabled === false || device.keepNativeAlive === false) return
     if (this.state.keepAliveDeviceIds.includes(deviceId)) return
-    const keepAlive = [...this.state.keepAliveDeviceIds, deviceId]
-    while (keepAlive.length > MAX_KEEP_ALIVE_PAGES) keepAlive.shift()
+    if (!this.lastActiveAtByDevice.has(deviceId)) {
+      this.lastActiveAtByDevice.set(deviceId, Date.now())
+    }
+    const keepAlive = this.trimKeepAlive(
+      [...this.state.keepAliveDeviceIds, deviceId],
+      snap,
+      this.state.activeNativeDeviceId,
+    )
     this.setState({ keepAliveDeviceIds: keepAlive })
   }
 
@@ -547,7 +665,13 @@ export class MultiDeviceClientStore {
     if (device === undefined || device.enabled === false) {
       return Promise.resolve({ ok: false, error: 'Device is disabled' })
     }
+    const wasKeptAlive = this.state.keepAliveDeviceIds.includes(deviceId)
     this.activateNativeDevice(deviceId)
+    const evictedSessionId = this.evictedSessionByDevice.get(deviceId)
+    this.evictedSessionByDevice.delete(deviceId)
+    if (!wasKeptAlive && evictedSessionId !== undefined && evictedSessionId !== '') {
+      void this.setActiveSession(encodeRemoteSessionId(deviceId, evictedSessionId))
+    }
     return Promise.resolve({ ok: true })
   }
 
@@ -559,6 +683,10 @@ export class MultiDeviceClientStore {
 
   /** Restore the local Session scope for the 本机 tab, even when none exists. */
   private enterLocalScope(): void {
+    const previousActive = this.state.activeNativeDeviceId
+    if (previousActive !== undefined) {
+      this.lastActiveAtByDevice.set(previousActive, Date.now())
+    }
     const localSessionId = this.observedLocalMainSessionId
     storeActiveNativeDevice(undefined)
     this.setState({ activeNativeDeviceId: undefined, activeSessionId: localSessionId })
@@ -567,11 +695,16 @@ export class MultiDeviceClientStore {
   }
 
   releaseKeepAliveDevice(deviceId: DeviceId): void {
+    this.rememberEvictedSession(this.state.snapshot, deviceId)
+    this.lastActiveAtByDevice.delete(deviceId)
     const nextKeepAlive = this.state.keepAliveDeviceIds.filter(id => id !== deviceId)
     const nextActive =
       this.state.activeNativeDeviceId === deviceId
         ? nextKeepAlive[nextKeepAlive.length - 1]
         : this.state.activeNativeDeviceId
+    if (nextActive !== undefined) {
+      this.lastActiveAtByDevice.set(nextActive, Date.now())
+    }
     storeActiveNativeDevice(nextActive)
     this.setState({
       keepAliveDeviceIds: nextKeepAlive,

@@ -12,8 +12,12 @@
  *
  * @module dsh-multi-device/host/http-request
  */
-import { request as httpRequest, type IncomingHttpHeaders } from 'node:http'
-import { request as httpsRequest } from 'node:https'
+import {
+  Agent as HttpAgent,
+  request as httpRequest,
+  type IncomingHttpHeaders,
+} from 'node:http'
+import { Agent as HttpsAgent, request as httpsRequest } from 'node:https'
 
 export interface RemoteHttpRequestOptions {
   readonly method?: string
@@ -22,6 +26,8 @@ export interface RemoteHttpRequestOptions {
   readonly signal?: AbortSignal
   /** TLS certificate verification for `https:` URLs. Defaults to `true`. */
   readonly rejectUnauthorized?: boolean
+  /** Optional custom HTTP(S) agent override (`false` disables pooling for one call). */
+  readonly agent?: HttpAgent | HttpsAgent | false
   /** Whole-request inactivity timeout. Defaults to 60 seconds. */
   readonly timeoutMs?: number
   /** Hard response-size cap. Defaults to 32 MiB. */
@@ -38,6 +44,28 @@ export interface RemoteHttpResponse {
 const DEFAULT_TIMEOUT_MS = 60_000
 const DEFAULT_MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 
+const AGENT_POOL_OPTIONS = {
+  keepAlive: true,
+  keepAliveMsecs: 30_000,
+  maxSockets: 32,
+  maxFreeSockets: 8,
+  scheduling: 'lifo' as const,
+}
+
+const sharedHttpAgent = new HttpAgent(AGENT_POOL_OPTIONS)
+const sharedHttpsStrictAgent = new HttpsAgent({ ...AGENT_POOL_OPTIONS, rejectUnauthorized: true })
+const sharedHttpsInsecureAgent = new HttpsAgent({ ...AGENT_POOL_OPTIONS, rejectUnauthorized: false })
+
+function resolvePooledAgent(
+  isHttps: boolean,
+  rejectUnauthorized: boolean,
+  override: HttpAgent | HttpsAgent | false | undefined,
+): HttpAgent | HttpsAgent | false {
+  if (override !== undefined) return override
+  if (!isHttps) return sharedHttpAgent
+  return rejectUnauthorized ? sharedHttpsStrictAgent : sharedHttpsInsecureAgent
+}
+
 /**
  * Perform one HTTP(S) request without following redirects and without
  * rewriting the caller's `Host` / `Origin` headers.
@@ -48,6 +76,7 @@ export function requestRemote(
 ): Promise<RemoteHttpResponse> {
   const target = new URL(requestUrl)
   const isHttps = target.protocol === 'https:'
+  const rejectUnauthorized = options.rejectUnauthorized !== false
   const headers: Record<string, string | string[]> = {}
   for (const [key, value] of Object.entries(options.headers ?? {})) {
     if (value === undefined) continue
@@ -99,7 +128,8 @@ export function requestRemote(
       {
         method: options.method ?? 'GET',
         headers,
-        ...(isHttps ? { rejectUnauthorized: options.rejectUnauthorized !== false } : {}),
+        agent: resolvePooledAgent(isHttps, rejectUnauthorized, options.agent),
+        ...(isHttps ? { rejectUnauthorized } : {}),
       },
       (res) => {
         const chunks: Buffer[] = []
@@ -126,6 +156,9 @@ export function requestRemote(
       },
     )
 
+    req.on('socket', (socket) => {
+      socket.setNoDelay(true)
+    })
     req.on('error', (error) => finish(error))
     req.setTimeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, () => {
       req.destroy(new Error('Remote request timed out'))

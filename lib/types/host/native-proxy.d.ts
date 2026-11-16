@@ -41,6 +41,8 @@ export interface NativeProxyHooks {
     readonly onBridgeTitle?: (deviceId: DeviceId, title: string | undefined, clientId?: string) => void;
     /** Report whether at least one framed page for this device is actually visible. */
     readonly onBridgeVisibility?: (deviceId: DeviceId, visible: boolean, clientId?: string) => void;
+    /** Report whether the framed page has unsent composer input. */
+    readonly onBridgeDraft?: (deviceId: DeviceId, dirty: boolean, clientId?: string) => void;
     /** Persist the port a proxy actually bound, so the next restart keeps the origin. */
     readonly onPortAllocated?: (deviceId: DeviceId, port: number) => void;
     /** Last Host-owned workspace fold state for the bridge's first render. */
@@ -65,6 +67,7 @@ export interface NativeBridgeSnapshot {
     error?: string;
     sessionId?: string;
     title?: string;
+    draft?: boolean;
 }
 export declare class NativeDeviceProxy {
     private device;
@@ -98,9 +101,14 @@ export declare class NativeDeviceProxy {
     /** Host-owned raw Session IDs whose completion is unread. */
     private unreadState;
     private readCompletions;
+    private cachedBridgeScript;
+    private upstreamAgent;
+    private upstreamAgentKey;
     constructor(device: DeviceConfig, getUpstreamBaseUrl: () => string | undefined, authManager: DeviceAuthManager, localOrigin?: (() => string | undefined) | undefined, hooks?: NativeProxyHooks);
     updateDevice(device: DeviceConfig): void;
     private refreshHostState;
+    private getBridgeScriptPayload;
+    private getUpstreamAgent;
     proxyUrl(): string | undefined;
     private proxyOrigin;
     private allowedFramingAncestors;

@@ -277,6 +277,12 @@ export function validateControlPlanePayload(request: ControlPlaneRequest): void 
     case 'upsertDevice': case 'testDevice': validateDeviceInput(payload); break
     case 'setUiPreferences':
       payloadBoolean(payload, 'crossHostReadState'); payloadBoolean(payload, 'crossHostUiState'); payloadBoolean(payload, 'taskbarSummary')
+      if (payload.maxKeepAlivePages !== undefined && (!Number.isInteger(payload.maxKeepAlivePages) || (payload.maxKeepAlivePages as number) < 1 || (payload.maxKeepAlivePages as number) > 12)) {
+        throw new Error('maxKeepAlivePages must be an optional integer from 1 to 12')
+      }
+      if (payload.keepAliveIdleMinutes !== undefined && (!Number.isInteger(payload.keepAliveIdleMinutes) || (payload.keepAliveIdleMinutes as number) < 0 || (payload.keepAliveIdleMinutes as number) > 240)) {
+        throw new Error('keepAliveIdleMinutes must be an optional integer from 0 to 240')
+      }
       break
     case 'patchUiState': payloadObject(payload.state, 'state'); break
     default: break

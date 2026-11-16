@@ -9,7 +9,7 @@
  *
  * @module dsh-multi-device/host/registry
  */
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
@@ -36,7 +36,7 @@ import {
   type SessionAttentionFact,
 } from '../attention.ts'
 import { readRemoteCompletionIdentity } from './completion-identity.ts'
-import { DeviceAuthManager } from './auth.ts'
+import { DeviceAuthManager, type VerifiedAuthCacheEntry } from './auth.ts'
 import { decodeCatalogDocument, decodeLegacyCatalogs, encodeCatalogDocument } from './catalog-codec.ts'
 import { JsonSnapshotFile } from './storage.ts'
 import { requestRemote } from './http-request.ts'
@@ -186,6 +186,18 @@ const DEFAULT_UI_PREFERENCES: MultiDeviceUiPreferences = {
   crossHostReadState: false,
   crossHostUiState: false,
   taskbarSummary: false,
+  maxKeepAlivePages: 6,
+  keepAliveIdleMinutes: 30,
+}
+
+function sanitizeKeepAlivePages(value: unknown, fallback = 6): number {
+  if (typeof value !== 'number' || !Number.isInteger(value)) return fallback
+  return Math.max(1, Math.min(12, value))
+}
+
+function sanitizeKeepAliveIdleMinutes(value: unknown, fallback = 30): number {
+  if (typeof value !== 'number' || !Number.isInteger(value)) return fallback
+  return Math.max(0, Math.min(240, value))
 }
 
 /**
@@ -285,13 +297,21 @@ export class DeviceRegistry {
    * summaries before a Workspace row referencing them reaches the sidebar.
    */
   private readonly sessionPublishListeners = new Set<(sessionIds: readonly string[]) => void>()
-  /** Injected Native Pane bridge lifecycle, last page selection/title, and visibility per device. */
+  /** Injected Native Pane bridge lifecycle, last page selection/title, visibility, and composer draft per device. */
   private readonly nativePanes = new Map<string, {
     state: NativePaneState
     error?: string
     sessionId?: string
     title?: string
     visible?: boolean
+    draft?: boolean
+  }>()
+  /** Short-lived (60s) verified auth + protocol cache from testDeviceConnection so immediate Save skips re-probing. */
+  private readonly verifiedPreflightCache = new Map<string, {
+    readonly expiresAt: number
+    readonly protocol: '0.2' | '0.1'
+    readonly remoteDshVersion?: string
+    readonly auth?: VerifiedAuthCacheEntry
   }>()
   /** Previous connection state per device, so workspace rows are recomputed on a real transition. */
   private readonly lastDeviceStates = new Map<DeviceId, DeviceConnectionState>()
@@ -384,6 +404,9 @@ export class DeviceRegistry {
         },
         onBridgeVisibility: (deviceId, visible, clientId) => {
           this.setNativePaneVisibility(deviceId, visible, clientId)
+        },
+        onBridgeDraft: (deviceId, dirty, clientId) => {
+          this.setNativePaneDraft(deviceId, dirty, clientId)
         },
         onPortAllocated: (deviceId, port) => {
           this.persistNativeProxyPort(deviceId, port)
@@ -1338,12 +1361,14 @@ export class DeviceRegistry {
     const nextSessionId = state === 'ready' ? previous?.sessionId : undefined
     const nextTitle = state === 'ready' ? previous?.title : undefined
     const nextVisible = state === 'ready' ? previous?.visible === true : false
+    const nextDraft = state === 'ready' ? previous?.draft === true : false
     if (
       previous?.state === state &&
       previous.error === nextError &&
       previous.sessionId === nextSessionId &&
       previous.title === nextTitle &&
-      (previous.visible === true) === nextVisible
+      (previous.visible === true) === nextVisible &&
+      (previous.draft === true) === nextDraft
     ) {
       return
     }
@@ -1353,6 +1378,7 @@ export class DeviceRegistry {
       ...(nextSessionId !== undefined ? { sessionId: nextSessionId } : {}),
       ...(nextTitle !== undefined ? { title: nextTitle } : {}),
       ...(nextVisible ? { visible: true } : {}),
+      ...(nextDraft ? { draft: true } : {}),
     })
     this.bumpRevision()
   }
@@ -1367,6 +1393,7 @@ export class DeviceRegistry {
       ...(previous?.error !== undefined ? { error: previous.error } : {}),
       ...(previous?.title !== undefined ? { title: previous.title } : {}),
       ...(previous?.visible === true ? { visible: true } : {}),
+      ...(previous?.draft === true ? { draft: true } : {}),
     })
     this.bumpRevision()
     // Selecting a Session is not the same as viewing it: keep-alive frames for
@@ -1388,6 +1415,7 @@ export class DeviceRegistry {
       ...(previous?.sessionId !== undefined ? { sessionId: previous.sessionId } : {}),
       ...(next !== undefined ? { title: next } : {}),
       ...(previous?.visible === true ? { visible: true } : {}),
+      ...(previous?.draft === true ? { draft: true } : {}),
     })
     this.bumpRevision()
   }
@@ -1407,8 +1435,26 @@ export class DeviceRegistry {
       ...(previous?.error !== undefined ? { error: previous.error } : {}),
       ...(previous?.sessionId !== undefined ? { sessionId: previous.sessionId } : {}),
       ...(previous?.title !== undefined ? { title: previous.title } : {}),
+      ...(previous?.draft === true ? { draft: true } : {}),
       visible,
     })
+  }
+
+  /** Track whether a Keep-Alive page has unsent composer input so LRU eviction skips it. */
+  private setNativePaneDraft(deviceId: DeviceId, dirty: boolean, clientId = 'legacy'): void {
+    const previous = this.nativePanes.get(this.paneKey(deviceId, clientId))
+    if (previous === undefined && !dirty) return
+    if ((previous?.draft === true) === dirty) return
+    this.nativePanes.set(this.paneKey(deviceId, clientId), {
+      ...previous,
+      state: previous?.state ?? 'idle',
+      ...(previous?.error !== undefined ? { error: previous.error } : {}),
+      ...(previous?.sessionId !== undefined ? { sessionId: previous.sessionId } : {}),
+      ...(previous?.title !== undefined ? { title: previous.title } : {}),
+      ...(previous?.visible === true ? { visible: true } : {}),
+      ...(dirty ? { draft: true } : {}),
+    })
+    this.bumpRevision()
   }
 
   /** Persist the actually-bound native proxy port so the origin stays stable. */
@@ -1429,6 +1475,7 @@ export class DeviceRegistry {
       ...(pane.error !== undefined ? { nativePaneError: pane.error } : {}),
       ...(pane.sessionId !== undefined ? { nativePaneSessionId: pane.sessionId } : {}),
       ...(pane.title !== undefined ? { nativePaneTitle: pane.title } : {}),
+      ...(pane.draft === true ? { nativePaneHasDraft: true } : {}),
     }
   }
 
@@ -1444,6 +1491,7 @@ export class DeviceRegistry {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.verifiedPreflightCache.clear()
     for (const deviceId of this.mountGenerations.keys()) {
       this.mountGenerations.set(deviceId, (this.mountGenerations.get(deviceId) ?? 0) + 1)
     }
@@ -1582,7 +1630,15 @@ export class DeviceRegistry {
     }
     this.authStates.delete(id)
 
-    const client = await this.mountClient(sanitized)
+    const hydrated = this.hydrateConfig(sanitized)
+    const preflightHit = this.consumePreflightCache(
+      this.preflightCacheKey(hydrated.transport, hydrated.auth.mode, hydrated.auth.credential),
+    )
+    if (preflightHit?.auth !== undefined) {
+      this.authManager.importVerifiedAuth(hydrated, preflightHit.auth)
+    }
+
+    const client = await this.mountClient(sanitized, preflightHit)
     this.bumpRevision()
     this.notifyWorkspacesChanged()
     return { ok: true, device: this.withNativePane(this.withAuthState(client.toView())) }
@@ -1785,6 +1841,71 @@ export class DeviceRegistry {
     return listLocalSshKeys()
   }
 
+  private preflightCacheKey(
+    transport: UpsertDeviceInput['transport'],
+    authMode: string,
+    credential: string | undefined,
+  ): string {
+    const payload = transport.kind === 'ssh'
+      ? JSON.stringify({
+          kind: 'ssh',
+          host: transport.host.trim(),
+          port: transport.port ?? 22,
+          username: transport.username?.trim() ?? '',
+          privateKeyPath: transport.privateKeyPath?.trim() ?? '',
+          passphrase: transport.passphrase ?? '',
+          proxyJump: transport.proxyJump?.trim() ?? '',
+          remoteBindHost: transport.remoteBindHost?.trim() ?? '127.0.0.1',
+          remotePort: transport.remotePort ?? 3080,
+          remoteDshHome: transport.remoteDshHome?.trim() ?? '',
+          bootstrapFromRemoteCredentials: transport.bootstrapFromRemoteCredentials === true,
+          authMode,
+          credential: credential?.trim() ?? '',
+        })
+      : JSON.stringify({
+          kind: 'direct',
+          baseUrl: transport.baseUrl.trim().replace(/\/+$/, ''),
+          rejectUnauthorized: transport.rejectUnauthorized !== false,
+          authMode,
+          credential: credential?.trim() ?? '',
+        })
+    return createHash('sha256').update(payload).digest('hex')
+  }
+
+  private storePreflightCache(
+    key: string,
+    entry: {
+      readonly expiresAt: number
+      readonly protocol: '0.2' | '0.1'
+      readonly remoteDshVersion?: string
+      readonly auth?: VerifiedAuthCacheEntry
+    },
+  ): void {
+    const now = Date.now()
+    for (const [k, existing] of this.verifiedPreflightCache) {
+      if (existing.expiresAt <= now) this.verifiedPreflightCache.delete(k)
+    }
+    this.verifiedPreflightCache.delete(key)
+    this.verifiedPreflightCache.set(key, entry)
+    while (this.verifiedPreflightCache.size > 8) {
+      const oldest = this.verifiedPreflightCache.keys().next().value
+      if (oldest === undefined) break
+      this.verifiedPreflightCache.delete(oldest)
+    }
+  }
+
+  private consumePreflightCache(key: string): {
+    readonly protocol: '0.2' | '0.1'
+    readonly remoteDshVersion?: string
+    readonly auth?: VerifiedAuthCacheEntry
+  } | undefined {
+    const hit = this.verifiedPreflightCache.get(key)
+    if (hit === undefined) return undefined
+    this.verifiedPreflightCache.delete(key)
+    if (hit.expiresAt <= Date.now()) return undefined
+    return hit
+  }
+
   /** Test reachability & authentication of a candidate device without saving it. */
   async testDeviceConnection(
     input: UpsertDeviceInput,
@@ -1910,6 +2031,17 @@ export class DeviceRegistry {
 
       const resolved = resolveProbedProtocol(listValue, describeValue)
       if (resolved !== undefined) {
+        if (!this.disposed) {
+          this.storePreflightCache(
+            this.preflightCacheKey(effectiveTransport, tempConfig.auth.mode, effectiveCredential),
+            {
+              expiresAt: Date.now() + 60_000,
+              protocol: resolved.protocol,
+              remoteDshVersion: resolved.version,
+              auth: probeAuth.exportVerifiedAuth(tempConfig.id),
+            },
+          )
+        }
         return {
           ok: true,
           protocolVersion: resolved.protocol,
@@ -2102,6 +2234,12 @@ export class DeviceRegistry {
       taskbarSummary: patch.taskbarSummary === undefined
         ? this.uiPreferences.taskbarSummary
         : patch.taskbarSummary === true,
+      maxKeepAlivePages: patch.maxKeepAlivePages === undefined
+        ? sanitizeKeepAlivePages(this.uiPreferences.maxKeepAlivePages)
+        : sanitizeKeepAlivePages(patch.maxKeepAlivePages, sanitizeKeepAlivePages(this.uiPreferences.maxKeepAlivePages)),
+      keepAliveIdleMinutes: patch.keepAliveIdleMinutes === undefined
+        ? sanitizeKeepAliveIdleMinutes(this.uiPreferences.keepAliveIdleMinutes)
+        : sanitizeKeepAliveIdleMinutes(patch.keepAliveIdleMinutes, sanitizeKeepAliveIdleMinutes(this.uiPreferences.keepAliveIdleMinutes)),
     }
     try { this.saveToDisk() }
     catch (error) { this.uiPreferences = previous; throw error }
@@ -2157,7 +2295,10 @@ export class DeviceRegistry {
     }
   }
 
-  private async mountClient(storedConfig: DeviceConfig): Promise<RemoteDeviceClient> {
+  private async mountClient(
+    storedConfig: DeviceConfig,
+    preflight?: { readonly protocol: '0.2' | '0.1'; readonly remoteDshVersion?: string },
+  ): Promise<RemoteDeviceClient> {
     if (this.disposed) throw new Error('Device registry is disposed')
     const mountGeneration = (this.mountGenerations.get(storedConfig.id) ?? 0) + 1
     this.mountGenerations.set(storedConfig.id, mountGeneration)
@@ -2205,15 +2346,20 @@ export class DeviceRegistry {
       onAuthState: (deviceId, state, error) => {
         this.setAuthState(deviceId, state, error)
       },
+      hasControlProjectionSubscribers: () => this.projectionListeners.size > 0,
     }
 
+    const seed02 = preflight?.protocol === '0.2'
+      ? { remoteDshVersion: preflight.remoteDshVersion }
+      : undefined
     if (client === undefined) {
       client = new RemoteDeviceClient(config, this.authManager, callbacks)
+      if (seed02 !== undefined) client.seedVerifiedProtocol02(seed02.remoteDshVersion)
       client.hydrateCatalog(this.catalogs.get(config.id))
       this.clients.set(config.id, client)
       this.seedRunningFromCatalog(client)
     } else {
-      client.updateConfig(config)
+      client.updateConfig(config, seed02)
     }
 
     if (!config.enabled) {
@@ -2309,6 +2455,8 @@ export class DeviceRegistry {
           crossHostReadState: raw.ui.crossHostReadState === true,
           crossHostUiState: raw.ui.crossHostUiState === true,
           taskbarSummary: raw.ui.taskbarSummary === true,
+          maxKeepAlivePages: sanitizeKeepAlivePages(raw.ui.maxKeepAlivePages),
+          keepAliveIdleMinutes: sanitizeKeepAliveIdleMinutes(raw.ui.keepAliveIdleMinutes),
         }
       }
       const persistedCatalogDocument = this.catalogStorage.read<Parameters<typeof decodeCatalogDocument>[0]>()

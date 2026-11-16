@@ -12,7 +12,8 @@
  *
  * @module dsh-multi-device/host/http-request
  */
-import { type IncomingHttpHeaders } from 'node:http';
+import { Agent as HttpAgent, type IncomingHttpHeaders } from 'node:http';
+import { Agent as HttpsAgent } from 'node:https';
 export interface RemoteHttpRequestOptions {
     readonly method?: string;
     readonly headers?: Readonly<Record<string, string | readonly string[] | undefined>>;
@@ -20,6 +21,8 @@ export interface RemoteHttpRequestOptions {
     readonly signal?: AbortSignal;
     /** TLS certificate verification for `https:` URLs. Defaults to `true`. */
     readonly rejectUnauthorized?: boolean;
+    /** Optional custom HTTP(S) agent override (`false` disables pooling for one call). */
+    readonly agent?: HttpAgent | HttpsAgent | false;
     /** Whole-request inactivity timeout. Defaults to 60 seconds. */
     readonly timeoutMs?: number;
     /** Hard response-size cap. Defaults to 32 MiB. */

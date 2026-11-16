@@ -20,15 +20,16 @@
  *
  * @module dsh-multi-device/host/native-proxy
  */
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
+  Agent as HttpAgent,
   createServer,
   request as httpRequest,
   type IncomingMessage,
   type Server,
   type ServerResponse,
 } from 'node:http'
-import { request as httpsRequest } from 'node:https'
+import { Agent as HttpsAgent, request as httpsRequest } from 'node:https'
 import type { Duplex } from 'node:stream'
 import { brotliDecompress, gunzip, inflate } from 'node:zlib'
 import { promisify } from 'node:util'
@@ -48,6 +49,12 @@ import {
 const PROXY_TOKEN_QUERY = 'md_token'
 const PROXY_COOKIE_PREFIX = 'dsh-md-native-'
 const LEGACY_CLIENT_ID = 'legacy'
+
+function setSocketNoDelay(socket: Duplex | undefined): void {
+  if (socket !== undefined && 'setNoDelay' in socket && typeof (socket as { setNoDelay?: unknown }).setNoDelay === 'function') {
+    try { (socket as { setNoDelay: (noDelay?: boolean) => void }).setNoDelay(true) } catch { /* ignore */ }
+  }
+}
 
 /** Omitted IDs are legacy only, never a wildcard for every bridge. */
 function bridgeClientId(value: string | null | undefined): string {
@@ -145,6 +152,7 @@ type NativeBridgeInbound =
   | { readonly type: 'read'; readonly sessionId?: string; readonly completionId?: string; readonly requestId?: string }
   | { readonly type: 'title'; readonly title?: string }
   | { readonly type: 'visibility'; readonly visible?: boolean }
+  | { readonly type: 'draft'; readonly dirty?: boolean }
 
 /** Commands the proxy sends into the framed page's bridge. */
 type NativeBridgeOutbound =
@@ -185,6 +193,8 @@ export interface NativeProxyHooks {
   readonly onBridgeTitle?: (deviceId: DeviceId, title: string | undefined, clientId?: string) => void
   /** Report whether at least one framed page for this device is actually visible. */
   readonly onBridgeVisibility?: (deviceId: DeviceId, visible: boolean, clientId?: string) => void
+  /** Report whether the framed page has unsent composer input. */
+  readonly onBridgeDraft?: (deviceId: DeviceId, dirty: boolean, clientId?: string) => void
   /** Persist the port a proxy actually bound, so the next restart keeps the origin. */
   readonly onPortAllocated?: (deviceId: DeviceId, port: number) => void
   /** Last Host-owned workspace fold state for the bridge's first render. */
@@ -216,6 +226,7 @@ export interface NativeBridgeSnapshot {
   error?: string
   sessionId?: string
   title?: string
+  draft?: boolean
 }
 
 interface ClientBridgeState extends NativeBridgeSnapshot {
@@ -257,6 +268,9 @@ export class NativeDeviceProxy {
   /** Host-owned raw Session IDs whose completion is unread. */
   private unreadState: readonly string[] = []
   private readCompletions: Readonly<Record<string, string>> | undefined
+  private cachedBridgeScript: { readonly body: Buffer; readonly etag: string } | undefined
+  private upstreamAgent: HttpAgent | HttpsAgent | undefined
+  private upstreamAgentKey: string | undefined
 
   constructor(
     private device: DeviceConfig,
@@ -286,6 +300,48 @@ export class NativeDeviceProxy {
     this.unreadState = this.hooks.getUnreadState?.(device.id) ?? []
     const completions = this.hooks.getReadCompletions?.(device.id)
     this.readCompletions = completions === undefined ? undefined : sanitizeReadCompletions(completions)
+    this.cachedBridgeScript = undefined
+  }
+
+  private getBridgeScriptPayload(): { readonly body: Buffer; readonly etag: string } {
+    if (this.cachedBridgeScript !== undefined) return this.cachedBridgeScript
+    const text = buildNativeBridgeScript({
+      groups: this.uiState.groups,
+      uiState: this.uiState,
+      unread: this.unreadState,
+      readCompletions: this.readCompletions,
+    })
+    const body = Buffer.from(text, 'utf8')
+    const etag = `"${createHash('sha1').update(body).digest('hex')}"`
+    this.cachedBridgeScript = { body, etag }
+    return this.cachedBridgeScript
+  }
+
+  private getUpstreamAgent(url: URL, rejectUnauthorized: boolean): HttpAgent | HttpsAgent {
+    const isHttps = url.protocol === 'https:'
+    const key = `${url.origin}|${isHttps ? String(rejectUnauthorized) : 'http'}`
+    if (this.upstreamAgent !== undefined && this.upstreamAgentKey === key) {
+      return this.upstreamAgent
+    }
+    this.upstreamAgent?.destroy()
+    this.upstreamAgentKey = key
+    this.upstreamAgent = isHttps
+      ? new HttpsAgent({
+          keepAlive: true,
+          keepAliveMsecs: 30_000,
+          maxSockets: 64,
+          maxFreeSockets: 16,
+          scheduling: 'lifo',
+          rejectUnauthorized,
+        })
+      : new HttpAgent({
+          keepAlive: true,
+          keepAliveMsecs: 30_000,
+          maxSockets: 64,
+          maxFreeSockets: 16,
+          scheduling: 'lifo',
+        })
+    return this.upstreamAgent
   }
 
   proxyUrl(): string | undefined {
@@ -366,6 +422,7 @@ export class NativeDeviceProxy {
     })
     server.on('connection', (socket) => {
       if (this.stopped) { socket.destroy(); return }
+      setSocketNoDelay(socket)
       this.sockets.add(socket)
       socket.once('close', () => this.sockets.delete(socket))
     })
@@ -446,6 +503,10 @@ export class NativeDeviceProxy {
           state.visible = false
           this.hooks.onBridgeVisibility?.(this.device.id, false, clientId)
         }
+        if (state.draft === true) {
+          state.draft = false
+          this.hooks.onBridgeDraft?.(this.device.id, false, clientId)
+        }
         if (state.title !== undefined) {
           state.title = undefined
           this.hooks.onBridgeTitle?.(this.device.id, undefined, clientId)
@@ -462,6 +523,10 @@ export class NativeDeviceProxy {
     this.bridgeServer = undefined
     this.bridgeVisibility.clear()
     this.clientStates.clear()
+    this.upstreamAgent?.destroy()
+    this.upstreamAgent = undefined
+    this.upstreamAgentKey = undefined
+    this.cachedBridgeScript = undefined
     for (const socket of this.sockets) {
       try { socket.destroy() } catch { /* ignore */ }
     }
@@ -502,6 +567,7 @@ export class NativeDeviceProxy {
       ...(state?.error !== undefined ? { error: state.error } : {}),
       ...(state?.sessionId !== undefined ? { sessionId: state.sessionId } : {}),
       ...(state?.title !== undefined ? { title: state.title } : {}),
+      ...(state?.draft === true ? { draft: true } : {}),
     }
   }
 
@@ -535,6 +601,7 @@ export class NativeDeviceProxy {
     if (sameGroupState(this.groupState, next)) return
     this.groupState = next
     this.uiState = { ...this.uiState, groups: next }
+    this.cachedBridgeScript = undefined
     this.sendToBridge({ type: 'group-expansion', groups: next })
   }
 
@@ -544,6 +611,7 @@ export class NativeDeviceProxy {
     if (sameWorkspaceViewState(this.uiState, next)) return
     this.uiState = next
     this.groupState = next.groups
+    this.cachedBridgeScript = undefined
     // Old cached pages only understand the fold frame; new pages ignore the
     // duplicate and use the full state.
     this.sendToBridge({ type: 'group-expansion', groups: next.groups })
@@ -565,6 +633,7 @@ export class NativeDeviceProxy {
     }
     this.unreadState = next
     this.readCompletions = tokens
+    this.cachedBridgeScript = undefined
     this.sendToBridge({ type: 'read-state', unreadSessionIds: next, ...(tokens !== undefined ? { readCompletions: tokens } : {}) })
   }
 
@@ -687,17 +756,29 @@ export class NativeDeviceProxy {
     }
 
     if (isNativeBridgeScriptPath(requestUrl.pathname) && (req.method ?? 'GET') === 'GET') {
+      const cached = this.getBridgeScriptPayload()
+      const inm = req.headers['if-none-match']
+      const inmMatched = typeof inm === 'string' && inm.split(',').some((part) => {
+        const trimmed = part.trim()
+        return trimmed === cached.etag || trimmed === `W/${cached.etag}`
+      })
+      if (inmMatched) {
+        res.writeHead(304, {
+          'cache-control': 'no-cache',
+          'etag': cached.etag,
+          'x-content-type-options': 'nosniff',
+        })
+        res.end()
+        return
+      }
       res.writeHead(200, {
         'content-type': 'application/javascript; charset=utf-8',
-        'cache-control': 'no-store',
+        'content-length': String(cached.body.byteLength),
+        'cache-control': 'no-cache',
+        'etag': cached.etag,
         'x-content-type-options': 'nosniff',
       })
-      res.end(buildNativeBridgeScript({
-        groups: this.uiState.groups,
-        uiState: this.uiState,
-        unread: this.unreadState,
-        readCompletions: this.readCompletions,
-      }))
+      res.end(cached.body)
       return
     }
 
@@ -746,6 +827,7 @@ export class NativeDeviceProxy {
       const rejectUnauthorized = this.device.transport.kind === 'direct'
         ? this.device.transport.rejectUnauthorized !== false
         : true
+      const agent = this.getUpstreamAgent(upstream.url, rejectUnauthorized)
       const method = req.method ?? 'GET'
       const injectHtml = isHtmlNavigation(req)
 
@@ -775,6 +857,7 @@ export class NativeDeviceProxy {
             method,
             path: upstreamPath,
             headers: outHeaders,
+            agent,
             ...(isHttps ? { rejectUnauthorized } : {}),
           },
           (proxyRes) => {
@@ -1065,7 +1148,7 @@ export class NativeDeviceProxy {
       // lifetimes. Only navigation/selection and shared navigation lifecycle
       // reports are owned by the latest container socket.
       if (state.navigationOwner !== ws &&
-          (message.type === 'failed' || message.type === 'navigation' || message.type === 'selection')) return
+          (message.type === 'failed' || message.type === 'navigation' || message.type === 'selection' || message.type === 'draft')) return
       if (message.type === 'ready') {
         this.readyBridgeClients.add(ws)
         if (state.navigationOwner === ws) {
@@ -1172,6 +1255,13 @@ export class NativeDeviceProxy {
       }
       if (message.type === 'visibility') {
         this.updateBridgeVisibility(ws, message.visible === true)
+        return
+      }
+      if (message.type === 'draft') {
+        const dirty = message.dirty === true
+        if ((state.draft === true) === dirty) return
+        state.draft = dirty
+        this.hooks.onBridgeDraft?.(this.device.id, dirty, clientId)
       }
     })
 
@@ -1199,6 +1289,10 @@ export class NativeDeviceProxy {
       this.trimClientStates(clientId)
       this.reportBridgeVisibility(clientId)
       if (!wasOwner || nextOwner !== undefined) return
+      if (state.draft === true) {
+        state.draft = false
+        this.hooks.onBridgeDraft?.(this.device.id, false, clientId)
+      }
       if (state.title !== undefined) {
         state.title = undefined
         this.hooks.onBridgeTitle?.(this.device.id, undefined, clientId)
@@ -1354,10 +1448,12 @@ export class NativeDeviceProxy {
       proxyReq.destroy()
       clientSocket.destroy()
     }
+    setSocketNoDelay(clientSocket)
     const proxyReq = reqFn(upstream.url, {
       method: 'GET',
       path: upstreamPath,
       headers: outHeaders,
+      agent: false,
       ...(isHttps ? { rejectUnauthorized } : {}),
     })
     this.cancelUpstreams.add(cancel)
@@ -1368,6 +1464,7 @@ export class NativeDeviceProxy {
     proxyReq.on('upgrade', (proxyRes, proxySocket, proxyHead) => {
       upstreamResponse = proxyRes
       upstreamSocket = proxySocket
+      setSocketNoDelay(proxySocket)
       proxySocket.on('error', cancel)
       proxySocket.once('close', cancel)
       proxySocket.once('end', cancel)

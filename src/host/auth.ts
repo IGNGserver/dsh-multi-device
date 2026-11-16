@@ -41,6 +41,12 @@ export interface StoredDeviceSecret {
   readonly updatedAt: number
 }
 
+export interface VerifiedAuthCacheEntry {
+  readonly cookie?: string
+  readonly cookieAuthority?: string
+  readonly bearerToken?: string
+}
+
 interface SecretStoreDocument {
   readonly version: 1
   readonly secrets: Record<string, StoredDeviceSecret>
@@ -435,6 +441,39 @@ export class DeviceAuthManager {
     }
     if (passphrase === null) delete (next as { sshPassphrase?: string }).sshPassphrase
     this.persistEntry(deviceId, next)
+  }
+
+  /** Export derived cookie/bearer material verified during a preflight connection test. */
+  exportVerifiedAuth(deviceId: DeviceId): VerifiedAuthCacheEntry | undefined {
+    const current = this.secrets.get(deviceId)
+    if (current === undefined) return undefined
+    if (current.cookie === undefined && current.bearerToken === undefined) return undefined
+    return {
+      ...(current.cookie !== undefined ? { cookie: current.cookie } : {}),
+      ...(current.cookieAuthority !== undefined ? { cookieAuthority: current.cookieAuthority } : {}),
+      ...(current.bearerToken !== undefined ? { bearerToken: current.bearerToken } : {}),
+    }
+  }
+
+  /**
+   * Seed preflight-verified derived authentication material onto a saved device
+   * so saving immediately after a successful `testDeviceConnection` skips repeating
+   * SSH `.credentials.yaml` bootstrap or token exchange.
+   */
+  importVerifiedAuth(device: DeviceConfig, verified: VerifiedAuthCacheEntry): void {
+    if (verified.cookie === undefined && verified.bearerToken === undefined) return
+    const current = this.secrets.get(device.id)
+    const cacheBinding = authenticationCacheBinding(device, current)
+    const next: StoredDeviceSecret = {
+      ...(current ?? { deviceId: device.id, updatedAt: Date.now() }),
+      deviceId: device.id,
+      updatedAt: Date.now(),
+      cacheBinding,
+      ...(verified.cookie !== undefined ? { cookie: verified.cookie } : {}),
+      ...(verified.cookieAuthority !== undefined ? { cookieAuthority: verified.cookieAuthority } : {}),
+      ...(verified.bearerToken !== undefined ? { bearerToken: verified.bearerToken } : {}),
+    }
+    this.persistEntry(device.id, next)
   }
 
   /**

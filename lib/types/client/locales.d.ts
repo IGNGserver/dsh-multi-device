@@ -119,6 +119,13 @@ export declare const zh: {
     readonly deviceDisabledTag: "已停用";
     readonly deviceEnabledNotice: "已启用设备 {name}";
     readonly deviceDisabledNotice: "已停用设备 {name}";
+    readonly keepAliveMaxPagesTitle: "后台保活页面上限";
+    readonly keepAliveMaxPagesDesc: "同时保留在内存中的远端设备页面数量（含未发送草稿的页面将自动豁免淘汰）。调低可显著减少控制端内存占用。";
+    readonly keepAlivePagesOption: "{count} 台设备";
+    readonly keepAliveIdleTitle: "后台闲置自动休眠";
+    readonly keepAliveIdleDesc: "非当前查看且无未发送草稿的后台设备页面，超过闲置时长后自动卸载释放内存；切回标签页时自动恢复原会话，不影响远端运行中的任务。";
+    readonly keepAliveIdleNever: "从不休眠";
+    readonly keepAliveIdleMinutesOption: "{minutes} 分钟";
 };
 export type MultiDeviceLocaleKey = keyof typeof zh;
 export declare const en: Record<MultiDeviceLocaleKey, string>;

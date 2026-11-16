@@ -121,6 +121,13 @@ export const zh = {
   deviceDisabledTag: '已停用',
   deviceEnabledNotice: '已启用设备 {name}',
   deviceDisabledNotice: '已停用设备 {name}',
+  keepAliveMaxPagesTitle: '后台保活页面上限',
+  keepAliveMaxPagesDesc: '同时保留在内存中的远端设备页面数量（含未发送草稿的页面将自动豁免淘汰）。调低可显著减少控制端内存占用。',
+  keepAlivePagesOption: '{count} 台设备',
+  keepAliveIdleTitle: '后台闲置自动休眠',
+  keepAliveIdleDesc: '非当前查看且无未发送草稿的后台设备页面，超过闲置时长后自动卸载释放内存；切回标签页时自动恢复原会话，不影响远端运行中的任务。',
+  keepAliveIdleNever: '从不休眠',
+  keepAliveIdleMinutesOption: '{minutes} 分钟',
 } as const
 
 export type MultiDeviceLocaleKey = keyof typeof zh
@@ -238,4 +245,11 @@ export const en: Record<MultiDeviceLocaleKey, string> = {
   deviceDisabledTag: 'Disabled',
   deviceEnabledNotice: 'Enabled {name}',
   deviceDisabledNotice: 'Disabled {name}',
+  keepAliveMaxPagesTitle: 'Background keep-alive page limit',
+  keepAliveMaxPagesDesc: 'Maximum remote device pages kept mounted in memory at once (pages with unsent drafts are spared automatically). Lowering this reduces Controller memory usage.',
+  keepAlivePagesOption: '{count} devices',
+  keepAliveIdleTitle: 'Hibernate idle background pages',
+  keepAliveIdleDesc: 'Automatically unmount inactive, draft-free background device pages after idle time to reclaim memory; re-selecting the tab restores the last session without interrupting remote tasks.',
+  keepAliveIdleNever: 'Never',
+  keepAliveIdleMinutesOption: '{minutes} min',
 }

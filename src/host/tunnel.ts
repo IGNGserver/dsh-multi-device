@@ -12,10 +12,10 @@
  * @module dsh-multi-device/host/tunnel
  */
 import { execFile, execFileSync, spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { access } from 'node:fs/promises'
 import { createConnection, createServer, type Server, type Socket } from 'node:net'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { SshTransportConfig } from '../contract.ts'
 import {
@@ -30,6 +30,43 @@ export type TunnelState = 'connecting' | 'up' | 'error' | 'stopped'
 export const SSH2_MISSING_MESSAGE = 'The optional ssh2 engine is not installed. Use system-ssh with an SSH agent, or explicitly install ssh2 in this DSH Profile through dsh plugin and approve only its reported build scripts.'
 const MAX_EXEC_STDOUT_BYTES = 2 * 1024 * 1024
 const MAX_EXEC_STDERR_BYTES = 256 * 1024
+
+let cachedSshControlPath: string | null | undefined
+
+/**
+ * Return OpenSSH multiplexing CLI flags (`ControlMaster=auto`, `ControlPersist=60`,
+ * `ControlPath=...`) on POSIX platforms so `execSshCommand` (credential read /
+ * cross-Host sync) and `SshTunnel` share a single authenticated SSH connection.
+ *
+ * Uses `%C` (40-char SHA-1 of `%l%h%p%r`) inside a private `0700` per-UID temp dir
+ * so total `sun_path` stays ~64 bytes (well below macOS 104B / Linux 108B limits).
+ */
+export function sshControlMultiplexArgs(): string[] {
+  if (process.platform === 'win32') return []
+  if (cachedSshControlPath === undefined) {
+    try {
+      const uidSuffix = typeof process.getuid === 'function' ? String(process.getuid()) : String(process.pid)
+      const dir = join(tmpdir(), `dsh-md-ssh-${uidSuffix}`)
+      mkdirSync(dir, { recursive: true, mode: 0o700 })
+      try { chmodSync(dir, 0o700) } catch { /* ignore if restricted */ }
+      const stat = statSync(dir)
+      if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) {
+        cachedSshControlPath = null
+      } else {
+        const candidate = join(dir, 'cm-%C')
+        cachedSshControlPath = candidate.length <= 92 ? candidate : null
+      }
+    } catch {
+      cachedSshControlPath = null
+    }
+  }
+  if (cachedSshControlPath === null) return []
+  return [
+    '-o', 'ControlMaster=auto',
+    '-o', 'ControlPersist=60',
+    '-o', `ControlPath=${cachedSshControlPath}`,
+  ]
+}
 
 export interface TunnelStatus {
   readonly state: TunnelState
@@ -129,6 +166,7 @@ export function buildSystemSshArgs(
     '-o', 'ServerAliveCountMax=3',
     '-o', 'ConnectTimeout=10',
     '-o', strictHostKeyCheckingArg(),
+    ...sshControlMultiplexArgs(),
     '-L', `127.0.0.1:${localPort}:${forward.host}:${forward.port}`,
   ]
 
@@ -186,6 +224,7 @@ export async function execSshCommand(
     '-o', 'BatchMode=yes',
     '-o', 'ConnectTimeout=6',
     '-o', strictHostKeyCheckingArg(),
+    ...sshControlMultiplexArgs(),
   ]
   const explicitPort = transport.port ?? parsedSpec.port
   if (explicitPort !== undefined) args.push('-p', String(explicitPort))
@@ -207,6 +246,7 @@ export async function execSshCommand(
     let stdoutBytes = 0
     let stderrBytes = 0
     let settled = false
+    let exitDrainTimer: ReturnType<typeof setTimeout> | undefined
     const proc = spawn('ssh', args, { stdio: ['ignore', 'pipe', 'pipe'] })
     const onAbort = (): void => {
       try { proc.kill('SIGKILL') } catch { /* already exited */ }
@@ -217,8 +257,14 @@ export async function execSshCommand(
       settled = true
       clearTimeout(timer)
       clearTimeout(killTimer)
+      if (exitDrainTimer !== undefined) clearTimeout(exitDrainTimer)
       signal?.removeEventListener('abort', onAbort)
       resolve(res)
+    }
+    const completeWithCode = (code: number | null): void => {
+      const stderr = Buffer.concat(stderrChunks).toString('utf8')
+      if (code === 0) finish({ ok: true, stdout: Buffer.concat(stdoutChunks).toString('utf8') })
+      else finish({ ok: false, error: stderr.trim() || `ssh exited with code ${String(code)}` })
     }
     const timer = setTimeout(() => {
       try { proc.kill('SIGTERM') } catch { /* ignore */ }
@@ -252,10 +298,21 @@ export async function execSshCommand(
     proc.on('error', (err) => {
       finish({ ok: false, error: err.message })
     })
+    // When OpenSSH spawns a background ControlPersist mux master, that child
+    // can inherit stdio pipe FDs and delay 'close'. If 'close' does not fire
+    // within 30ms of foreground 'exit', detach local pipe readers and settle.
+    proc.on('exit', (code) => {
+      if (settled || exitDrainTimer !== undefined) return
+      exitDrainTimer = setTimeout(() => {
+        exitDrainTimer = undefined
+        ;(proc.stdout as unknown as { destroy?: () => void } | null)?.destroy?.()
+        ;(proc.stderr as unknown as { destroy?: () => void } | null)?.destroy?.()
+        completeWithCode(code)
+      }, 30)
+      exitDrainTimer.unref?.()
+    })
     proc.on('close', (code) => {
-      const stderr = Buffer.concat(stderrChunks).toString('utf8')
-      if (code === 0) finish({ ok: true, stdout: Buffer.concat(stdoutChunks).toString('utf8') })
-      else finish({ ok: false, error: stderr.trim() || `ssh exited with code ${String(code)}` })
+      completeWithCode(code)
     })
   })
 }

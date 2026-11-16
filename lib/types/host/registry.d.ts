@@ -71,8 +71,10 @@ export declare class DeviceRegistry {
      * summaries before a Workspace row referencing them reaches the sidebar.
      */
     private readonly sessionPublishListeners;
-    /** Injected Native Pane bridge lifecycle, last page selection/title, and visibility per device. */
+    /** Injected Native Pane bridge lifecycle, last page selection/title, visibility, and composer draft per device. */
     private readonly nativePanes;
+    /** Short-lived (60s) verified auth + protocol cache from testDeviceConnection so immediate Save skips re-probing. */
+    private readonly verifiedPreflightCache;
     /** Previous connection state per device, so workspace rows are recomputed on a real transition. */
     private readonly lastDeviceStates;
     /** Host-owned fold state per device, restored into the framed page before its first render. */
@@ -364,6 +366,8 @@ export declare class DeviceRegistry {
      * keep-alive page as if the user were reading it.
      */
     private setNativePaneVisibility;
+    /** Track whether a Keep-Alive page has unsent composer input so LRU eviction skips it. */
+    private setNativePaneDraft;
     /** Persist the actually-bound native proxy port so the origin stays stable. */
     private persistNativeProxyPort;
     private withNativePane;
@@ -410,6 +414,9 @@ export declare class DeviceRegistry {
     }>;
     /** List local private-key candidates for the add/edit device form. */
     listSshKeys(): SshKeyEntry[];
+    private preflightCacheKey;
+    private storePreflightCache;
+    private consumePreflightCache;
     /** Test reachability & authentication of a candidate device without saving it. */
     testDeviceConnection(input: UpsertDeviceInput): Promise<{
         ok: true;

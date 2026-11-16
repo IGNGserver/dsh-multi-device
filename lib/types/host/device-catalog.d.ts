@@ -21,6 +21,7 @@ export declare class DeviceCatalog {
     private request;
     private flight;
     private rows;
+    private readonly rowIndexById;
     private workspaceRows;
     private archived;
     private pinned;
@@ -41,6 +42,9 @@ export declare class DeviceCatalog {
     get ready(): boolean;
     get eventsReady(): boolean;
     isCurrent(epoch: number): boolean;
+    /** O(1) session summary lookup by raw sessionId. */
+    getSession(id: string): RemoteSessionSummary | undefined;
+    private setRows;
     beginEpoch(): number;
     disconnect(): void;
     markEventsReady(epoch: number): void;
@@ -60,6 +64,6 @@ export declare class DeviceCatalog {
     private syncControlHints;
     private reduceSession;
     applyWorkspaceFrame(epoch: number, frame: unknown, legacy?: boolean): boolean;
-    applyControlFrame(epoch: number, frame: unknown, namespace: (key: string, value: unknown) => unknown): CatalogProjectionUpdate[] | undefined;
+    applyControlFrame(epoch: number, frame: unknown, namespace: (key: string, value: unknown) => unknown, retainOnlyHintKeys?: boolean): CatalogProjectionUpdate[] | undefined;
 }
 export {};

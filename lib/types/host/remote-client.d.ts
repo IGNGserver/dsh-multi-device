@@ -79,6 +79,8 @@ export interface RemoteDeviceCallbacks {
     readonly onWorkspacesChanged: (deviceId: DeviceId) => void;
     /** Optional auth-state callback so 401/403 on control/RPC surfaces in the UI. */
     readonly onAuthState?: (deviceId: DeviceId, state: DeviceAuthState, error?: string) => void;
+    /** False when no local consumer subscribes to control projections; trims non-hint projection memory. */
+    readonly hasControlProjectionSubscribers?: () => boolean;
 }
 export declare class RemoteDeviceClient {
     private readonly authManager;
@@ -86,6 +88,7 @@ export declare class RemoteDeviceClient {
     private config;
     private tunnel;
     private state;
+    private proxyReady;
     private protocolVersion;
     /** 0.1 has no live stream. The UI uses this to show a list-only device. */
     private realtime;
@@ -177,7 +180,11 @@ export declare class RemoteDeviceClient {
     /** Drop every pending waterfall and close its local card. */
     private clearPendingInteractions;
     private currentTargetKey;
-    updateConfig(next: DeviceConfig): void;
+    /** Reuse a recent preflight probe result so the initial mount skips redundant 0.1 fallback probing. */
+    seedVerifiedProtocol02(remoteDshVersion?: string): void;
+    updateConfig(next: DeviceConfig, seed02?: {
+        readonly remoteDshVersion?: string;
+    }): void;
     reconnectNow(): void;
     /**
      * Invoke a DSH 0.2 unary endpoint (`<namespace>/<method>`) on the remote device,
