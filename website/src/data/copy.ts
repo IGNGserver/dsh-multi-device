@@ -1,6 +1,6 @@
 import type { Locale } from '../types'
 
-export const RELEASE_VERSION = 'v0.3.7'
+export const RELEASE_VERSION = 'v0.3.8'
 export const RELEASE_TAG_URL =
   `https://github.com/IGNGserver/dsh-multi-device/releases/tag/${RELEASE_VERSION}`
 export const RELEASE_TGZ_URL =
