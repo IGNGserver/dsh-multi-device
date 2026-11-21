@@ -191,7 +191,7 @@ export declare function compareDshRelease(left: DshRelease, right: DshRelease): 
  */
 export declare function sameDshRelease(left: string | undefined, right: string | undefined): boolean | undefined;
 /** Lowest DSH release whose base bundle ships the Agent Team client plugin. */
-export declare const NATIVE_AGENT_TEAM_MIN_RELEASE = "0.2.2-rc.1";
+export declare const NATIVE_AGENT_TEAM_MIN_RELEASE = "0.2.2-rc.2";
 /**
  * Whether a framed page release is new enough to be expected to ship Agent Team.
  * Older remote DSH releases legitimately lack the feature; a warning there would

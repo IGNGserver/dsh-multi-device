@@ -140,7 +140,8 @@ describe('DSH release comparison', () => {
 
 describe('Agent Team canary expectation', () => {
   it('expects the canary from the 0.2.2 prerelease line onward', () => {
-    expect(nativeAgentTeamExpected('0.2.2-rc.1')).toBe(true)
+    expect(nativeAgentTeamExpected('0.2.2-rc.1')).toBe(false)
+    expect(nativeAgentTeamExpected('0.2.2-rc.2')).toBe(true)
     expect(nativeAgentTeamExpected('0.2.2-rc.5')).toBe(true)
     expect(nativeAgentTeamExpected('0.2.2')).toBe(true)
     expect(nativeAgentTeamExpected('0.2.3-rc.1')).toBe(true)
