@@ -174,6 +174,12 @@ it('RemoteDeviceClient subscribes before baseline, journals deltas and waits for
   const deltasObserved = deferred<void>()
   let lists = 0
   const server = createServer(async (req, res) => {
+    if (req.method === 'GET' || req.method === 'HEAD') {
+      // The Host probes the index page's boot release on cold connects.
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      res.end('<!doctype html><html><head><script>globalThis["__DSH_BOOT__"]={"release":{"version":"0.2.2"},"entries":[]};</script></head></html>')
+      return
+    }
     const chunks: Buffer[] = []
     for await (const chunk of req) chunks.push(Buffer.from(chunk))
     const body = JSON.parse(Buffer.concat(chunks).toString())

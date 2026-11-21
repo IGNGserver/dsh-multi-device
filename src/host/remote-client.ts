@@ -38,6 +38,39 @@ import { DeviceCatalog } from './device-catalog.ts'
 import { DeviceAuthManager } from './auth.ts'
 import { headerValue, requestRemote, responseAsFetchResponse } from './http-request.ts'
 import { BoundedStreamQueue } from './stream-queue.ts'
+
+/** DSH release parsed from a remote page's client boot graph. */
+export interface RemotePageRelease {
+  readonly version: string
+  readonly commit?: string
+}
+
+/**
+ * Read the DSH release a remote page's client bundle was built from.
+ *
+ * DSH serves its release identity inside the index HTML
+ * (`__DSH_BOOT__.release`); RPC endpoints do not report it (0.2.x
+ * `session/list` carries only items, and there is no `host.describe`), so this
+ * is the one authoritative source for "which DSH is the remote serving now".
+ *
+ * @param html - remote index document.
+ * @returns parsed release, or undefined when the page exposes no boot release.
+ */
+export function parseRemotePageRelease(html: string): RemotePageRelease | undefined {
+  if (typeof html !== 'string') return undefined
+  const bootAt = html.indexOf('__DSH_BOOT__')
+  if (bootAt === -1) return undefined
+  // The graph is one inline assignment; a bounded window keeps a decoy
+  // "release" elsewhere in the document from being mistaken for it.
+  const graphText = html.slice(bootAt, bootAt + 4_000)
+  const match = /"release"\s*:\s*\{\s*"version"\s*:\s*"([0-9A-Za-z._+-]{1,64})"(?:[^}]*?"commit"\s*:\s*"([0-9A-Za-z._+-]{1,64})")?/u.exec(graphText)
+  if (match === null) return undefined
+  return {
+    version: match[1]!,
+    ...(match[2] !== undefined ? { commit: match[2] } : {}),
+  }
+}
+
 import { SshTunnel } from './tunnel.ts'
 
 /** Map a remote waterfall event name (and payload) to the pending kind shown in the UI. */
@@ -227,6 +260,8 @@ export class RemoteDeviceClient {
   private iterationAbort: AbortController | undefined
   private verified02TargetKey: string | undefined
   private verified02Version: string | undefined
+  /** Last page release probe result; short TTL so a remote DSH upgrade is noticed after reconnect. */
+  private pageReleaseProbe: { readonly targetKey: string; readonly at: number; readonly release?: RemotePageRelease } | undefined
   private adaptiveSshCompress = false
 
   constructor(
@@ -944,6 +979,48 @@ export class RemoteDeviceClient {
     return signal.aborted ? undefined : tunnel.baseUrl()
   }
 
+  /**
+   * Probe the remote's current page release over HTTP.
+   *
+   * Used only when the protocol handshake reports no version (every 0.2.x
+   * release): the framed page's own release may be older (Keep-Alive), so the
+   * Host needs the live release to tell a stale page from a real regression.
+   * A short TTL avoids an extra page fetch on reconnect storms while still
+   * refreshing after a remote DSH restart/upgrade.
+   */
+  private async probePageRelease(
+    baseUrl: string,
+    signal: AbortSignal,
+  ): Promise<RemotePageRelease | undefined> {
+    const targetKey = this.currentTargetKey()
+    const cached = this.pageReleaseProbe
+    if (cached !== undefined && cached.targetKey === targetKey && Date.now() - cached.at < 30_000) {
+      return cached.release
+    }
+    const url = new URL('/', baseUrl)
+    let release: RemotePageRelease | undefined
+    try {
+      const response = await requestRemote(url.href, {
+        method: 'GET',
+        headers: { ...this.authManager.getAuthHeaders(this.config), accept: 'text/html' },
+        maxResponseBytes: 2 * 1024 * 1024,
+        timeoutMs: 15_000,
+        signal,
+        rejectUnauthorized:
+          this.config.transport.kind === 'direct'
+            ? this.config.transport.rejectUnauthorized !== false
+            : true,
+      })
+      if (response.status === 200) release = parseRemotePageRelease(response.body.toString('utf8'))
+    } catch {
+      // A page probe must never block the connection; the framed page's own
+      // capability report still describes what it loaded.
+      release = undefined
+    }
+    this.pageReleaseProbe = { targetKey, at: Date.now(), ...(release !== undefined ? { release } : {}) }
+    return release
+  }
+
   private async handshakeAndLoadInitial(
     baseUrl: string,
     signal: AbortSignal,
@@ -954,6 +1031,8 @@ export class RemoteDeviceClient {
 
     let res02: Awaited<ReturnType<RemoteDeviceClient['rawRpcPost']>>
     let res01: Awaited<ReturnType<RemoteDeviceClient['rawRpcPost']>> | undefined
+    /** Cold connects fetch the page release in the same RTT as the RPC probes. */
+    let pageReleaseProbe: Promise<RemotePageRelease | undefined> | undefined
 
     if (known02) {
       // Fast reconnect path: target already proved DSH 0.2, skip host.describe RTT
@@ -966,7 +1045,9 @@ export class RemoteDeviceClient {
         res02 = await this.rawRpcPost('session/list', { args: { _request: {} } }, signal)
       }
     } else {
-      // Cold connect: run session/list and host.describe concurrently in 1 RTT
+      // Cold connect: run session/list, host.describe and the page-release
+      // probe concurrently in 1 RTT.
+      pageReleaseProbe = this.probePageRelease(baseUrl, signal)
       ;[res02, res01] = await Promise.all([
         this.rawRpcPost('session/list', { args: { _request: {} } }, signal),
         this.rawRpcPost('host.describe', {}, signal, 'host.describe'),
@@ -1011,6 +1092,12 @@ export class RemoteDeviceClient {
       this.verified02TargetKey = targetKey
       if (resolved.version !== undefined) this.verified02Version = resolved.version
       this.realtime = true
+      // 0.2.x RPCs carry no release; the page's boot graph does. Best-effort:
+      // never block a working connection on this probe.
+      const pageRelease = resolved.version === undefined
+        ? await (pageReleaseProbe ?? this.probePageRelease(baseUrl, signal))
+        : undefined
+      if (pageRelease?.version !== undefined) this.verified02Version = pageRelease.version
       return {
         protocolVersion: '0.2',
         remoteDshVersion: resolved.version ?? this.verified02Version ?? '0.2.x',

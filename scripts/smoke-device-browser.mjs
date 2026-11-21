@@ -306,6 +306,13 @@ async function assertPageCapabilities(page, frame, deviceId, clientId) {
     const candidate = value.devices.find(entry => entry.id === deviceId)
     return candidate?.nativePageCapabilities !== undefined ? candidate : undefined
   }, 'host received the framed page capability snapshot')
+  check(
+    typeof device.remoteDshVersion === 'string' && /^v?\d+\.\d+\.\d+/.test(device.remoteDshVersion),
+    `Host did not resolve the remote DSH release (got ${String(device.remoteDshVersion)})`,
+  )
+  if (boot.release?.version !== undefined) {
+    check(device.remoteDshVersion === boot.release.version, 'Host remote release differs from the page boot release')
+  }
   const capabilities = device.nativePageCapabilities
   check(capabilities.runtimeCaptured === true, 'Capability snapshot never captured the page client context')
   if (boot.entries.length > 0) {

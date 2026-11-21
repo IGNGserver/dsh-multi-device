@@ -12,6 +12,7 @@ import {
   type NativePageCapabilities,
 } from '../src/contract.ts'
 import { sanitizeNativePageCapabilities } from '../src/host/native-bridge.ts'
+import { parseRemotePageRelease } from '../src/host/remote-client.ts'
 import { nativePageWarnings } from '../src/runtime.ts'
 
 function capabilities(overrides: Partial<NativePageCapabilities> = {}): NativePageCapabilities {
@@ -161,6 +162,34 @@ describe('Agent Team canary expectation', () => {
     }))).toBe(false)
     expect(nativeAgentTeamCanaryMissing(device({ nativePageCapabilities: capabilities() }))).toBe(false)
     expect(nativeAgentTeamCanaryMissing(device({}))).toBe(false)
+  })
+})
+
+describe('parseRemotePageRelease', () => {
+  const indexHtml = (release: string): string => `<!doctype html><html><head><script>globalThis["__DSH_BOOT__"] = {"rev":"41530cb57100",${release},"entries":[{"id":"@deepseek-ai/dsh-client-ui-workspace"}]};</script></head></html>`
+
+  it('reads the release the remote page was built from', () => {
+    expect(parseRemotePageRelease(indexHtml('"release":{"version":"0.2.2-rc.5","commit":"3f85d88"},')))
+      .toEqual({ version: '0.2.2-rc.5', commit: '3f85d88' })
+    expect(parseRemotePageRelease(indexHtml('"release":{"version":"0.2.1-rc.5"},')))
+      .toEqual({ version: '0.2.1-rc.5' })
+  })
+
+  it('ignores a document without a boot release', () => {
+    expect(parseRemotePageRelease('<html><body>DSH 0.1 shell</body></html>')).toBeUndefined()
+    expect(parseRemotePageRelease(indexHtml(''))).toBeUndefined()
+    expect(parseRemotePageRelease('')).toBeUndefined()
+  })
+
+  it('does not mistake a release-like string before the boot graph for the boot release', () => {
+    const decoy = '<script>var x={"release":{"version":"9.9.9"}};</script>'
+    expect(parseRemotePageRelease(decoy + indexHtml('"release":{"version":"0.2.2-rc.5"},')))
+      .toEqual({ version: '0.2.2-rc.5' })
+  })
+
+  it('rejects values that do not look like a release', () => {
+    expect(parseRemotePageRelease(indexHtml('"release":{"version":"0.2.x"},'))).toEqual({ version: '0.2.x' })
+    expect(parseRemotePageRelease(indexHtml('"release":{"version":"has space"},'))).toBeUndefined()
   })
 })
 

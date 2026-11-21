@@ -1,5 +1,22 @@
 import { type DeviceAuthState, type DeviceCatalogCache, type DeviceConfig, type DeviceConnectionState, type DeviceId, type DeviceTransportConfig, type DeviceView, type PendingInteractionKind } from '../contract.ts';
 import { DeviceAuthManager } from './auth.ts';
+/** DSH release parsed from a remote page's client boot graph. */
+export interface RemotePageRelease {
+    readonly version: string;
+    readonly commit?: string;
+}
+/**
+ * Read the DSH release a remote page's client bundle was built from.
+ *
+ * DSH serves its release identity inside the index HTML
+ * (`__DSH_BOOT__.release`); RPC endpoints do not report it (0.2.x
+ * `session/list` carries only items, and there is no `host.describe`), so this
+ * is the one authoritative source for "which DSH is the remote serving now".
+ *
+ * @param html - remote index document.
+ * @returns parsed release, or undefined when the page exposes no boot release.
+ */
+export declare function parseRemotePageRelease(html: string): RemotePageRelease | undefined;
 /** Map a remote waterfall event name (and payload) to the pending kind shown in the UI. */
 export declare function pendingInteractionKind(event: string, request?: Record<string, unknown>): PendingInteractionKind | undefined;
 export interface RemoteSessionSummary {
@@ -128,6 +145,8 @@ export declare class RemoteDeviceClient {
     private iterationAbort;
     private verified02TargetKey;
     private verified02Version;
+    /** Last page release probe result; short TTL so a remote DSH upgrade is noticed after reconnect. */
+    private pageReleaseProbe;
     private adaptiveSshCompress;
     constructor(config: DeviceConfig, authManager: DeviceAuthManager, callbacks: RemoteDeviceCallbacks, options?: RemoteClientOptions);
     get id(): DeviceId;
@@ -228,6 +247,16 @@ export declare class RemoteDeviceClient {
     }>;
     private superviseLoop;
     private ensureTransportUp;
+    /**
+     * Probe the remote's current page release over HTTP.
+     *
+     * Used only when the protocol handshake reports no version (every 0.2.x
+     * release): the framed page's own release may be older (Keep-Alive), so the
+     * Host needs the live release to tell a stale page from a real regression.
+     * A short TTL avoids an extra page fetch on reconnect storms while still
+     * refreshing after a remote DSH restart/upgrade.
+     */
+    private probePageRelease;
     private handshakeAndLoadInitial;
     private runProtocol02Streams;
     private pump02RemoteEvents;
