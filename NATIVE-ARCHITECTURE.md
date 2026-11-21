@@ -42,6 +42,13 @@
 - Keep-Alive 用 `display` 隐藏而不是卸载，因此切换标签页不丢 WebSocket、会话与草稿；隐藏页面不消费新提醒，可见时才清除。
 - 已读回执使用幂等 ACK 与重试；只有连接代次亲见运行到完成、且能用官方只读分页确认 `turn/end` 的游标才提升为公共身份。
 
+## 页面能力上报与版本漂移
+
+- 设备标签页运行远端自己的 DSH 页面，因此某个客户端功能是否存在，取决于**该页面**的 boot 图与其 `remote.*` 命名空间，而不是控制机插件。桥接在 boot 后按短计划上报 `capabilities` 帧：页面 DSH release（version/commit）、有界的客户端插件 id 列表、`__DSH_REMOTE_ACCESS__` 基线、以及从捕获的客户端 Context 探测到的 `remote.agentTeams` / `remote.session` 是否存在；socket 重连与页面重载都会重报。
+- Host 按逻辑浏览器客户端保存该快照（与 selection/title 同粒度），随 `DeviceView.nativePageCapabilities` 下发给浏览器、写入 Diagnostics，并据此生成 `nativePageWarnings`：桥接失败、保活页面 release 与远端当前 release 不一致、页面不是 owner Peer；canary 缺失只有在**页面自身 release 已包含该 canary**（Agent Team 自 `0.2.2-rc.1` 起在 dsh-base 中）时才告警——旧版远端没有该功能是版本事实，不算回归。
+- 保活页面跨过远端 DSH 升级时，旧页面会保留旧功能集；客户端对每个 `(页面 release, 远端 release)` 组合**自动重载一次**并给出提示，重载后新页面上报新 release 即停止，避免循环。页面尚未上报能力（远端 DSH 过旧）时不擅自重载。
+- 这是把「静默缺功能」变成「可解释的诊断 + 自愈」的边界：插件不复制远端 UI，也不承诺替旧版远端补齐功能；功能集的权威始终是远端页面本身。
+
 ## 浏览器入口能力边界
 
 原生内容当前支持已验证的 DSH Desktop guest 与本机 HTTP IPv4/localhost Web GUI。HTTPS 页面、远程浏览器访问控制机 loopback、IPv6 parent 等返回明确不支持原因，不回退到本机镜像，也不生成不可达地址。

@@ -16,9 +16,16 @@ import type {
   DeviceId,
   DeviceView,
   MultiDeviceSnapshot,
+  NativePageRelease,
   UpsertDeviceInput,
 } from './contract.ts'
-import { sanitizeWorkspaceViewState } from './contract.ts'
+import {
+  NATIVE_CANARY_AGENT_TEAM_PLUGIN,
+  nativeAgentTeamCanaryMissing,
+  nativePageCapabilityGaps,
+  nativePageVersionDrift,
+  sanitizeWorkspaceViewState,
+} from './contract.ts'
 import type { DeviceRegistry } from './host/registry.ts'
 
 export const MULTI_DEVICE_API_PATH = '/multi-device/api'
@@ -337,6 +344,56 @@ export interface DiagnosticsDevice {
   readonly lastError?: string
   /** Why this device was dropped from the merged `session.list`, if it was. */
   readonly sessionListError?: string
+  /** Injected bridge lifecycle of this device's framed page. */
+  readonly nativePaneState?: DeviceView['nativePaneState']
+  readonly nativePaneError?: string
+  /** Release the framed page's client bundle was built from. */
+  readonly nativePageRelease?: NativePageRelease
+  /** Client-plugin surface the framed page reported about itself. */
+  readonly nativePageCapabilities?: {
+    readonly clientPluginCount: number
+    /** Canary: the Agent Team client plugin ran in this page. */
+    readonly agentTeamClientPlugin: boolean
+    /** Canary: the page mounted `remote.agentTeams`. */
+    readonly agentTeamNamespace: boolean | null
+    /** Whether the page's Peer is its own Host owner. */
+    readonly accessOwner?: boolean
+    readonly runtimeCaptured: boolean
+    readonly reportedAt: number
+  }
+  /**
+   * Plain-language reasons this page cannot show something its remote Web UI
+   * would (stale page, missing canary client plugin, bridge failure).
+   */
+  readonly nativePageWarnings?: readonly string[]
+}
+
+/**
+ * Derive human-readable framed-page problems from one device view.
+ * Pure so support reports and tests share the exact wording.
+ */
+export function nativePageWarnings(view: DeviceView): readonly string[] {
+  const warnings: string[] = []
+  if (view.nativePaneState === 'failed') {
+    warnings.push(`native page bridge failed: ${view.nativePaneError ?? 'unknown error'}`)
+  }
+  const drift = nativePageVersionDrift(view)
+  if (drift !== undefined) {
+    warnings.push(`framed page release ${drift.pageVersion} differs from the remote release ${drift.remoteVersion}; reload the device tab`)
+  }
+  const capabilities = view.nativePageCapabilities
+  if (view.nativePaneState === 'ready' && capabilities === undefined) {
+    warnings.push('framed page reported no client capability snapshot (remote DSH may predate capability reporting)')
+  }
+  if (capabilities !== undefined) {
+    // Only a page whose own release ships Agent Team can be blamed for missing
+    // it; an older remote DSH simply has no such UI to lose.
+    if (nativeAgentTeamCanaryMissing(view)) warnings.push(...nativePageCapabilityGaps(capabilities))
+    if (capabilities.access !== undefined && !capabilities.access.owner) {
+      warnings.push('framed page is not the remote Host owner peer')
+    }
+  }
+  return warnings
 }
 
 /** Snapshot of everything a support report needs to explain the device UI state. */
@@ -401,7 +458,9 @@ export function buildDiagnostics(
   client?: DiagnosticsClientReport,
   now = Date.now(),
 ): MultiDeviceDiagnostics {
-  const devices: DiagnosticsDevice[] = snapshot.devices.map(device => ({
+  const devices: DiagnosticsDevice[] = snapshot.devices.map(device => {
+    const pageWarnings = nativePageWarnings(device)
+    return {
     id: String(device.id),
     name: device.name,
     enabled: device.enabled,
@@ -421,7 +480,28 @@ export function buildDiagnostics(
     ...(device.lastSyncedAt !== undefined ? { lastSyncedAt: device.lastSyncedAt } : {}),
     ...(device.lastError !== undefined ? { lastError: device.lastError } : {}),
     ...(device.sessionListError !== undefined ? { sessionListError: device.sessionListError } : {}),
-  }))
+    ...(device.nativePaneState !== undefined ? { nativePaneState: device.nativePaneState } : {}),
+    ...(device.nativePaneError !== undefined ? { nativePaneError: device.nativePaneError } : {}),
+    ...(device.nativePageCapabilities?.release !== undefined
+      ? { nativePageRelease: device.nativePageCapabilities.release }
+      : {}),
+    ...(device.nativePageCapabilities !== undefined
+      ? {
+        nativePageCapabilities: {
+          clientPluginCount: device.nativePageCapabilities.clientPlugins.length,
+          agentTeamClientPlugin: device.nativePageCapabilities.clientPlugins.includes(NATIVE_CANARY_AGENT_TEAM_PLUGIN),
+          agentTeamNamespace: device.nativePageCapabilities.runtime?.agentTeams ?? null,
+          ...(device.nativePageCapabilities.access !== undefined
+            ? { accessOwner: device.nativePageCapabilities.access.owner }
+            : {}),
+          runtimeCaptured: device.nativePageCapabilities.runtimeCaptured,
+          reportedAt: device.nativePageCapabilities.reportedAt,
+        },
+      }
+      : {}),
+    ...(pageWarnings.length > 0 ? { nativePageWarnings: pageWarnings } : {}),
+    }
+  })
   return {
     kind: 'dsh-multi-device/diagnostics',
     generatedAt: now,

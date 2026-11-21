@@ -19,7 +19,7 @@
  *
  * @module dsh-multi-device/host/native-bridge
  */
-import type { WorkspaceViewState } from '../contract.ts';
+import type { NativePageCapabilities, WorkspaceViewState } from '../contract.ts';
 /** Path the proxy serves the bridge script from (root-relative inside the frame). */
 export declare const NATIVE_BRIDGE_SCRIPT_PATH = "/__md/bridge.js";
 /** Same-origin WebSocket the bridge opens to receive commands. */
@@ -39,6 +39,8 @@ export declare const NATIVE_BRIDGE_SCRIPT: string;
 export declare function sanitizeGroupState(value: unknown): Record<string, boolean>;
 /** Bounded raw-session completion map for the Host/page boundary. */
 export declare function sanitizeReadCompletions(value: unknown): Record<string, string>;
+/** Normalize one `capabilities` frame from the framed page's bridge. */
+export declare function sanitizeNativePageCapabilities(value: unknown, now?: number): NativePageCapabilities | undefined;
 /** Initial page state served alongside the bridge script. */
 export interface NativeBridgeScriptState {
     /** Explicit workspace fold state last observed by the Host. */

@@ -78,6 +78,13 @@ export declare const zh: {
     readonly bridgeFailedTitle: "设备 {name} 的页面桥接失败";
     readonly bridgeFailedError: "原因：{error}";
     readonly bridgeFailedReload: "重新加载";
+    readonly pageDriftTitle: "远端页面版本与远端当前版本不一致";
+    readonly pageDriftDesc: "页面 {page} · 远端 {remote}。这通常是保活页面跨过了远端 DSH 升级，已尝试自动重新加载；若仍不一致请手动重载。";
+    readonly pageCapabilityTitle: "该远端页面缺少智能体团队协作";
+    readonly pageCapabilityDesc: "远端 DSH {version} 的页面没有提供该功能（缺少客户端插件或 remote.agentTeams 命名空间）。可升级远端 DSH，或在新窗口打开该设备。";
+    readonly pageCapabilityUnknown: "该远端页面没有上报客户端能力（远端 DSH 版本可能过旧），无法确认智能体团队协作是否可用。";
+    readonly pageNoticeReload: "重新加载";
+    readonly pageNoticeOpenExternal: "在新窗口打开";
     readonly crossHostReadStateTitle: "跨 DSH Host 同步未读状态";
     readonly crossHostReadStateDesc: "仅在多台电脑各自运行 DSH Host 时需要。开启后通过现有 SSH 在能识别 POSIX DSH 家目录的远端设备上保存一个只含会话 ID 与时间戳的状态文件；不安装远端插件，也不上传消息内容。默认关闭。";
     readonly crossHostUiStateTitle: "跨控制机同步界面状态";

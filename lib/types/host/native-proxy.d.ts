@@ -1,5 +1,5 @@
 import { type IncomingMessage } from 'node:http';
-import type { DeviceConfig, DeviceId, NativePaneState, WorkspaceViewState } from '../contract.ts';
+import type { DeviceConfig, DeviceId, NativePageCapabilities, NativePaneState, WorkspaceViewState } from '../contract.ts';
 import { DeviceAuthManager } from './auth.ts';
 /**
  * Copy a client request onto the upstream connection.
@@ -43,6 +43,12 @@ export interface NativeProxyHooks {
     readonly onBridgeVisibility?: (deviceId: DeviceId, visible: boolean, clientId?: string) => void;
     /** Report whether the framed page has unsent composer input. */
     readonly onBridgeDraft?: (deviceId: DeviceId, dirty: boolean, clientId?: string) => void;
+    /**
+     * Report the client-plugin surface the framed page actually loaded.
+     * A page can run without a feature its remote Web UI shows (stale Keep-Alive
+     * page, downgraded remote); this is how the Host names that gap.
+     */
+    readonly onBridgeCapabilities?: (deviceId: DeviceId, capabilities: NativePageCapabilities, clientId?: string) => void;
     /** Persist the port a proxy actually bound, so the next restart keeps the origin. */
     readonly onPortAllocated?: (deviceId: DeviceId, port: number) => void;
     /** Last Host-owned workspace fold state for the bridge's first render. */

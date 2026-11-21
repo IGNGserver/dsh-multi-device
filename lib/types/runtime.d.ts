@@ -11,7 +11,7 @@
  */
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http';
 import type { Context } from '@deepseek-ai/cordis';
-import type { DeviceView, MultiDeviceSnapshot } from './contract.ts';
+import type { DeviceView, MultiDeviceSnapshot, NativePageRelease } from './contract.ts';
 import type { DeviceRegistry } from './host/registry.ts';
 export declare const MULTI_DEVICE_API_PATH = "/multi-device/api";
 export declare const MULTI_DEVICE_EVENTS_PATH = "/multi-device/events";
@@ -108,7 +108,34 @@ export interface DiagnosticsDevice {
     readonly lastError?: string;
     /** Why this device was dropped from the merged `session.list`, if it was. */
     readonly sessionListError?: string;
+    /** Injected bridge lifecycle of this device's framed page. */
+    readonly nativePaneState?: DeviceView['nativePaneState'];
+    readonly nativePaneError?: string;
+    /** Release the framed page's client bundle was built from. */
+    readonly nativePageRelease?: NativePageRelease;
+    /** Client-plugin surface the framed page reported about itself. */
+    readonly nativePageCapabilities?: {
+        readonly clientPluginCount: number;
+        /** Canary: the Agent Team client plugin ran in this page. */
+        readonly agentTeamClientPlugin: boolean;
+        /** Canary: the page mounted `remote.agentTeams`. */
+        readonly agentTeamNamespace: boolean | null;
+        /** Whether the page's Peer is its own Host owner. */
+        readonly accessOwner?: boolean;
+        readonly runtimeCaptured: boolean;
+        readonly reportedAt: number;
+    };
+    /**
+     * Plain-language reasons this page cannot show something its remote Web UI
+     * would (stale page, missing canary client plugin, bridge failure).
+     */
+    readonly nativePageWarnings?: readonly string[];
 }
+/**
+ * Derive human-readable framed-page problems from one device view.
+ * Pure so support reports and tests share the exact wording.
+ */
+export declare function nativePageWarnings(view: DeviceView): readonly string[];
 /** Snapshot of everything a support report needs to explain the device UI state. */
 export interface MultiDeviceDiagnostics {
     readonly kind: 'dsh-multi-device/diagnostics';

@@ -23,6 +23,7 @@ import {
   encodeRemoteSessionId,
   LOCAL_DEVICE_ID,
   type MultiDeviceSnapshot,
+  type NativePageCapabilities,
   type NativePaneState,
   type MultiDeviceUiPreferences,
   type SshKeyEntry,
@@ -317,6 +318,7 @@ export class DeviceRegistry {
     title?: string
     visible?: boolean
     draft?: boolean
+    capabilities?: NativePageCapabilities
   }>()
   /** Short-lived (60s) verified auth + protocol cache from testDeviceConnection so immediate Save skips re-probing. */
   private readonly verifiedPreflightCache = new Map<string, {
@@ -421,6 +423,9 @@ export class DeviceRegistry {
         },
         onBridgeDraft: (deviceId, dirty, clientId) => {
           this.setNativePaneDraft(deviceId, dirty, clientId)
+        },
+        onBridgeCapabilities: (deviceId, capabilities, clientId) => {
+          this.setNativePaneCapabilities(deviceId, capabilities, clientId)
         },
         onPortAllocated: (deviceId, port) => {
           this.persistNativeProxyPort(deviceId, port)
@@ -1416,13 +1421,18 @@ export class DeviceRegistry {
     const nextTitle = state === 'ready' ? previous?.title : undefined
     const nextVisible = state === 'ready' ? previous?.visible === true : false
     const nextDraft = state === 'ready' ? previous?.draft === true : false
+    // A capability snapshot describes the page that reported it; once that page
+    // is gone (loading/failed/idle) the snapshot is stale and must not describe
+    // a replacement page's boot graph.
+    const nextCapabilities = state === 'ready' ? previous?.capabilities : undefined
     if (
       previous?.state === state &&
       previous.error === nextError &&
       previous.sessionId === nextSessionId &&
       previous.title === nextTitle &&
       (previous.visible === true) === nextVisible &&
-      (previous.draft === true) === nextDraft
+      (previous.draft === true) === nextDraft &&
+      previous.capabilities === nextCapabilities
     ) {
       return
     }
@@ -1433,6 +1443,7 @@ export class DeviceRegistry {
       ...(nextTitle !== undefined ? { title: nextTitle } : {}),
       ...(nextVisible ? { visible: true } : {}),
       ...(nextDraft ? { draft: true } : {}),
+      ...(nextCapabilities !== undefined ? { capabilities: nextCapabilities } : {}),
     })
     this.bumpRevision()
   }
@@ -1511,6 +1522,44 @@ export class DeviceRegistry {
     this.bumpRevision()
   }
 
+  /**
+   * Persist the client-plugin surface a framed page reported.
+   *
+   * Kept per logical browser client like selection/title: two tabs can hold
+   * different page generations while the remote DSH upgrades underneath them.
+   */
+  private setNativePaneCapabilities(
+    deviceId: DeviceId,
+    capabilities: NativePageCapabilities,
+    clientId = 'legacy',
+  ): void {
+    const previous = this.nativePanes.get(this.paneKey(deviceId, clientId))
+    const prior = previous?.capabilities
+    if (prior !== undefined
+      && prior.reportedAt === capabilities.reportedAt
+      && prior.release?.version === capabilities.release?.version
+      && prior.release?.commit === capabilities.release?.commit
+      && prior.runtimeCaptured === capabilities.runtimeCaptured
+      && prior.clientPlugins.length === capabilities.clientPlugins.length
+      && prior.clientPlugins.every((id, index) => id === capabilities.clientPlugins[index])
+      && prior.runtime?.agentTeams === capabilities.runtime?.agentTeams
+      && prior.runtime?.session === capabilities.runtime?.session
+      && prior.access?.owner === capabilities.access?.owner) {
+      return
+    }
+    this.nativePanes.set(this.paneKey(deviceId, clientId), {
+      ...previous,
+      state: previous?.state ?? 'idle',
+      ...(previous?.error !== undefined ? { error: previous.error } : {}),
+      ...(previous?.sessionId !== undefined ? { sessionId: previous.sessionId } : {}),
+      ...(previous?.title !== undefined ? { title: previous.title } : {}),
+      ...(previous?.visible === true ? { visible: true } : {}),
+      ...(previous?.draft === true ? { draft: true } : {}),
+      capabilities,
+    })
+    this.bumpRevision()
+  }
+
   /** Persist the actually-bound native proxy port so the origin stays stable. */
   private persistNativeProxyPort(deviceId: DeviceId, port: number): void {
     const current = this.configs.get(deviceId)
@@ -1530,6 +1579,7 @@ export class DeviceRegistry {
       ...(pane.sessionId !== undefined ? { nativePaneSessionId: pane.sessionId } : {}),
       ...(pane.title !== undefined ? { nativePaneTitle: pane.title } : {}),
       ...(pane.draft === true ? { nativePaneHasDraft: true } : {}),
+      ...(pane.capabilities !== undefined ? { nativePageCapabilities: pane.capabilities } : {}),
     }
   }
 

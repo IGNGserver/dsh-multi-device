@@ -1220,6 +1220,19 @@ html {
   font-size: 11px;
 }
 
+/* Framed-page compatibility notice: a stale or feature-poor page keeps
+   rendering, but must say why a menu entry its remote Web UI shows is absent
+   instead of leaving the user to guess. */
+.dsh-md-page-notice {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.dsh-md-page-notice .dsh-md-page-notice-text {
+  overflow: visible;
+  white-space: normal;
+  text-overflow: clip;
+}
+
 .dsh-md-fallback-modal {
   width: min(740px, 100%);
 }

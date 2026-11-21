@@ -210,6 +210,50 @@ describe('native proxy browser isolation', () => {
     expect(manager.bridgeSnapshot(id)).toEqual({ state: 'idle' })
   })
 
+  it('forwards the framed page capability snapshot without trusting its shape', async () => {
+    const remote = await upstream()
+    const onBridgeCapabilities = vi.fn()
+    const { origin, cookie } = await proxyFor(remote.base, { onBridgeCapabilities })
+    const page = await bridge(origin, cookie, 'capability-client')
+    await page.ready()
+    page.send({
+      type: 'capabilities',
+      boot: {
+        release: { version: '0.2.2-rc.5', commit: '3f85d88' },
+        entries: ['@deepseek-ai/dsh-client-ui-agent-team', '@deepseek-ai/dsh-client-ui-agent-team', 'bad id\nwith control', 7],
+      },
+      access: { owner: true },
+      runtimeCaptured: true,
+      runtime: { agentTeams: true, session: false, unknown: 'ignored' },
+    })
+    await vi.waitFor(() => expect(onBridgeCapabilities).toHaveBeenCalledTimes(1))
+    const [deviceId, capabilities, clientId] = onBridgeCapabilities.mock.calls[0]!
+    expect(deviceId).toBe('native-isolation')
+    expect(clientId).toBe('capability-client')
+    expect(capabilities).toMatchObject({
+      release: { version: '0.2.2-rc.5', commit: '3f85d88' },
+      clientPlugins: ['@deepseek-ai/dsh-client-ui-agent-team'],
+      access: { owner: true },
+      runtimeCaptured: true,
+      runtime: { agentTeams: true, session: false },
+    })
+    expect(typeof capabilities.reportedAt).toBe('number')
+  })
+
+  it('reports a capability frame that carries no boot graph as an empty snapshot', async () => {
+    const remote = await upstream()
+    const onBridgeCapabilities = vi.fn()
+    const { origin, cookie } = await proxyFor(remote.base, { onBridgeCapabilities })
+    const page = await bridge(origin, cookie)
+    await page.ready()
+    page.send({ type: 'capabilities', runtimeCaptured: false })
+    await vi.waitFor(() => expect(onBridgeCapabilities).toHaveBeenCalledTimes(1))
+    expect(onBridgeCapabilities.mock.calls[0]![1]).toMatchObject({
+      clientPlugins: [],
+      runtimeCaptured: false,
+    })
+  })
+
   it.each(['browser-a', 'browser &+?b', ''])('gets socket ownership from the frame URL, not the script URL: %s', clientId => {
     const urls: string[] = []
     class Socket {

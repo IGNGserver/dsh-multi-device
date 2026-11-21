@@ -117,7 +117,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        dsh: ['0.2.0-rc.2', '0.2.1-rc.5']
+        dsh: ['0.2.0-rc.2', '0.2.1-rc.5', '0.2.2-rc.5']
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -147,16 +147,19 @@ jobs:
           export DSH_SMOKE_PACKAGE="$(printf '%s\n' "$RUNNER_TEMP"/plugin-artifact/*.tgz)"
           node scripts/smoke-official-install.mjs
       - name: Install isolated browser driver
-        if: matrix.dsh == '0.2.1-rc.5'
+        if: contains(fromJSON('["0.2.1-rc.5","0.2.2-rc.5"]'), matrix.dsh)
         run: |
           npm install --prefix "$RUNNER_TEMP/browser-driver" --no-audit --no-fund playwright@1.61.1
           "$RUNNER_TEMP/browser-driver/node_modules/.bin/playwright" install --with-deps chromium
       - name: Qualify the device tab strip in an official browser
-        if: matrix.dsh == '0.2.1-rc.5'
+        if: contains(fromJSON('["0.2.1-rc.5","0.2.2-rc.5"]'), matrix.dsh)
         env:
           DSH_SMOKE_ROOT: ${{ runner.temp }}/dsh-device-browser
           DSH_SMOKE_CLI: ${{ runner.temp }}/official-dsh/node_modules/@deepseek-ai/dsh/lib/bin.js
           DSH_SMOKE_PLAYWRIGHT_PATH: ${{ runner.temp }}/browser-driver/node_modules/playwright/index.mjs
+          # 0.2.2 is the first release the Agent Team client plugin ships in
+          # dsh-base; the framed page must report that canary, not merely load.
+          DSH_SMOKE_EXPECT_AGENT_TEAM: ${{ matrix.dsh == '0.2.2-rc.5' && '1' || '' }}
           pnpm_config_pm_on_fail: ignore
         shell: bash
         run: |

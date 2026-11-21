@@ -379,6 +379,13 @@ export declare class DeviceRegistry {
     private setNativePaneVisibility;
     /** Track whether a Keep-Alive page has unsent composer input so LRU eviction skips it. */
     private setNativePaneDraft;
+    /**
+     * Persist the client-plugin surface a framed page reported.
+     *
+     * Kept per logical browser client like selection/title: two tabs can hold
+     * different page generations while the remote DSH upgrades underneath them.
+     */
+    private setNativePaneCapabilities;
     /** Persist the actually-bound native proxy port so the origin stays stable. */
     private persistNativeProxyPort;
     private withNativePane;
