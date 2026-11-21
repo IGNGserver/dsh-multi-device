@@ -119,6 +119,110 @@ export type RemoteProtocolVersion = '0.2' | '0.1' | 'unknown';
  * client then falls back to the local mirror), not a device outage.
  */
 export type NativePaneState = 'idle' | 'loading' | 'ready' | 'failed';
+/** DSH release identity reported by the framed page's client boot graph. */
+export interface NativePageRelease {
+    /** Release semver (`0.2.2-rc.5`); absent when the remote predates release reporting. */
+    readonly version?: string;
+    /** Source commit baked into the page's client build. */
+    readonly commit?: string;
+}
+/** Peer-access baseline the framed page received from its own Host. */
+export interface NativePageAccess {
+    /** True when the page's Peer is the Host owner. */
+    readonly owner: boolean;
+}
+/**
+ * Client-plugin surface the framed page reports about itself.
+ *
+ * DSH UI features are delivered by client plugins in the page's own bundle plus
+ * the `remote.*` namespaces that bundle mounts; a re-hosted or stale page can
+ * therefore run without a feature its remote Web UI would show. The native
+ * bridge reports this snapshot so the Host can name the gap instead of leaving
+ * users to guess why a menu entry is missing.
+ */
+export interface NativePageCapabilities {
+    /** Release the framed page's client bundle was built from. */
+    readonly release?: NativePageRelease;
+    /** Client plugin ids present in the page's `__DSH_BOOT__` graph, bounded and de-duplicated. */
+    readonly clientPlugins: readonly string[];
+    /** Page's Peer access baseline, present once the remote DSH ships Peer access control. */
+    readonly access?: NativePageAccess;
+    /** True once the page's DSH client context was captured and its UI is installed. */
+    readonly runtimeCaptured: boolean;
+    /**
+     * Remote namespace probes read from that page's client Context.
+     * `null` means the probe could not answer (missing service or older bundle).
+     */
+    readonly runtime?: {
+        /** `remote.agentTeams`: Agent Team toggle and task board require it. */
+        readonly agentTeams?: boolean | null;
+        /** `remote.session`: baseline namespace every DSH 0.2 page mounts. */
+        readonly session?: boolean | null;
+    };
+    /** Host-clock ms when this snapshot was last reported. */
+    readonly reportedAt: number;
+}
+/**
+ * Canary client plugin for the Agent Team UI. The model-menu toggle and the
+ * task board only exist when this plugin ran in the framed page; a page whose
+ * boot graph lacks it can never show them, whatever the remote Host serves.
+ */
+export declare const NATIVE_CANARY_AGENT_TEAM_PLUGIN = "@deepseek-ai/dsh-client-ui-agent-team";
+/** Canary Remote namespace mounted by that page's client assembly. */
+export declare const NATIVE_CANARY_AGENT_TEAM_NAMESPACE = "remote.agentTeams";
+/** Parse a DSH release string, tolerating a leading `v`; undefined when unparsable. */
+export interface DshRelease {
+    readonly major: number;
+    readonly minor: number;
+    readonly patch: number;
+    readonly prerelease: readonly (string | number)[];
+}
+/**
+ * Parse a DSH release string (`0.2.2-rc.5`, `v0.2.1-rc.5`, `0.2.2`).
+ * @param value - version text, possibly with a `v` prefix.
+ * @returns parsed release, or undefined when the text is not a semver-ish release.
+ */
+export declare function parseDshRelease(value: string | undefined): DshRelease | undefined;
+/** Compare two parsed releases using semver precedence (prerelease sorts before its release). */
+export declare function compareDshRelease(left: DshRelease, right: DshRelease): number;
+/**
+ * Whether two release strings name the same build.
+ * @returns true/false, or undefined when either side is not a parsable release.
+ */
+export declare function sameDshRelease(left: string | undefined, right: string | undefined): boolean | undefined;
+/** Lowest DSH release whose base bundle ships the Agent Team client plugin. */
+export declare const NATIVE_AGENT_TEAM_MIN_RELEASE = "0.2.2-rc.2";
+/**
+ * Whether a framed page release is new enough to be expected to ship Agent Team.
+ * Older remote DSH releases legitimately lack the feature; a warning there would
+ * blame every old peer instead of naming a real regression.
+ */
+export declare function nativeAgentTeamExpected(pageVersion: string | undefined): boolean;
+/**
+ * Whether Agent Team should be present on this page but is not: the page's own
+ * release ships it, yet its boot graph or Remote assembly lacks it.
+ */
+export declare function nativeAgentTeamCanaryMissing(view: Pick<DeviceView, 'nativePageCapabilities'>): boolean;
+/** Framed page version and the live remote version it disagrees with. */
+export interface NativePageVersionDrift {
+    readonly pageVersion: string;
+    readonly remoteVersion: string;
+}
+/**
+ * Detect a framed page that was built from a different DSH release than the
+ * remote currently serves — the signature of a Keep-Alive page that survived a
+ * remote DSH upgrade, which otherwise hides every feature added since.
+ * @param view - device view carrying both facts.
+ * @returns drift when both versions parse and disagree, else undefined.
+ */
+export declare function nativePageVersionDrift(view: Pick<DeviceView, 'remoteDshVersion' | 'nativePageCapabilities'>): NativePageVersionDrift | undefined;
+/**
+ * Explain which canary client capabilities a framed page report lacks.
+ *
+ * Empty means either the page reported everything this build checks, or it has
+ * not reported at all (callers distinguish that via `undefined` input).
+ */
+export declare function nativePageCapabilityGaps(capabilities: NativePageCapabilities | undefined): readonly string[];
 /** Live runtime telemetry and status of a device. */
 export type DeviceAuthState = 'unknown' | 'ok' | 'required' | 'error';
 export interface DeviceView {
@@ -224,6 +328,13 @@ export interface DeviceView {
      * Keep-Alive LRU / idle eviction never discards a user's in-progress prompt.
      */
     readonly nativePaneHasDraft?: boolean;
+    /**
+     * Client-plugin capabilities the framed page reported about itself. Absent
+     * until the page's bridge reports, or when the remote DSH predates the
+     * capability report. Used to explain a missing client-only feature (for
+     * example the Agent Team toggle) instead of silently leaving it out.
+     */
+    readonly nativePageCapabilities?: NativePageCapabilities;
 }
 /** One cached remote Session summary; projections are never persisted. */
 export interface CachedSessionSummary {

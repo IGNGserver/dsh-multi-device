@@ -39,6 +39,8 @@ const children = new Set()
 const cancellation = new AbortController()
 const MAX_OUTPUT = 2 * 1024 * 1024
 const TIMEOUT = 90_000
+/** Canary client plugin: the Agent Team toggle only renders when this page plugin ran. */
+const AGENT_TEAM_PLUGIN = '@deepseek-ai/dsh-client-ui-agent-team'
 const startedAt = Date.now()
 let interrupted = false
 
@@ -274,6 +276,64 @@ async function assertDeviceFrame(page, wrapper, deviceId) {
   return clientId
 }
 
+/** Resolve the framed device document as a Playwright Frame (evaluate-capable). */
+async function deviceDocument(page, wrapper) {
+  const src = await wrapper.locator('iframe').getAttribute('src')
+  check(src !== null && src !== '', 'Device frame has no iframe src')
+  const origin = new URL(src).origin
+  return await eventually(
+    () => page.frames().find(frame => frame.url().startsWith(`${origin}/`)),
+    'device frame document attached',
+  )
+}
+
+/**
+ * The framed page runs its own DSH client bundle; assert it reported that
+ * surface and that the Agent Team canary is present when the runtime under test
+ * is expected to ship it. A silent capability regression here is exactly what
+ * used to leave users staring at a missing menu entry.
+ */
+async function assertPageCapabilities(page, frame, deviceId, clientId) {
+  const boot = await frame.evaluate(() => ({
+    release: globalThis.__DSH_BOOT__?.release ?? null,
+    entries: Array.isArray(globalThis.__DSH_BOOT__?.entries)
+      ? globalThis.__DSH_BOOT__.entries.map(entry => entry?.id).filter(id => typeof id === 'string')
+      : [],
+  }))
+  check(boot.entries.length > 0, 'Framed device page has no client boot graph')
+  const device = await eventually(async () => {
+    const value = await pageSnapshot(page, clientId)
+    const candidate = value.devices.find(entry => entry.id === deviceId)
+    return candidate?.nativePageCapabilities !== undefined ? candidate : undefined
+  }, 'host received the framed page capability snapshot')
+  check(
+    typeof device.remoteDshVersion === 'string' && /^v?\d+\.\d+\.\d+/.test(device.remoteDshVersion),
+    `Host did not resolve the remote DSH release (got ${String(device.remoteDshVersion)})`,
+  )
+  if (boot.release?.version !== undefined) {
+    check(device.remoteDshVersion === boot.release.version, 'Host remote release differs from the page boot release')
+  }
+  const capabilities = device.nativePageCapabilities
+  check(capabilities.runtimeCaptured === true, 'Capability snapshot never captured the page client context')
+  if (boot.entries.length > 0) {
+    check(capabilities.clientPlugins.length > 0, 'Capability snapshot carries no client plugins')
+    check(
+      capabilities.clientPlugins.includes(AGENT_TEAM_PLUGIN) === boot.entries.includes(AGENT_TEAM_PLUGIN),
+      'Capability snapshot client plugins disagree with the page boot graph',
+    )
+  } else {
+    log('Framed page exposed no client boot graph; capability check limited to runtime capture')
+  }
+  if (boot.release?.version !== undefined && capabilities.release?.version !== undefined) {
+    check(capabilities.release.version === boot.release.version, 'Capability release differs from the page boot release')
+  }
+  if (process.env.DSH_SMOKE_EXPECT_AGENT_TEAM === '1') {
+    check(boot.entries.includes(AGENT_TEAM_PLUGIN), 'Framed page boot graph lacks the Agent Team client plugin')
+    check(capabilities.runtime?.agentTeams === true, 'Framed page did not mount the remote.agentTeams namespace')
+  }
+  return capabilities
+}
+
 export async function main() {
   check(Number(process.versions.node.split('.')[0]) >= 24, 'Requires Node 24+')
   const [cli, packagePath, playwrightPath] = await Promise.all(['DSH_SMOKE_CLI', 'DSH_SMOKE_PACKAGE', 'DSH_SMOKE_PLAYWRIGHT_PATH'].map(absoluteFile))
@@ -440,6 +500,8 @@ export async function main() {
       await nativeFrame.getByText(remoteFixture.sessions[0].title, { exact: true }).first().click({ timeout: 20_000 })
     }
     await nativeFrame.getByText(`Isolated browser smoke fixture: ${remoteFixture.sessions[0].id}`, { exact: true }).waitFor({ timeout: TIMEOUT })
+    const pageCapabilities = await assertPageCapabilities(page, await deviceDocument(page, frame1), deviceId, client1)
+    log(`Device page capabilities: release=${pageCapabilities.release?.version ?? 'unknown'} plugins=${pageCapabilities.clientPlugins.length} agentTeam=${String(pageCapabilities.runtime?.agentTeams)}`)
     log('Device tab shows the remote DSH page and its own history')
     await page.screenshot({ path: join(run, '02-device-page.png'), fullPage: true })
 
@@ -459,7 +521,8 @@ export async function main() {
 
     await page.reload({ waitUntil: 'domcontentloaded' })
     const reloaded = await openDeviceTab(page, 'Smoke remote device')
-    await assertDeviceFrame(page, reloaded, deviceId)
+    const reloadedClient = await assertDeviceFrame(page, reloaded, deviceId)
+    await assertPageCapabilities(page, await deviceDocument(page, reloaded), deviceId, reloadedClient)
     log('Full browser refresh then device tab reopen verified')
     await control.control('reconnectDevice', { deviceId })
     await eventually(async () => (await control.control('snapshot')).devices.find(device => device.id === deviceId)?.state === 'connected', 'device reconnect baseline')
@@ -491,6 +554,22 @@ export async function main() {
     report.coverage.push('plugin-free raw official UI comparison: both remote fixture histories open and switch')
     log('Plugin-free raw official UI session-switching comparison verified')
     check(forbiddenLocalHistory.length === 0, 'Remote history retained by local Controller')
+    const activeSrc = await page.locator('.dsh-md-native-frame-wrap[data-active="true"] iframe').getAttribute('src')
+    check(activeSrc !== null, 'Active device frame has no iframe src')
+    const diagnosticsClient = new URL(activeSrc).searchParams.get('md_client')
+    check(typeof diagnosticsClient === 'string' && diagnosticsClient !== '', 'Active device frame lost its client identity')
+    const diagnostics = await control.control('diagnostics', { clientId: diagnosticsClient })
+    const diagnosticDevice = diagnostics.devices.find(candidate => candidate.id === deviceId)
+    check(diagnosticDevice?.nativePaneState === 'ready', 'Diagnostics dropped the framed page bridge state')
+    check(diagnosticDevice?.nativePageCapabilities !== undefined, 'Diagnostics dropped the framed page capability snapshot')
+    if (process.env.DSH_SMOKE_EXPECT_AGENT_TEAM === '1') {
+      check(diagnosticDevice.nativePageCapabilities.clientPluginCount > 0, 'Diagnostics reports an empty client plugin count')
+      check(diagnosticDevice.nativePageCapabilities.agentTeamClientPlugin === true, 'Diagnostics misses the Agent Team client plugin')
+      check(diagnosticDevice.nativePageCapabilities.agentTeamNamespace === true, 'Diagnostics misses the remote.agentTeams namespace')
+    }
+    check((diagnosticDevice.nativePageWarnings ?? []).length === 0, `Unexpected page warnings: ${(diagnosticDevice.nativePageWarnings ?? []).join('; ')}`)
+    report.coverage.push('framed page capability snapshot reaches the Host snapshot and Diagnostics')
+    log('Framed page capability snapshot verified in snapshot and Diagnostics')
     const known = records.filter(knownUpstreamCancellation)
     const errors = records.filter(row => (row.kind === 'pageerror' || row.kind === 'console' && row.level === 'error') && !knownUpstreamCancellation(row))
     report.knownUpstreamCancellation = known

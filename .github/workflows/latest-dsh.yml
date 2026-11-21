@@ -1,0 +1,86 @@
+name: Latest DSH page contract
+
+# DSH UI features are delivered by the framed page's own client plugins and
+# `remote.*` namespaces. A DSH release that changes the boot graph, the client
+# module loader, or a namespace would silently degrade device tabs — users would
+# just find a menu entry missing. This weekly run pins nothing: it exercises the
+# device-tab browser E2E against @deepseek-ai/dsh@latest and fails loudly when
+# the Agent Team canary (or the capability report itself) stops arriving.
+permissions:
+  contents: read
+
+on:
+  schedule:
+    # Mondays 03:17 UTC, off the top of the hour.
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: latest-dsh-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  device-browser-latest:
+    name: Device tabs against @deepseek-ai/dsh@latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 10.33.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Rebuild esbuild binary
+        run: pnpm rebuild esbuild
+
+      - name: Build host and client bundles
+        run: pnpm run build
+
+      - name: Pack the plugin under test
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/plugin-artifact"
+          npm pack --json --pack-destination "$RUNNER_TEMP/plugin-artifact" > "$RUNNER_TEMP/pack.json"
+          node scripts/verify-package.mjs "$RUNNER_TEMP/pack.json"
+
+      - name: Install exact latest official DSH runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --prefix "$RUNNER_TEMP/official-dsh" --no-audit --no-fund "@deepseek-ai/dsh@latest" pnpm@11.18.0
+          node -p "require('$RUNNER_TEMP/official-dsh/node_modules/@deepseek-ai/dsh/package.json').version" | tee "$RUNNER_TEMP/official-dsh/VERSION_TESTED"
+
+      - name: Install isolated browser driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --prefix "$RUNNER_TEMP/browser-driver" --no-audit --no-fund playwright@1.61.1
+          "$RUNNER_TEMP/browser-driver/node_modules/.bin/playwright" install --with-deps chromium
+
+      - name: Qualify the device tab strip against the latest official DSH
+        shell: bash
+        env:
+          DSH_SMOKE_ROOT: ${{ runner.temp }}/dsh-device-browser-latest
+          DSH_SMOKE_CLI: ${{ runner.temp }}/official-dsh/node_modules/@deepseek-ai/dsh/lib/bin.js
+          DSH_SMOKE_PLAYWRIGHT_PATH: ${{ runner.temp }}/browser-driver/node_modules/playwright/index.mjs
+          DSH_SMOKE_EXPECT_AGENT_TEAM: '1'
+          pnpm_config_pm_on_fail: ignore
+        run: |
+          set -euo pipefail
+          export PATH="$RUNNER_TEMP/official-dsh/node_modules/.bin:$PATH"
+          export DSH_SMOKE_PACKAGE="$(printf '%s\n' "$RUNNER_TEMP"/plugin-artifact/*.tgz)"
+          node scripts/smoke-device-browser.mjs

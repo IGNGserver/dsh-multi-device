@@ -34,7 +34,7 @@ import type { Duplex } from 'node:stream'
 import { brotliDecompress, gunzip, inflate } from 'node:zlib'
 import { promisify } from 'node:util'
 import { WebSocket, WebSocketServer } from 'ws'
-import type { DeviceConfig, DeviceId, NativePaneState, WorkspaceViewState } from '../contract.ts'
+import type { DeviceConfig, DeviceId, NativePageCapabilities, NativePaneState, WorkspaceViewState } from '../contract.ts'
 import { sanitizeWorkspaceViewState, sameWorkspaceViewState } from '../contract.ts'
 import { DeviceAuthManager, resolveRemoteAuthority } from './auth.ts'
 import {
@@ -43,6 +43,7 @@ import {
   isNativeBridgeScriptPath,
   isNativeBridgeSocketPath,
   sanitizeGroupState,
+  sanitizeNativePageCapabilities,
   sanitizeReadCompletions,
 } from './native-bridge.ts'
 
@@ -153,6 +154,13 @@ type NativeBridgeInbound =
   | { readonly type: 'title'; readonly title?: string }
   | { readonly type: 'visibility'; readonly visible?: boolean }
   | { readonly type: 'draft'; readonly dirty?: boolean }
+  | {
+    readonly type: 'capabilities'
+    readonly boot?: unknown
+    readonly access?: unknown
+    readonly runtimeCaptured?: unknown
+    readonly runtime?: unknown
+  }
 
 /** Commands the proxy sends into the framed page's bridge. */
 type NativeBridgeOutbound =
@@ -195,6 +203,16 @@ export interface NativeProxyHooks {
   readonly onBridgeVisibility?: (deviceId: DeviceId, visible: boolean, clientId?: string) => void
   /** Report whether the framed page has unsent composer input. */
   readonly onBridgeDraft?: (deviceId: DeviceId, dirty: boolean, clientId?: string) => void
+  /**
+   * Report the client-plugin surface the framed page actually loaded.
+   * A page can run without a feature its remote Web UI shows (stale Keep-Alive
+   * page, downgraded remote); this is how the Host names that gap.
+   */
+  readonly onBridgeCapabilities?: (
+    deviceId: DeviceId,
+    capabilities: NativePageCapabilities,
+    clientId?: string,
+  ) => void
   /** Persist the port a proxy actually bound, so the next restart keeps the origin. */
   readonly onPortAllocated?: (deviceId: DeviceId, port: number) => void
   /** Last Host-owned workspace fold state for the bridge's first render. */
@@ -1303,6 +1321,16 @@ export class NativeDeviceProxy {
         if ((state.draft === true) === dirty) return
         state.draft = dirty
         this.hooks.onBridgeDraft?.(this.device.id, dirty, clientId)
+        return
+      }
+      if (message.type === 'capabilities') {
+        const capabilities = sanitizeNativePageCapabilities({
+          boot: message.boot,
+          access: message.access,
+          runtimeCaptured: message.runtimeCaptured,
+          runtime: message.runtime,
+        })
+        if (capabilities !== undefined) this.hooks.onBridgeCapabilities?.(this.device.id, capabilities, clientId)
       }
     })
 

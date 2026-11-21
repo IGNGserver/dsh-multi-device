@@ -19,7 +19,7 @@
  *
  * @module dsh-multi-device/host/native-bridge
  */
-import type { WorkspaceViewState } from '../contract.ts'
+import type { NativePageCapabilities, NativePageRelease, WorkspaceViewState } from '../contract.ts'
 import { sanitizeWorkspaceViewState } from '../contract.ts'
 
 
@@ -31,6 +31,11 @@ export const NATIVE_BRIDGE_SOCKET_PATH = '/__md/bridge'
 
 /** The DSH client module that owns `uiWorkspace` in 0.2.x. */
 export const NATIVE_BRIDGE_WORKSPACE_MODULE = '@deepseek-ai/dsh-client-ui-workspace'
+
+/** Bounded client-plugin count kept from one page's boot graph. */
+const MAX_PAGE_CLIENT_PLUGINS = 400
+/** Bound for a release identifier / client plugin id in a page report. */
+const MAX_PAGE_CAPABILITY_TEXT = 160
 
 /**
  * Plain-JS bridge source. Kept as a template string (not a bundled module) so
@@ -126,6 +131,80 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
   function send(message) {
     if (!socket || socket.readyState !== 1) return false;
     try { socket.send(JSON.stringify(message)); return true; } catch (error) { return false; }
+  }
+
+  // Client-plugin surface this page actually received. DSH UI features are
+  // delivered by the page's own client bundle plus the remote.* namespaces it
+  // mounts, so a stale, re-hosted or downgraded page can silently lack a menu
+  // the remote Web UI shows. Reporting the surface lets the Host name the gap.
+  var lastCapabilitySignature = null;
+
+  function readBootCapabilities() {
+    var boot = null;
+    try { boot = window.__DSH_BOOT__; } catch (error) {}
+    if (!boot || typeof boot !== 'object') return null;
+    var release = null;
+    if (boot.release && typeof boot.release === 'object') {
+      release = {};
+      if (typeof boot.release.version === 'string' && boot.release.version !== '') release.version = boot.release.version;
+      if (typeof boot.release.commit === 'string' && boot.release.commit !== '') release.commit = boot.release.commit;
+      if (release.version === undefined && release.commit === undefined) release = null;
+    }
+    var entries = [];
+    if (Array.isArray(boot.entries)) {
+      for (var index = 0; index < boot.entries.length && entries.length < 400; index += 1) {
+        var entry = boot.entries[index];
+        var id = entry && entry.id;
+        if (typeof id === 'string' && id !== '') entries.push(id);
+      }
+    }
+    return { release: release, entries: entries };
+  }
+
+  function readAccessCapabilities() {
+    var raw = null;
+    try { raw = window.__DSH_REMOTE_ACCESS__; } catch (error) {}
+    if (!raw || typeof raw !== 'object' || raw.type !== 'baseline') return null;
+    return { owner: raw.owner === true };
+  }
+
+  function probeRemoteNamespace(name) {
+    if (!captured || typeof captured.get !== 'function') return null;
+    try {
+      var service = captured.get(name);
+      return service !== undefined && service !== null;
+    } catch (error) { return null; }
+  }
+
+  function reportCapabilities(force) {
+    var boot = readBootCapabilities();
+    if (!boot) return false;
+    var payload = {
+      type: 'capabilities',
+      boot: boot,
+      access: readAccessCapabilities(),
+      runtimeCaptured: captured !== null,
+      runtime: captured === null ? null : {
+        agentTeams: probeRemoteNamespace('remote.agentTeams'),
+        session: probeRemoteNamespace('remote.session'),
+      },
+    };
+    var signature;
+    try { signature = JSON.stringify(payload); } catch (error) { return false; }
+    if (!force && signature === lastCapabilitySignature) return true;
+    if (!send(payload)) return false;
+    lastCapabilitySignature = signature;
+    return true;
+  }
+
+  // The boot global is written a few head rows after this classic script and
+  // the client Context is captured later, so report on a short schedule until
+  // both exist and again whenever the probe result changes.
+  function scheduleCapabilityReports() {
+    var delays = [0, 300, 1200, 3000, 6000, 10000];
+    for (var index = 0; index < delays.length; index += 1) {
+      setTimeout(function () { reportCapabilities(false); }, delays[index]);
+    }
   }
 
   function isFrameVisible() {
@@ -1231,6 +1310,8 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
       sendTitle(true);
       sendVisibility(true);
       if (!readOverlayInstalled) retryReadOverlay();
+      reportCapabilities(false);
+      setTimeout(function () { reportCapabilities(false); }, 1200);
     };
     finish();
   }
@@ -1263,6 +1344,7 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
       sendVisibility(true);
       if (hasDraft) sendDraft(true);
       if (groupSyncInstalled) sendUiState();
+      reportCapabilities(false);
     });
     socket.addEventListener('message', function (event) {
       if (socket !== connectedSocket) return;
@@ -1422,6 +1504,7 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
     if (!readySent) fail('Incompatible DSH version or unavailable client: the workspace service was not available within 10s');
   }, 10000);
 
+  scheduleCapabilityReports();
   connect();
 })();`
 
@@ -1454,6 +1537,77 @@ export function sanitizeReadCompletions(value: unknown): Record<string, string> 
     out[key] = token
   }
   return out
+}
+
+/** One bounded, control-character-free capability token (release or plugin id). */
+function capabilityText(value: unknown, max = MAX_PAGE_CAPABILITY_TEXT): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const text = value.trim()
+  if (text === '' || text.length > max) return undefined
+  if (/[\u0000-\u001f\u007f\s]/u.test(text)) return undefined
+  return text
+}
+
+/** Normalize one `capabilities` frame from the framed page's bridge. */
+export function sanitizeNativePageCapabilities(
+  value: unknown,
+  now = Date.now(),
+): NativePageCapabilities | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const record = value as Record<string, unknown>
+  const boot = typeof record.boot === 'object' && record.boot !== null && !Array.isArray(record.boot)
+    ? record.boot as Record<string, unknown>
+    : undefined
+  const releaseRecord = boot !== undefined
+    && typeof boot.release === 'object' && boot.release !== null && !Array.isArray(boot.release)
+    ? boot.release as Record<string, unknown>
+    : undefined
+  const version = releaseRecord === undefined ? undefined : capabilityText(releaseRecord.version)
+  const commit = releaseRecord === undefined ? undefined : capabilityText(releaseRecord.commit, 64)
+  const release: NativePageRelease | undefined = version === undefined && commit === undefined
+    ? undefined
+    : { ...(version !== undefined ? { version } : {}), ...(commit !== undefined ? { commit } : {}) }
+  const clientPlugins: string[] = []
+  const seen = new Set<string>()
+  const rawEntries = boot !== undefined && Array.isArray(boot.entries) ? boot.entries : []
+  for (const rawEntry of rawEntries) {
+    if (clientPlugins.length >= MAX_PAGE_CLIENT_PLUGINS) break
+    const id = capabilityText(rawEntry)
+    if (id === undefined || seen.has(id)) continue
+    seen.add(id)
+    clientPlugins.push(id)
+  }
+  const accessRecord = typeof record.access === 'object' && record.access !== null && !Array.isArray(record.access)
+    ? record.access as Record<string, unknown>
+    : undefined
+  const access = accessRecord !== undefined && typeof accessRecord.owner === 'boolean'
+    ? { owner: accessRecord.owner }
+    : undefined
+  const runtimeRecord = typeof record.runtime === 'object' && record.runtime !== null && !Array.isArray(record.runtime)
+    ? record.runtime as Record<string, unknown>
+    : undefined
+  const probe = (name: string): boolean | null | undefined => {
+    const raw = runtimeRecord?.[name]
+    if (typeof raw === 'boolean') return raw
+    if (raw === null) return null
+    return undefined
+  }
+  const agentTeams = probe('agentTeams')
+  const session = probe('session')
+  const runtime = agentTeams === undefined && session === undefined
+    ? undefined
+    : {
+      ...(agentTeams !== undefined ? { agentTeams } : {}),
+      ...(session !== undefined ? { session } : {}),
+    }
+  return {
+    ...(release !== undefined ? { release } : {}),
+    clientPlugins,
+    ...(access !== undefined ? { access } : {}),
+    runtimeCaptured: record.runtimeCaptured === true,
+    ...(runtime !== undefined ? { runtime } : {}),
+    reportedAt: now,
+  }
 }
 
 /** Serialize a value for a classic `<script>` body without closing the tag. */

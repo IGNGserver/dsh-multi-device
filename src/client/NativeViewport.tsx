@@ -32,7 +32,13 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { LOCAL_DEVICE_ID, type DeviceId, type DeviceView } from '../contract.ts'
+import {
+  LOCAL_DEVICE_ID,
+  type DeviceId,
+  type DeviceView,
+  nativeAgentTeamCanaryMissing,
+  nativePageVersionDrift,
+} from '../contract.ts'
 import { AuthRequiredPanel } from './AuthPanel.tsx'
 import {
   type BarLayout,
@@ -668,6 +674,36 @@ export function NativeViewport({
     previousProxyReady.current = nextReadyMap
   }, [visibleDevices, state.keepAliveDeviceIds, activeDevice?.id])
 
+  // A kept-alive page silences every feature the remote DSH added since it was
+  // built. Reload it once per page/remote release pair; a fresh page reports
+  // the new release and is left alone, so a persistent mismatch (an unparsable
+  // or stale remote version) cannot reload in a loop.
+  const pageDriftReloaded = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    for (const dev of visibleDevices) {
+      const drift = nativePageVersionDrift(dev)
+      if (drift === undefined || dev.nativePaneState !== 'ready') continue
+      if (!state.keepAliveDeviceIds.includes(dev.id) && activeDevice?.id !== dev.id) continue
+      const signature = `${dev.id}\u0000${drift.pageVersion}\u0000${drift.remoteVersion}`
+      if (pageDriftReloaded.current.has(signature)) continue
+      pageDriftReloaded.current.add(signature)
+      clientStore.reloadNativeDevice(dev.id)
+    }
+  }, [visibleDevices, state.keepAliveDeviceIds, activeDevice?.id])
+
+  const pageDrift = activeDevice === undefined ? undefined : nativePageVersionDrift(activeDevice)
+  const pageCapabilityMissing = activeDevice !== undefined && nativeAgentTeamCanaryMissing(activeDevice)
+  const pageExternalUrl = activeDevice === undefined
+    ? undefined
+    : (() => {
+      const access = assessBrowserNativeAccess({
+        pageUrl: typeof window === 'undefined' ? 'http://127.0.0.1:3080/' : window.location.href ?? `${window.location.protocol}//${window.location.hostname}:3080/`,
+        proxyUrl: activeDevice.nativeProxyUrl ?? activeDevice.effectiveBaseUrl,
+        desktopGuest: getDesktopBrowserBridge() !== undefined,
+      })
+      return access.status === 'available' ? access.url : undefined
+    })()
+
   // Every keep-alive device and the active tab stay mounted.
   const mountedDeviceIds = new Set<DeviceId>(state.keepAliveDeviceIds)
   if (activeDevice !== undefined) mountedDeviceIds.add(activeDevice.id)
@@ -703,6 +739,48 @@ export function NativeViewport({
           >
             {t('bridgeFailedReload')}
           </Button>
+        </div>
+      )}
+      {activeDevice !== undefined
+        && activeDevice.nativePaneState !== 'failed'
+        && (pageDrift !== undefined || pageCapabilityMissing) && (
+        <div
+          className="dsh-md-bridge-failed dsh-md-page-notice"
+          role="status"
+          data-page-drift={pageDrift === undefined ? undefined : `${pageDrift.pageVersion}->${pageDrift.remoteVersion}`}
+          data-page-capability={pageCapabilityMissing ? 'missing' : undefined}
+        >
+          <IconWarningOutlineRegular size={16} />
+          <div className="dsh-md-bridge-failed-text">
+            <span className="dsh-md-bridge-failed-title">
+              {pageCapabilityMissing ? t('pageCapabilityTitle') : t('pageDriftTitle')}
+            </span>
+            <span className="dsh-md-bridge-failed-error dsh-md-page-notice-text">
+              {pageCapabilityMissing
+                ? t('pageCapabilityDesc').replace('{version}', activeDevice.remoteDshVersion ?? 'unknown')
+                : pageDrift !== undefined
+                  ? t('pageDriftDesc').replace('{page}', pageDrift.pageVersion).replace('{remote}', pageDrift.remoteVersion)
+                  : ''}
+            </span>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            icon={<IconRefreshOutlineRegular size={14} />}
+            onClick={() => clientStore.reloadNativeDevice(activeDevice.id)}
+          >
+            {t('pageNoticeReload')}
+          </Button>
+          {pageExternalUrl !== undefined && (
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<IconRightUpOutlineRegular size={14} />}
+              onClick={() => window.open(pageExternalUrl, '_blank', 'noopener,noreferrer')}
+            >
+              {t('pageNoticeOpenExternal')}
+            </Button>
+          )}
         </div>
       )}
       <div className="dsh-md-native-stage-body">
