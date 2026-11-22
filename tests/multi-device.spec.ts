@@ -135,7 +135,12 @@ describe('0b. Host-owned read state and native page state', () => {
     expect(tracker.observeRunning('s1', false)).toBe(true)
     expect(tracker.isUnread('s1')).toBe(true)
 
-    expect(tracker.observeRunning('s1', true)).toBe(true)
+    // A follow-up run must not consume a completion the user never opened.
+    expect(tracker.observeRunning('s1', true)).toBe(false)
+    expect(tracker.isUnread('s1')).toBe(true)
+
+    // Only an explicit read clears the marker.
+    expect(tracker.markRead('s1')).toBe(true)
     expect(tracker.isUnread('s1')).toBe(false)
   })
 

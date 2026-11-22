@@ -53,6 +53,14 @@ export interface TaskbarTallyInput {
     readonly subagentSessionIds?: readonly string[] | undefined;
 }
 /**
+ * Optional scope for one tally. `deviceIds` undefined keeps the historical
+ * fleet-wide behaviour; a set restricts both the projection branch and the
+ * per-device fallback to exactly those devices.
+ */
+export interface TaskbarTallyOptions {
+    readonly deviceIds?: ReadonlySet<string> | undefined;
+}
+/**
  * Count every device's Sessions by category.
  *
  * Session IDs are collected into sets before counting so the result cannot
@@ -63,7 +71,7 @@ export interface TaskbarTallyInput {
  * then falls back to the per-device counters on `DeviceView` plus DSH's raw
  * unread set instead of reporting an authoritative-looking zero.
  */
-export declare function tallyTaskbarSessions(input: TaskbarTallyInput): TaskbarTally;
+export declare function tallyTaskbarSessions(input: TaskbarTallyInput, options?: TaskbarTallyOptions): TaskbarTally;
 /** True when nothing is running, waiting or unread. */
 export declare function tallyIsEmpty(tally: TaskbarTally): boolean;
 /** Non-zero categories in title order; a quiet strip produces an empty list. */
@@ -74,5 +82,7 @@ export type TaskbarTranslate = (key: MultiDeviceLocaleKey) => string;
  *
  * `undefined` is load-bearing: the caller must then leave the title to DSH (or
  * to the active device's own page title) rather than paint an empty aggregate.
+ * `scopeLabel` names the scope the counts cover (`本机`, a device name, `全部`),
+ * so a device-filtered title can never be mistaken for a fleet-wide total.
  */
-export declare function formatTaskbarSummary(tally: TaskbarTally, t: TaskbarTranslate): string | undefined;
+export declare function formatTaskbarSummary(tally: TaskbarTally, t: TaskbarTranslate, scopeLabel?: string): string | undefined;

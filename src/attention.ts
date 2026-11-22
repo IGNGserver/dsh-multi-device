@@ -11,6 +11,12 @@ export interface SessionAttentionFact {
   readonly runningSubagentCount?: number
 }
 
+/** Why one Session is counted as running: its own run, its children, or both. */
+export interface RunningDetail {
+  readonly self: boolean
+  readonly subagentCount: number
+}
+
 export interface DeviceAttentionView {
   readonly eligibleSessionIds: string[]
   readonly runningSessionIds: string[]
@@ -19,6 +25,12 @@ export interface DeviceAttentionView {
   readonly pendingRequestCount: number
   /** False means retained/partial data, not an authoritative zero. */
   readonly fresh: boolean
+  /**
+   * Per-running-Session attribution, present only when at least one Session is
+   * running. The menu and Diagnostics use it to explain a blue count that has
+   * no visible running row of its own.
+   */
+  readonly runningDetails?: Readonly<Record<string, RunningDetail>>
 }
 
 export interface AttentionPolicy {
@@ -49,17 +61,22 @@ export function selectDeviceAttention(
   policy: AttentionPolicy = {},
 ): Record<string, DeviceAttentionView> {
   const devices = new Map<string, Map<string, {
-    hidden: boolean; blank: boolean; running: boolean; pending: number
+    hidden: boolean; blank: boolean; running: boolean
+    runningSelf: boolean; runningChildren: number; pending: number
   }>>()
   for (const fact of facts) {
     let sessions = devices.get(fact.deviceId)
     if (sessions === undefined) devices.set(fact.deviceId, sessions = new Map())
     const previous = sessions.get(fact.sessionId)
     const pending = Math.max(count(fact.pendingRequestCount), fact.pendingInteractionKind ? 1 : 0)
+    const runningSelf = previous?.runningSelf === true || fact.running
+    const runningChildren = Math.max(previous?.runningChildren ?? 0, count(fact.runningSubagentCount))
     sessions.set(fact.sessionId, {
       hidden: previous?.hidden === true || fact.archived === true || fact.origin === 'subagent',
       blank: (previous?.blank ?? true) && fact.blank === true,
-      running: previous?.running === true || fact.running || count(fact.runningSubagentCount) > 0,
+      running: runningSelf || runningChildren > 0,
+      runningSelf,
+      runningChildren,
       pending: Math.max(previous?.pending ?? 0, pending),
     })
   }
@@ -68,6 +85,7 @@ export function selectDeviceAttention(
     const runningSessionIds: string[] = []
     const pendingSessionIds: string[] = []
     const unreadSessionIds: string[] = []
+    const runningDetails: Record<string, RunningDetail> = {}
     let pendingRequestCount = 0
     for (const [sessionId, fact] of [...devices.get(deviceId)!].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
       if (fact.hidden || (fact.blank && sessionId !== policy.currentSessionId)) continue
@@ -75,12 +93,15 @@ export function selectDeviceAttention(
       if (fact.pending > 0) {
         pendingSessionIds.push(sessionId)
         pendingRequestCount += fact.pending
-      } else if (fact.running) runningSessionIds.push(sessionId)
-      else if (unread.has(sessionId)) unreadSessionIds.push(sessionId)
+      } else if (fact.running) {
+        runningSessionIds.push(sessionId)
+        runningDetails[sessionId] = { self: fact.runningSelf, subagentCount: fact.runningChildren }
+      } else if (unread.has(sessionId)) unreadSessionIds.push(sessionId)
     }
     return [deviceId, {
       eligibleSessionIds, runningSessionIds, pendingSessionIds, unreadSessionIds,
       pendingRequestCount, fresh: policy.fresh !== false,
+      ...(runningSessionIds.length === 0 ? {} : { runningDetails }),
     }]
   }))
 }

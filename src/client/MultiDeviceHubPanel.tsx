@@ -41,6 +41,7 @@ import {
   type DeviceView,
   type SshConfigHostEntry,
   type SshKeyEntry,
+  type TaskbarSummaryScope,
   type UpsertDeviceInput,
 } from '../contract.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
@@ -718,6 +719,29 @@ export function MultiDeviceHubPanel({
             label={t('taskbarSummaryTitle')}
             onChange={(enabled) => {
               void clientStore.setUiPreferences({ taskbarSummary: enabled }).then((res) => {
+                if (!res.ok) pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
+              })
+            }}
+          />
+        </div>
+        <div className="dsh-md-pref-row">
+          <div>
+            <div className="dsh-md-pref-title">{t('taskbarSummaryScopeTitle')}</div>
+            <div className="dsh-md-pref-desc">{t('taskbarSummaryScopeDesc')}</div>
+          </div>
+          <DshSelect
+            compact
+            ariaLabel={t('taskbarSummaryScopeTitle')}
+            style={{ minWidth: 132 }}
+            disabled={snapshot.ui?.taskbarSummary !== true}
+            value={snapshot.ui?.taskbarSummaryScope ?? 'active'}
+            options={[
+              { value: 'active', label: t('taskbarScopeActive') },
+              { value: 'all', label: t('taskbarScopeAll') },
+            ]}
+            onChange={(value) => {
+              if (value !== 'active' && value !== 'all') return
+              void clientStore.setUiPreferences({ taskbarSummaryScope: value as TaskbarSummaryScope }).then((res) => {
                 if (!res.ok) pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
               })
             }}

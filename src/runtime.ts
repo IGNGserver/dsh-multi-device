@@ -33,6 +33,16 @@ export const MULTI_DEVICE_EVENTS_PATH = '/multi-device/events'
 
 const GZIP_MIN_BYTES = 1024
 
+/**
+ * How long one SSE snapshot write may stay backpressured before the Host gives
+ * up on that connection. A desktop window hidden in the tray can stop reading
+ * its EventSource for minutes; without this bound the flush loop waits forever,
+ * the client never sees a new revision, and the tab capsule/title freeze on a
+ * stale count. Dropping the stream makes EventSource reconnect and receive a
+ * complete snapshot instead of silently ageing.
+ */
+export const SSE_DRAIN_TIMEOUT_MS = 15_000
+
 function acceptsGzip(req: IncomingMessage): boolean {
   const raw = req.headers?.['accept-encoding']
   const encoding = Array.isArray(raw) ? raw.join(',') : raw
@@ -285,6 +295,10 @@ export function validateControlPlanePayload(request: ControlPlaneRequest): void 
     case 'upsertDevice': case 'testDevice': validateDeviceInput(payload); break
     case 'setUiPreferences':
       payloadBoolean(payload, 'crossHostReadState'); payloadBoolean(payload, 'crossHostUiState'); payloadBoolean(payload, 'taskbarSummary')
+      if (payload.taskbarSummaryScope !== undefined &&
+          payload.taskbarSummaryScope !== 'all' && payload.taskbarSummaryScope !== 'active') {
+        throw new Error('taskbarSummaryScope must be "all" or "active"')
+      }
       if (payload.maxKeepAlivePages !== undefined && (!Number.isInteger(payload.maxKeepAlivePages) || (payload.maxKeepAlivePages as number) < 1 || (payload.maxKeepAlivePages as number) > 12)) {
         throw new Error('maxKeepAlivePages must be an optional integer from 1 to 12')
       }
@@ -319,6 +333,12 @@ export interface DiagnosticsClientReport {
    */
   readonly barObstruction?: string
   readonly userAgent?: string
+  /** Revision of the last snapshot this page actually applied. */
+  readonly snapshotRevision?: number
+  /** Age in milliseconds of that snapshot (`-1` before the first one). */
+  readonly snapshotAgeMs?: number
+  /** Whether the page's EventSource is currently open. */
+  readonly sseOpen?: boolean
 }
 
 /** One device row of the Diagnostics report. */
@@ -443,6 +463,13 @@ export function readDiagnosticsClientReport(raw: unknown): DiagnosticsClientRepo
       ? { barObstruction: optionalString(record.barObstruction) }
       : {}),
     ...(optionalString(record.userAgent) !== undefined ? { userAgent: optionalString(record.userAgent) } : {}),
+    ...(optionalNumber(record.snapshotRevision) !== undefined
+      ? { snapshotRevision: optionalNumber(record.snapshotRevision) }
+      : {}),
+    ...(optionalNumber(record.snapshotAgeMs) !== undefined
+      ? { snapshotAgeMs: optionalNumber(record.snapshotAgeMs) }
+      : {}),
+    ...(typeof record.sseOpen === 'boolean' ? { sseOpen: record.sseOpen } : {}),
   }
   return Object.keys(report).length === 0 ? undefined : report
 }
@@ -661,6 +688,9 @@ export class MultiDeviceControlPlane {
             ...(typeof payload.taskbarSummary === 'boolean'
               ? { taskbarSummary: payload.taskbarSummary }
               : {}),
+            ...(payload.taskbarSummaryScope === 'all' || payload.taskbarSummaryScope === 'active'
+              ? { taskbarSummaryScope: payload.taskbarSummaryScope }
+              : {}),
           })
           return { ok: true, value: this.registry.snapshot(clientId) }
         }
@@ -830,16 +860,24 @@ export class MultiDeviceControlPlane {
           })
         })
       })
-    const waitForDrain = (): Promise<void> => new Promise(resolve => {
-      const done = (): void => {
-        res.off('drain', done)
-        res.off('close', done)
-        res.off('error', done)
-        resolve()
+    const waitForDrain = (timeoutMs = SSE_DRAIN_TIMEOUT_MS): Promise<boolean> => new Promise(resolve => {
+      let settled = false
+      const done = (drained: boolean): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        res.off('drain', onDrain)
+        res.off('close', onClosed)
+        res.off('error', onClosed)
+        resolve(drained)
       }
-      res.once('drain', done)
-      res.once('close', done)
-      res.once('error', done)
+      const onDrain = (): void => done(true)
+      const onClosed = (): void => done(false)
+      const timer = setTimeout(() => done(false), timeoutMs)
+      timer.unref?.()
+      res.once('drain', onDrain)
+      res.once('close', onClosed)
+      res.once('error', onClosed)
     })
     const flush = async (): Promise<void> => {
       if (flushing || closed) return
@@ -853,7 +891,14 @@ export class MultiDeviceControlPlane {
             ? res.write(payload)
             : await writeGzipFrame(gzipStream, payload)
           if (!ok && !closed) {
-            await waitForDrain()
+            const drained = await waitForDrain()
+            if (!drained && !closed) {
+              // The peer stopped reading (or vanished) mid-snapshot. Close now
+              // so EventSource reconnects instead of showing a frozen count.
+              cleanup()
+              res.destroy()
+              return
+            }
           }
         }
       } catch {

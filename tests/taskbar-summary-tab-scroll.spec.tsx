@@ -163,11 +163,54 @@ describe('window title', () => {
     expect(resolveTaskbarSummary(snapshot({ crossHostReadState: false, taskbarSummary: false }, running), zhT))
       .toBeUndefined()
     expect(resolveTaskbarSummary(snapshot({ crossHostReadState: false, taskbarSummary: true }, running), zhT))
-      .toBe('1跑')
+      .toBe('本机 1跑')
     expect(resolveTaskbarSummary(
       snapshot({ crossHostReadState: false, taskbarSummary: true }, { local: attention({}) }),
       zhT,
     )).toBeUndefined()
+  })
+
+  it('scopes the summary to the active device by default and labels the scope', () => {
+    const remote = device({ id: DeviceId('dev-1'), name: 'ubuntu-dev' })
+    const attentionByDevice = {
+      local: attention({ runningSessionIds: ['local-run'], unreadSessionIds: ['local-unread'] }),
+      'dev-1': attention({ runningSessionIds: ['md~dev-1~remote-run'] }),
+    }
+    const active = {
+      ...snapshot({ crossHostReadState: false, taskbarSummary: true }, attentionByDevice),
+      devices: [remote],
+    }
+    expect(resolveTaskbarSummary(active, zhT)).toBe('本机 1跑 1结')
+    expect(resolveTaskbarSummary(active, zhT, DeviceId('dev-1'))).toBe('ubuntu-dev 1跑')
+    expect(resolveTaskbarSummary(
+      {
+        ...active,
+        ui: { crossHostReadState: false, taskbarSummary: true, taskbarSummaryScope: 'all' },
+      },
+      zhT,
+    )).toBe('全部 2跑 1结')
+    // A quiet active device leaves the conversation title alone even when
+    // another device has work; the global mode is the explicit opt-in.
+    expect(resolveTaskbarSummary(
+      { ...active, attentionByDevice: { local: attention({}) } },
+      zhT,
+      DeviceId('dev-1'),
+    )).toBeUndefined()
+  })
+
+  it('honours an explicit scope restriction in the tally and prefix formatting', () => {
+    const input = {
+      devices: [device({ id: DeviceId('dev-1'), runningSessionCount: 1 })],
+      attentionByDevice: {
+        local: attention({ runningSessionIds: ['a'], unreadSessionIds: ['b'] }),
+        'dev-1': attention({ runningSessionIds: ['md~dev-1~r'] }),
+      },
+      unreadSessionIds: ['b', 'md~dev-1~u'],
+    }
+    expect(tallyTaskbarSessions(input, { deviceIds: new Set(['local']) })).toEqual({ running: 1, pending: 0, unread: 1 })
+    expect(tallyTaskbarSessions(input, { deviceIds: new Set(['dev-1']) })).toEqual({ running: 1, pending: 0, unread: 0 })
+    expect(formatTaskbarSummary({ running: 2, pending: 0, unread: 1 }, zhT, '全部'))
+      .toBe('全部 2跑 1结')
   })
 })
 
@@ -177,19 +220,35 @@ describe('Host preference plumbing', () => {
     dirs.push(dir)
     const first = registry(dir)
     expect(first.ui().taskbarSummary).toBe(false)
+    expect(first.ui().taskbarSummaryScope).toBe('active')
     expect(first.snapshot().ui?.taskbarSummary).toBe(false)
     first.updateUiPreferences({ taskbarSummary: true })
-    expect(first.ui()).toMatchObject({ taskbarSummary: true, crossHostReadState: false })
+    expect(first.ui()).toMatchObject({ taskbarSummary: true, taskbarSummaryScope: 'active', crossHostReadState: false })
     expect(first.snapshot().ui?.taskbarSummary).toBe(true)
+    first.updateUiPreferences({ taskbarSummaryScope: 'all' })
+    expect(first.snapshot().ui?.taskbarSummaryScope).toBe('all')
     first.dispose()
     const reloaded = registry(dir)
     expect(reloaded.ui().taskbarSummary).toBe(true)
+    expect(reloaded.ui().taskbarSummaryScope).toBe('all')
   })
 
-  it('rejects a non-boolean control-plane value', () => {
+  it('sanitizes an unknown scope back to the sidebar-matching default', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'taskbar-scope-'))
+    dirs.push(dir)
+    const first = registry(dir)
+    first.updateUiPreferences({ taskbarSummaryScope: 'workspace' as never })
+    expect(first.ui().taskbarSummaryScope).toBe('active')
+  })
+
+  it('rejects a non-boolean control-plane value and an unknown scope', () => {
     expect(() => parseControlPlaneRequest({ action: 'setUiPreferences', payload: { taskbarSummary: 1 } }))
       .toThrow('taskbarSummary must be an optional boolean')
     expect(() => parseControlPlaneRequest({ action: 'setUiPreferences', payload: { taskbarSummary: true } }))
+      .not.toThrow()
+    expect(() => parseControlPlaneRequest({ action: 'setUiPreferences', payload: { taskbarSummaryScope: 'workspace' } }))
+      .toThrow('taskbarSummaryScope must be "all" or "active"')
+    expect(() => parseControlPlaneRequest({ action: 'setUiPreferences', payload: { taskbarSummaryScope: 'all' } }))
       .not.toThrow()
   })
 })

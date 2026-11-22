@@ -54,6 +54,32 @@ export function shouldApplySnapshot(
   return true
 }
 
+/**
+ * A live EventSource proves the socket is open, not that snapshots still
+ * arrive. The Host can sit in backpressure while the desktop window is hidden,
+ * so the Client must treat "no snapshot for a while" as a stall and refetch
+ * over HTTP instead of trusting `readyState === OPEN` forever.
+ */
+export const SNAPSHOT_STALL_MS = 20_000
+export const SNAPSHOT_STALL_REFETCH_MS = 10_000
+
+export interface SnapshotStallInput {
+  readonly now: number
+  readonly lastSnapshotAt: number
+  readonly lastRefetchAt: number
+  readonly visible: boolean
+  readonly sseOpen: boolean
+  readonly stallMs?: number
+  readonly refetchMs?: number
+}
+
+/** True when a visible page with an open SSE stream has stopped receiving snapshots. */
+export function shouldRefetchStalledSnapshot(input: SnapshotStallInput): boolean {
+  if (!input.visible || !input.sseOpen || input.lastSnapshotAt <= 0) return false
+  if (input.now - input.lastSnapshotAt <= (input.stallMs ?? SNAPSHOT_STALL_MS)) return false
+  return input.lastRefetchAt <= 0 || input.now - input.lastRefetchAt >= (input.refetchMs ?? SNAPSHOT_STALL_REFETCH_MS)
+}
+
 function readStoredActiveNativeDevice(): DeviceId | undefined {
   try {
     if (typeof localStorage === 'undefined') return undefined
@@ -206,6 +232,7 @@ const EMPTY_SNAPSHOT: MultiDeviceSnapshot = {
     crossHostReadState: false,
     crossHostUiState: false,
     taskbarSummary: false,
+    taskbarSummaryScope: 'active',
     maxKeepAlivePages: DEFAULT_MAX_KEEP_ALIVE_PAGES,
     keepAliveIdleMinutes: DEFAULT_KEEP_ALIVE_IDLE_MINUTES,
   },
@@ -247,8 +274,15 @@ export class MultiDeviceClientStore {
   private readonly lastActiveAtByDevice = new Map<DeviceId, number>()
   private readonly evictedSessionByDevice = new Map<DeviceId, string>()
   private visibilityDocument: Document | undefined
+  private focusWindow: Window | undefined
+  private lastSnapshotAt = 0
+  private lastStallRefetchAt = 0
   private readonly onVisibilityChange = (): void => {
+    if (this.isDocumentVisible()) this.ensureSnapshotFresh()
     this.clearUnreadForActiveSession(this.state.snapshot)
+  }
+  private readonly onWindowFocus = (): void => {
+    this.ensureSnapshotFresh()
   }
   /** Latest Session reported to the Host, used to dedupe mount/cleanup races. */
   private reportedSessionId: string | undefined
@@ -324,10 +358,16 @@ export class MultiDeviceClientStore {
     this.resetActiveSessionReport()
     this.sseAttempt = 0
     this.lastPollAt = 0
+    this.lastSnapshotAt = Date.now()
+    this.lastStallRefetchAt = 0
     this.lastKeepAliveSweepAt = Date.now()
     if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
       this.visibilityDocument = document
       document.addEventListener('visibilitychange', this.onVisibilityChange)
+    }
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+      this.focusWindow = window
+      window.addEventListener('focus', this.onWindowFocus)
     }
     // Establish the connection fence before issuing the initial HTTP request.
     this.connectSse()
@@ -340,8 +380,14 @@ export class MultiDeviceClientStore {
         this.lastKeepAliveSweepAt = now
         this.sweepIdleKeepAlive(now)
       }
-      const sseOpen = typeof EventSource !== 'undefined' && this.eventSource?.readyState === EventSource.OPEN
-      if (sseOpen) return
+      const sseOpen = this.sseIsOpen()
+      if (sseOpen) {
+        if (this.stalledSnapshotNeedsRefetch(now)) {
+          this.lastStallRefetchAt = now
+          void this.refreshSnapshot()
+        }
+        return
+      }
       if (now - this.lastPollAt < 4_000) return
       this.lastPollAt = now
       void this.refreshSnapshot()
@@ -369,6 +415,46 @@ export class MultiDeviceClientStore {
     this.sseRetryTimer = undefined
     this.visibilityDocument?.removeEventListener('visibilitychange', this.onVisibilityChange)
     this.visibilityDocument = undefined
+    this.focusWindow?.removeEventListener('focus', this.onWindowFocus)
+    this.focusWindow = undefined
+    this.lastSnapshotAt = 0
+    this.lastStallRefetchAt = 0
+  }
+
+  /** Visible unless a browser explicitly reports the page as hidden. */
+  private isDocumentVisible(): boolean {
+    return this.visibilityDocument?.visibilityState !== 'hidden'
+  }
+
+  private sseIsOpen(): boolean {
+    return typeof EventSource !== 'undefined' && this.eventSource?.readyState === EventSource.OPEN
+  }
+
+  private stalledSnapshotNeedsRefetch(now = Date.now()): boolean {
+    return shouldRefetchStalledSnapshot({
+      now,
+      lastSnapshotAt: this.lastSnapshotAt,
+      lastRefetchAt: this.lastStallRefetchAt,
+      visible: this.isDocumentVisible(),
+      sseOpen: this.sseIsOpen(),
+    })
+  }
+
+  /** Refetch once when the page becomes visible/focused after a silent stream stall. */
+  private ensureSnapshotFresh(): void {
+    if (!this.stalledSnapshotNeedsRefetch()) return
+    this.lastStallRefetchAt = Date.now()
+    void this.refreshSnapshot()
+  }
+
+  /** Age of the last accepted snapshot, for Diagnostics (`-1` before the first one). */
+  snapshotAgeMs(now = Date.now()): number {
+    return this.lastSnapshotAt <= 0 ? -1 : Math.max(0, now - this.lastSnapshotAt)
+  }
+
+  /** Whether the live event stream is currently open, for Diagnostics. */
+  sseOpen(): boolean {
+    return this.sseIsOpen()
   }
 
   /** Final teardown (including HMR): a disposed store cannot be restarted. */
@@ -467,6 +553,7 @@ export class MultiDeviceClientStore {
     try {
       const es = new EventSource(`/multi-device/events?clientId=${encodeURIComponent(this.clientId)}`)
       this.eventSource = es
+      this.lastSnapshotAt = Date.now()
       es.addEventListener('snapshot', (ev) => {
         if (!current() || this.eventSource !== es) return
         this.sseAttempt = 0
@@ -512,6 +599,9 @@ export class MultiDeviceClientStore {
     // Once this connection speaks epochs, an unversioned late reply cannot
     // downgrade it back to the legacy protocol.
     if (previous.hostEpoch !== undefined && snap.hostEpoch === undefined) return
+    // Any well-formed snapshot proves the stream still delivers, even when the
+    // revision check below rejects it as a duplicate.
+    this.lastSnapshotAt = Date.now()
     const force = activeOverride !== undefined ||
       this.state.loading ||
       this.state.error !== undefined
@@ -1063,6 +1153,14 @@ export function collectClientDiagnosticsReport(): DiagnosticsClientReport | unde
     ...(typeof navigator !== 'undefined' && typeof navigator.userAgent === 'string'
       ? { userAgent: navigator.userAgent }
       : {}),
+    ...(() => {
+      const state = clientStore.getSnapshot()
+      return {
+        snapshotRevision: state.snapshot.revision,
+        snapshotAgeMs: clientStore.snapshotAgeMs(),
+        sseOpen: clientStore.sseOpen(),
+      }
+    })(),
   }
 }
 
