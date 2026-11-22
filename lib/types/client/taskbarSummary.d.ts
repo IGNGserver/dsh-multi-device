@@ -88,7 +88,7 @@ export type TaskbarTranslate = (key: MultiDeviceLocaleKey) => string;
  *
  * `undefined` is load-bearing: the caller must then leave the title to DSH (or
  * to the active device's own page title) rather than paint an empty aggregate.
- * `scopeLabel` names the scope the counts cover (`本机`, a device name, `全部`),
- * so a device-filtered title can never be mistaken for a fleet-wide total.
+ * The title is a pure counter; which devices/workspace it covers is chosen in
+ * Settings and is deliberately not repeated as a prefix in the taskbar.
  */
-export declare function formatTaskbarSummary(tally: TaskbarTally, t: TaskbarTranslate, scopeLabel?: string): string | undefined;
+export declare function formatTaskbarSummary(tally: TaskbarTally, t: TaskbarTranslate): string | undefined;

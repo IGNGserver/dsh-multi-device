@@ -437,15 +437,16 @@ export declare function sameWorkspaceViewState(left: WorkspaceViewState | undefi
 /**
  * Which Sessions the opt-in window-title summary counts.
  *
+ * - `all` (default): every enabled device; the title is the historical total.
  * - `active`: the device whose tab is on screen (本机 when no remote tab is
- *   selected). This is the default because the title sits next to the sidebar
- *   of that page and a global total reads like a counting bug there.
+ *   selected).
  * - `workspace`: the active device, restricted to the active Session's `cwd`
- *   when the Client can resolve it; the title gains a `·工作区` suffix. The
- *   sidebar's selected group is not published by DSH, so this follows the
- *   conversation on screen and falls back to `active` when no `cwd` is known.
- * - `all`: every enabled device, for users who treat the window title as a
- *   fleet-wide dashboard.
+ *   when the Client can resolve it. The sidebar's selected group is not
+ *   published by DSH, so this follows the conversation on screen and falls
+ *   back to `active` when no `cwd` is known.
+ *
+ * The title itself is always a pure counter (`3跑 2结`); the chosen scope is
+ * not repeated as a prefix in the taskbar.
  */
 export type TaskbarSummaryScope = 'all' | 'active' | 'workspace';
 /** Display preferences persisted by the Host. */
@@ -475,10 +476,11 @@ export interface MultiDeviceUiPreferences {
      */
     readonly taskbarSummary: boolean;
     /**
-     * Scope of the title summary. `active` (default) counts only the device whose
-     * tab is on screen, so the title agrees with that page's sidebar; `all`
-     * counts every enabled device. Absent on Hosts from before this preference
-     * existed, in which case the Client behaves as `active`.
+     * Scope of the title summary. `all` (default) counts every enabled device;
+     * `active` counts only the device whose tab is on screen; `workspace`
+     * narrows that to the active conversation's `cwd` when known. Absent on
+     * Hosts from before this preference existed, in which case the Client
+     * behaves as `all`.
      */
     readonly taskbarSummaryScope?: TaskbarSummaryScope;
     /**

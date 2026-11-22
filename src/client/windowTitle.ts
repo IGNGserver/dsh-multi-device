@@ -4,10 +4,10 @@
  * Three owners, in priority order:
  *
  * 1. The opt-in taskbar summary (`ui.taskbarSummary`): the Session status of
- *    the active device by default (`ui.taskbarSummaryScope === 'active'`), or
- *    every enabled device when explicitly set to `all`. The result is prefixed
- *    with the scope (`本机 1跑 2结`, `ubuntu-dev 1跑`, `全部 3跑 2结`) so a
- *    device-filtered number can never be mistaken for a fleet-wide total.
+ *    every enabled device by default (`ui.taskbarSummaryScope === 'all'`), or
+ *    a narrower device/workspace scope chosen in Settings. The title is a pure
+ *    counter (`3跑 2结`) with no scope prefix; the setting, not the taskbar,
+ *    says what the number covers.
  * 2. A remote device tab: that device's own page title, reported by the bridge.
  * 3. Nothing: DSH keeps `document.title` naming the local conversation.
  *
@@ -76,10 +76,9 @@ export function resolveWindowTitle(input: WindowTitleInput): string | undefined 
  * The aggregate line for one snapshot, or `undefined` to leave the title alone.
  *
  * Reads only the Host-published projection, so a toggle flip or a device count
- * change repaints the title without any extra request. The default `active`
- * scope follows the visible tab and labels the result with that device's name:
- * a window title next to the 本机 sidebar must not silently include a remote
- * device, which is exactly how a correct `2跑 2结` used to read as `4跑`.
+ * change repaints the title without any extra request. `all` (the default) is
+ * the historical total; the optional `active` / `workspace` scopes only narrow
+ * which Sessions feed the same pure counter.
  */
 export function resolveTaskbarSummary(
   snapshot: MultiDeviceSnapshot,
@@ -88,27 +87,25 @@ export function resolveTaskbarSummary(
   workspaceSessionIds?: ReadonlySet<string>,
 ): string | undefined {
   if (snapshot.ui?.taskbarSummary !== true) return undefined
-  if (snapshot.ui.taskbarSummaryScope === 'all') {
-    return formatTaskbarSummary(tallyTaskbarSessions(snapshot), t, t('taskbarScopeAllTitle'))
+  const scope = snapshot.ui.taskbarSummaryScope ?? 'all'
+  if (scope === 'all') {
+    return formatTaskbarSummary(tallyTaskbarSessions(snapshot), t)
   }
   const active = activeDeviceId === undefined
     ? undefined
     : snapshot.devices.find(device => device.id === activeDeviceId && device.enabled !== false)
   const deviceId = active?.id ?? LOCAL_DEVICE_ID
-  const label = active?.name ?? t('nativeLocalTab')
-  if (snapshot.ui.taskbarSummaryScope === 'workspace' &&
+  if (scope === 'workspace' &&
       workspaceSessionIds !== undefined && workspaceSessionIds.size > 0 &&
       snapshot.attentionByDevice !== undefined) {
     return formatTaskbarSummary(
       tallyTaskbarSessions(snapshot, { deviceIds: new Set([deviceId]), sessionIds: workspaceSessionIds }),
       t,
-      `${label}·${t('taskbarScopeWorkspaceSuffix')}`,
     )
   }
   return formatTaskbarSummary(
     tallyTaskbarSessions(snapshot, { deviceIds: new Set([deviceId]) }),
     t,
-    label,
   )
 }
 

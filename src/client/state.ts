@@ -232,7 +232,7 @@ const EMPTY_SNAPSHOT: MultiDeviceSnapshot = {
     crossHostReadState: false,
     crossHostUiState: false,
     taskbarSummary: false,
-    taskbarSummaryScope: 'active',
+    taskbarSummaryScope: 'all',
     maxKeepAlivePages: DEFAULT_MAX_KEEP_ALIVE_PAGES,
     keepAliveIdleMinutes: DEFAULT_KEEP_ALIVE_IDLE_MINUTES,
   },

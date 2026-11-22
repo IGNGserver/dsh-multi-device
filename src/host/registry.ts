@@ -188,7 +188,7 @@ const DEFAULT_UI_PREFERENCES: MultiDeviceUiPreferences = {
   crossHostReadState: false,
   crossHostUiState: false,
   taskbarSummary: false,
-  taskbarSummaryScope: 'active',
+  taskbarSummaryScope: 'all',
   maxKeepAlivePages: 6,
   keepAliveIdleMinutes: 30,
 }
@@ -196,7 +196,7 @@ const DEFAULT_UI_PREFERENCES: MultiDeviceUiPreferences = {
 /** Unknown/absent scope values fall back to the sidebar-matching default. */
 export function sanitizeTaskbarSummaryScope(
   value: unknown,
-  fallback: TaskbarSummaryScope = 'active',
+  fallback: TaskbarSummaryScope = 'all',
 ): TaskbarSummaryScope {
   return value === 'all' || value === 'active' || value === 'workspace' ? value : fallback
 }

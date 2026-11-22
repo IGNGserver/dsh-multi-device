@@ -163,42 +163,42 @@ describe('window title', () => {
     expect(resolveTaskbarSummary(snapshot({ crossHostReadState: false, taskbarSummary: false }, running), zhT))
       .toBeUndefined()
     expect(resolveTaskbarSummary(snapshot({ crossHostReadState: false, taskbarSummary: true }, running), zhT))
-      .toBe('本机 1跑')
+      .toBe('1跑')
     expect(resolveTaskbarSummary(
       snapshot({ crossHostReadState: false, taskbarSummary: true }, { local: attention({}) }),
       zhT,
     )).toBeUndefined()
   })
 
-  it('scopes the summary to the active device by default and labels the scope', () => {
+  it('counts every device by default and can be narrowed to the active device', () => {
     const remote = device({ id: DeviceId('dev-1'), name: 'ubuntu-dev' })
     const attentionByDevice = {
       local: attention({ runningSessionIds: ['local-run'], unreadSessionIds: ['local-unread'] }),
       'dev-1': attention({ runningSessionIds: ['md~dev-1~remote-run'] }),
     }
-    const active = {
+    const all = {
       ...snapshot({ crossHostReadState: false, taskbarSummary: true }, attentionByDevice),
       devices: [remote],
     }
-    expect(resolveTaskbarSummary(active, zhT)).toBe('本机 1跑 1结')
-    expect(resolveTaskbarSummary(active, zhT, DeviceId('dev-1'))).toBe('ubuntu-dev 1跑')
-    expect(resolveTaskbarSummary(
-      {
-        ...active,
-        ui: { crossHostReadState: false, taskbarSummary: true, taskbarSummaryScope: 'all' },
-      },
-      zhT,
-    )).toBe('全部 2跑 1结')
+    // Absent/old scope means the historical fleet-wide total, with no prefix.
+    expect(resolveTaskbarSummary(all, zhT)).toBe('2跑 1结')
+    expect(resolveTaskbarSummary(all, zhT, DeviceId('dev-1'))).toBe('2跑 1结')
+    const activeRemote = {
+      ...all,
+      ui: { crossHostReadState: false, taskbarSummary: true, taskbarSummaryScope: 'active' as const },
+    }
+    expect(resolveTaskbarSummary(activeRemote, zhT, DeviceId('dev-1'))).toBe('1跑')
+    expect(resolveTaskbarSummary(activeRemote, zhT)).toBe('1跑 1结')
     // A quiet active device leaves the conversation title alone even when
-    // another device has work; the global mode is the explicit opt-in.
+    // another device has work; the total mode is the default instead.
     expect(resolveTaskbarSummary(
-      { ...active, attentionByDevice: { local: attention({}) } },
+      { ...activeRemote, attentionByDevice: { local: attention({}) } },
       zhT,
       DeviceId('dev-1'),
     )).toBeUndefined()
   })
 
-  it('filters a workspace title by the active conversation cwd and labels it', () => {
+  it('filters a workspace title by the active conversation cwd', () => {
     const attentionByDevice = {
       local: attention({ runningSessionIds: ['a', 'b'], unreadSessionIds: ['c'] }),
     }
@@ -207,14 +207,13 @@ describe('window title', () => {
       attentionByDevice,
     )
     const workspace = new Set(['a', 'c'])
-    expect(resolveTaskbarSummary(active, zhT, undefined, workspace)).toBe('本机·工作区 1跑 1结')
-    // No resolved workspace: fall back to the device scope, not a misleading
-    // "workspace" label.
-    expect(resolveTaskbarSummary(active, zhT)).toBe('本机 2跑 1结')
-    expect(resolveTaskbarSummary(active, zhT, undefined, new Set())).toBe('本机 2跑 1结')
+    expect(resolveTaskbarSummary(active, zhT, undefined, workspace)).toBe('1跑 1结')
+    // No resolved workspace: fall back to the device scope.
+    expect(resolveTaskbarSummary(active, zhT)).toBe('2跑 1结')
+    expect(resolveTaskbarSummary(active, zhT, undefined, new Set())).toBe('2跑 1结')
   })
 
-  it('honours an explicit scope restriction in the tally and prefix formatting', () => {
+  it('honours an explicit scope restriction in the tally and keeps the counter pure', () => {
     const input = {
       devices: [device({ id: DeviceId('dev-1'), runningSessionCount: 1 })],
       attentionByDevice: {
@@ -225,8 +224,8 @@ describe('window title', () => {
     }
     expect(tallyTaskbarSessions(input, { deviceIds: new Set(['local']) })).toEqual({ running: 1, pending: 0, unread: 1 })
     expect(tallyTaskbarSessions(input, { deviceIds: new Set(['dev-1']) })).toEqual({ running: 1, pending: 0, unread: 0 })
-    expect(formatTaskbarSummary({ running: 2, pending: 0, unread: 1 }, zhT, '全部'))
-      .toBe('全部 2跑 1结')
+    expect(formatTaskbarSummary({ running: 2, pending: 0, unread: 1 }, zhT))
+      .toBe('2跑 1结')
   })
 })
 
@@ -236,10 +235,10 @@ describe('Host preference plumbing', () => {
     dirs.push(dir)
     const first = registry(dir)
     expect(first.ui().taskbarSummary).toBe(false)
-    expect(first.ui().taskbarSummaryScope).toBe('active')
+    expect(first.ui().taskbarSummaryScope).toBe('all')
     expect(first.snapshot().ui?.taskbarSummary).toBe(false)
     first.updateUiPreferences({ taskbarSummary: true })
-    expect(first.ui()).toMatchObject({ taskbarSummary: true, taskbarSummaryScope: 'active', crossHostReadState: false })
+    expect(first.ui()).toMatchObject({ taskbarSummary: true, taskbarSummaryScope: 'all', crossHostReadState: false })
     expect(first.snapshot().ui?.taskbarSummary).toBe(true)
     first.updateUiPreferences({ taskbarSummaryScope: 'workspace' })
     expect(first.snapshot().ui?.taskbarSummaryScope).toBe('workspace')
@@ -249,12 +248,12 @@ describe('Host preference plumbing', () => {
     expect(reloaded.ui().taskbarSummaryScope).toBe('workspace')
   })
 
-  it('sanitizes an unknown scope back to the sidebar-matching default', () => {
+  it('sanitizes an unknown scope back to the all-devices default', () => {
     const dir = mkdtempSync(join(tmpdir(), 'taskbar-scope-'))
     dirs.push(dir)
     const first = registry(dir)
     first.updateUiPreferences({ taskbarSummaryScope: 'grid' as never })
-    expect(first.ui().taskbarSummaryScope).toBe('active')
+    expect(first.ui().taskbarSummaryScope).toBe('all')
   })
 
   it('rejects a non-boolean control-plane value and an unknown scope', () => {
