@@ -60,6 +60,15 @@ export interface TaskbarTallyInput {
   readonly subagentSessionIds?: readonly string[] | undefined
 }
 
+/**
+ * Optional scope for one tally. `deviceIds` undefined keeps the historical
+ * fleet-wide behaviour; a set restricts both the projection branch and the
+ * per-device fallback to exactly those devices.
+ */
+export interface TaskbarTallyOptions {
+  readonly deviceIds?: ReadonlySet<string> | undefined
+}
+
 function finiteCount(value: number | undefined): number {
   return value !== undefined && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0
 }
@@ -75,7 +84,12 @@ function finiteCount(value: number | undefined): number {
  * then falls back to the per-device counters on `DeviceView` plus DSH's raw
  * unread set instead of reporting an authoritative-looking zero.
  */
-export function tallyTaskbarSessions(input: TaskbarTallyInput): TaskbarTally {
+export function tallyTaskbarSessions(
+  input: TaskbarTallyInput,
+  options: TaskbarTallyOptions = {},
+): TaskbarTally {
+  const inScope = (deviceId: string): boolean =>
+    options.deviceIds === undefined || options.deviceIds.has(deviceId)
   const disabledDeviceIds = new Set(
     input.devices.filter(device => device.enabled === false).map(device => device.id),
   )
@@ -85,18 +99,19 @@ export function tallyTaskbarSessions(input: TaskbarTallyInput): TaskbarTally {
     const pending = new Set<string>()
     const unread = new Set<string>()
     for (const [deviceId, view] of Object.entries(attention)) {
-      if (view === undefined || disabledDeviceIds.has(deviceId)) continue
+      if (view === undefined || disabledDeviceIds.has(deviceId) || !inScope(deviceId)) continue
       for (const sessionId of view.runningSessionIds) running.add(sessionId)
       for (const sessionId of view.pendingSessionIds) pending.add(sessionId)
       for (const sessionId of view.unreadSessionIds) unread.add(sessionId)
     }
     return { running: running.size, pending: pending.size, unread: unread.size }
   }
-  const enabledDevices = input.devices.filter(device => device.enabled !== false)
+  const enabledDevices = input.devices.filter(device => device.enabled !== false && inScope(device.id))
   const running = enabledDevices.reduce((sum, device) => sum + finiteCount(device.runningSessionCount), 0)
   const pending = enabledDevices.reduce((sum, device) => sum + finiteCount(device.pendingApprovalCount), 0)
   const visibleUnread = input.unreadSessionIds.filter(sessionId => {
     const decoded = decodeSessionId(sessionId)
+    if (!inScope(decoded.deviceId)) return false
     return !decoded.isRemote || !disabledDeviceIds.has(decoded.deviceId)
   })
   const unread = countableUnreadIds(
@@ -132,11 +147,19 @@ export type TaskbarTranslate = (key: MultiDeviceLocaleKey) => string
  *
  * `undefined` is load-bearing: the caller must then leave the title to DSH (or
  * to the active device's own page title) rather than paint an empty aggregate.
+ * `scopeLabel` names the scope the counts cover (`本机`, a device name, `全部`),
+ * so a device-filtered title can never be mistaken for a fleet-wide total.
  */
-export function formatTaskbarSummary(tally: TaskbarTally, t: TaskbarTranslate): string | undefined {
+export function formatTaskbarSummary(
+  tally: TaskbarTally,
+  t: TaskbarTranslate,
+  scopeLabel?: string,
+): string | undefined {
   const segments = taskbarSegments(tally)
   if (segments.length === 0) return undefined
-  return segments
+  const counts = segments
     .map(({ category, count }) => t(SEGMENT_KEY[category]).replace('{count}', String(count)))
     .join(' ')
+  const label = scopeLabel?.trim()
+  return label === undefined || label === '' ? counts : `${label} ${counts}`
 }

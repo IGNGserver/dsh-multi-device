@@ -33,7 +33,14 @@ export declare class ReadStateTracker {
     /** Only true baselines need retention; absent and false are equivalent. */
     private readonly running;
     constructor(onChange?: ReadStateChangeListener | undefined);
-    /** First false and duplicate false observations never mint a completion. */
+    /**
+     * Feed one live `running` observation.
+     *
+     * A new run deliberately keeps an existing unread completion: the user may
+     * never have opened the previous result, and a follow-up turn must not erase
+     * that reminder. `false` after a real `true` mints a fresh completion
+     * identity; first/duplicate `false` observations still mint nothing.
+     */
     observeRunning(sessionId: string, running: boolean, now?: number): boolean;
     /** Optional expected token prevents an old page read from clearing a new run. */
     markRead(sessionId: string, now?: number, expectedCompletionId?: string): boolean;

@@ -15,6 +15,15 @@ import type { DeviceView, MultiDeviceSnapshot, NativePageRelease } from './contr
 import type { DeviceRegistry } from './host/registry.ts';
 export declare const MULTI_DEVICE_API_PATH = "/multi-device/api";
 export declare const MULTI_DEVICE_EVENTS_PATH = "/multi-device/events";
+/**
+ * How long one SSE snapshot write may stay backpressured before the Host gives
+ * up on that connection. A desktop window hidden in the tray can stop reading
+ * its EventSource for minutes; without this bound the flush loop waits forever,
+ * the client never sees a new revision, and the tab capsule/title freeze on a
+ * stale count. Dropping the stream makes EventSource reconnect and receive a
+ * complete snapshot instead of silently ageing.
+ */
+export declare const SSE_DRAIN_TIMEOUT_MS = 15000;
 /** True when the Host header is this machine's loopback, including `[::1]`. */
 export declare function isLoopbackHostHeader(hostHeader: string | undefined): boolean;
 /**
@@ -84,6 +93,12 @@ export interface DiagnosticsClientReport {
      */
     readonly barObstruction?: string;
     readonly userAgent?: string;
+    /** Revision of the last snapshot this page actually applied. */
+    readonly snapshotRevision?: number;
+    /** Age in milliseconds of that snapshot (`-1` before the first one). */
+    readonly snapshotAgeMs?: number;
+    /** Whether the page's EventSource is currently open. */
+    readonly sseOpen?: boolean;
 }
 /** One device row of the Diagnostics report. */
 export interface DiagnosticsDevice {

@@ -1,4 +1,4 @@
-import { type DeviceAuthState, type DeviceCatalogCache, type DeviceConfig, DeviceId, type DeviceView, type MultiDeviceSnapshot, type MultiDeviceUiPreferences, type SshKeyEntry, type UpsertDeviceInput, type WorkspaceViewState } from '../contract.ts';
+import { type DeviceAuthState, type DeviceCatalogCache, type DeviceConfig, DeviceId, type DeviceView, type MultiDeviceSnapshot, type MultiDeviceUiPreferences, type SshKeyEntry, type TaskbarSummaryScope, type UpsertDeviceInput, type WorkspaceViewState } from '../contract.ts';
 import { type DeviceAttentionView, type SessionAttentionFact } from '../attention.ts';
 import { DeviceAuthManager } from './auth.ts';
 import { NativeProxyManager } from './native-proxy.ts';
@@ -18,6 +18,8 @@ export declare function collectAttentionSessionTitles(attention: Readonly<Record
  * Say so, instead of pointing the user at the private key.
  */
 export declare function describeProbeFailure(status: number | undefined, input: UpsertDeviceInput): string;
+/** Unknown/absent scope values fall back to the sidebar-matching default. */
+export declare function sanitizeTaskbarSummaryScope(value: unknown, fallback?: TaskbarSummaryScope): TaskbarSummaryScope;
 export declare const ACTIVE_RECONCILE_BASE_MS = 45000;
 export declare const IDLE_RECONCILE_BASE_MS = 180000;
 export declare function computeAdaptiveReconcileDelayMs(hasActiveWork: boolean, randomFn?: () => number): number;

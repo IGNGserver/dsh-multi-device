@@ -3,10 +3,11 @@
  *
  * Three owners, in priority order:
  *
- * 1. The opt-in taskbar summary (`ui.taskbarSummary`): one aggregate of every
- *    device's Session status, e.g. `1跑 2结`, using the same categories as the
- *    tab capsule. It deliberately carries no product name — the strip's own
- *    counts are the whole message, and the taskbar already shows the app icon.
+ * 1. The opt-in taskbar summary (`ui.taskbarSummary`): the Session status of
+ *    the active device by default (`ui.taskbarSummaryScope === 'active'`), or
+ *    every enabled device when explicitly set to `all`. The result is prefixed
+ *    with the scope (`本机 1跑 2结`, `ubuntu-dev 1跑`, `全部 3跑 2结`) so a
+ *    device-filtered number can never be mistaken for a fleet-wide total.
  * 2. A remote device tab: that device's own page title, reported by the bridge.
  * 3. Nothing: DSH keeps `document.title` naming the local conversation.
  *
@@ -18,7 +19,7 @@
  *
  * @module dsh-multi-device/client/windowTitle
  */
-import type { DeviceId, DeviceView, MultiDeviceSnapshot } from '../contract.ts';
+import { type DeviceId, type DeviceView, type MultiDeviceSnapshot } from '../contract.ts';
 import type { MultiDeviceLocaleKey } from './locales.ts';
 import { type TaskbarTranslate } from './taskbarSummary.ts';
 /** Inputs the title depends on; kept as a narrow shape so it is easy to test. */
@@ -41,9 +42,12 @@ export declare function resolveWindowTitle(input: WindowTitleInput): string | un
  * The aggregate line for one snapshot, or `undefined` to leave the title alone.
  *
  * Reads only the Host-published projection, so a toggle flip or a device count
- * change repaints the title without any extra request.
+ * change repaints the title without any extra request. The default `active`
+ * scope follows the visible tab and labels the result with that device's name:
+ * a window title next to the 本机 sidebar must not silently include a remote
+ * device, which is exactly how a correct `2跑 2结` used to read as `4跑`.
  */
-export declare function resolveTaskbarSummary(snapshot: MultiDeviceSnapshot, t: TaskbarTranslate): string | undefined;
+export declare function resolveTaskbarSummary(snapshot: MultiDeviceSnapshot, t: TaskbarTranslate, activeDeviceId?: DeviceId): string | undefined;
 /**
  * Override `document.title` without losing DSH's own value.
  *

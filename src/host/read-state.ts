@@ -1,6 +1,9 @@
 /**
  * Host-owned read state. Only this authority's ordered true -> false observations
  * mint completion identities; wall clocks and catalog updatedAt are not cursors.
+ * A new `running` observation never consumes a completion on its own: starting
+ * another run must not erase a result the user has not opened. Only an explicit
+ * read/ACK (`markRead` / `readCompletion`) clears the unread marker.
  * Hydrated legacy unread markers receive a `legacy:`-prefixed compatibility
  * cursor once, not evidence of an observed completion or terminal sequence.
  *
@@ -110,14 +113,21 @@ export class ReadStateTracker {
 
   constructor(private readonly onChange?: ReadStateChangeListener) {}
 
-  /** First false and duplicate false observations never mint a completion. */
+  /**
+   * Feed one live `running` observation.
+   *
+   * A new run deliberately keeps an existing unread completion: the user may
+   * never have opened the previous result, and a follow-up turn must not erase
+   * that reminder. `false` after a real `true` mints a fresh completion
+   * identity; first/duplicate `false` observations still mint nothing.
+   */
   observeRunning(sessionId: string, running: boolean, now = Date.now()): boolean {
     if (sessionId === '' || this.entries.get(sessionId)?.deleted === true) return false
     const previous = this.running.get(sessionId)
     this.running.delete(sessionId)
     if (running) this.running.set(sessionId, true)
     this.trim()
-    if (running) return this.isUnread(sessionId) ? this.markRead(sessionId, now) : false
+    if (running) return false
     if (previous !== true) return false
     const old = this.entries.get(sessionId)
     this.setEntry(sessionId, {

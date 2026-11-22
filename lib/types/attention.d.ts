@@ -10,6 +10,11 @@ export interface SessionAttentionFact {
     readonly pendingRequestCount?: number;
     readonly runningSubagentCount?: number;
 }
+/** Why one Session is counted as running: its own run, its children, or both. */
+export interface RunningDetail {
+    readonly self: boolean;
+    readonly subagentCount: number;
+}
 export interface DeviceAttentionView {
     readonly eligibleSessionIds: string[];
     readonly runningSessionIds: string[];
@@ -18,6 +23,12 @@ export interface DeviceAttentionView {
     readonly pendingRequestCount: number;
     /** False means retained/partial data, not an authoritative zero. */
     readonly fresh: boolean;
+    /**
+     * Per-running-Session attribution, present only when at least one Session is
+     * running. The menu and Diagnostics use it to explain a blue count that has
+     * no visible running row of its own.
+     */
+    readonly runningDetails?: Readonly<Record<string, RunningDetail>>;
 }
 export interface AttentionPolicy {
     readonly currentSessionId?: string;

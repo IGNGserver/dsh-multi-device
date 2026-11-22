@@ -434,6 +434,16 @@ export interface WorkspaceViewState {
 export declare function sanitizeWorkspaceViewState(value: unknown): WorkspaceViewState;
 /** True when two view states carry the same presentation fields. */
 export declare function sameWorkspaceViewState(left: WorkspaceViewState | undefined, right: WorkspaceViewState | undefined): boolean;
+/**
+ * Which Sessions the opt-in window-title summary counts.
+ *
+ * - `active`: the device whose tab is on screen (本机 when no remote tab is
+ *   selected). This is the default because the title sits next to the sidebar
+ *   of that page and a global total reads like a counting bug there.
+ * - `all`: every enabled device, for users who treat the window title as a
+ *   fleet-wide dashboard.
+ */
+export type TaskbarSummaryScope = 'all' | 'active';
 /** Display preferences persisted by the Host. */
 export interface MultiDeviceUiPreferences {
     /**
@@ -460,6 +470,13 @@ export interface MultiDeviceUiPreferences {
      * aggregate leaves the title to DSH.
      */
     readonly taskbarSummary: boolean;
+    /**
+     * Scope of the title summary. `active` (default) counts only the device whose
+     * tab is on screen, so the title agrees with that page's sidebar; `all`
+     * counts every enabled device. Absent on Hosts from before this preference
+     * existed, in which case the Client behaves as `active`.
+     */
+    readonly taskbarSummaryScope?: TaskbarSummaryScope;
     /**
      * Maximum number of background Native Mode device frames kept alive in the DOM (`1..12`, defaults to `6`).
      * Dirty-draft pages are protected from eviction.

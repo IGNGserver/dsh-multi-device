@@ -163,21 +163,25 @@ export function attentionSegments(
 
 interface OpenAttentionMenuGroupProps {
   readonly label: string
+  readonly category: AttentionCategory
   readonly ids: readonly string[]
   readonly snapshot: MultiDeviceSnapshot
   readonly deviceName: string
   readonly t: (key: MultiDeviceLocaleKey) => string
   readonly unavailableText: string
+  readonly runningDetails?: DeviceAttentionView['runningDetails']
   readonly onOpenRow: (row: AttentionSessionRow) => Promise<void>
 }
 
 function OpenAttentionMenuGroup({
   label,
+  category,
   ids,
   snapshot,
   deviceName,
   t,
   unavailableText,
+  runningDetails,
   onOpenRow,
 }: OpenAttentionMenuGroupProps): React.ReactElement {
   // Subscribed only while a capsule menu is open so closed tab badges pay zero
@@ -197,7 +201,17 @@ function OpenAttentionMenuGroup({
       title: titleFor,
     })
     return rows.map(row => {
-      const meta = [row.cwd, row.deviceName]
+      const detail = category === 'running' ? runningDetails?.[row.sessionId] : undefined
+      const source = detail === undefined
+        ? []
+        : detail.self && detail.subagentCount > 0
+          ? [t('runningSourceBoth').replace('{count}', String(detail.subagentCount))]
+          : detail.self
+            ? [t('runningSourceSelf')]
+            : detail.subagentCount > 0
+              ? [t('runningSourceSubagent').replace('{count}', String(detail.subagentCount))]
+              : []
+      const meta = [row.cwd, row.deviceName, ...source]
         .filter((part): part is string => part !== undefined && part !== '')
       const minimal = row.title === ''
       return (
@@ -219,7 +233,14 @@ function OpenAttentionMenuGroup({
     })
   }
 
-  return <MenuGroup label={label}>{renderRows()}</MenuGroup>
+  return (
+    <MenuGroup label={label}>
+      {renderRows()}
+      {category === 'running' && ids.length > 0
+        ? <div className="dsh-md-attention-note">{t('attentionScopeDevice')}</div>
+        : null}
+    </MenuGroup>
+  )
 }
 
 export function AttentionDetails({
@@ -300,7 +321,7 @@ export function AttentionDetails({
           className="dsh-md-tab-status"
           role={segments.length > 0 ? 'group' : 'status'}
           aria-label={capsuleLabel}
-          title={stale ? words.stale : undefined}
+          title={stale ? words.stale : t('attentionScopeDevice')}
           data-stale={stale ? 'true' : undefined}
           data-empty={segments.length === 0 ? 'true' : undefined}
         >
@@ -345,11 +366,13 @@ export function AttentionDetails({
                 {open ? (
                   <OpenAttentionMenuGroup
                     label={label}
+                    category={segment.category}
                     ids={segment.ids}
                     snapshot={snapshot}
                     deviceName={deviceName}
                     t={t}
                     unavailableText={words.unavailable}
+                    runningDetails={segment.category === 'running' ? view?.runningDetails : undefined}
                     onOpenRow={openRow}
                   />
                 ) : null}

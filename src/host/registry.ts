@@ -27,6 +27,7 @@ import {
   type NativePaneState,
   type MultiDeviceUiPreferences,
   type SshKeyEntry,
+  type TaskbarSummaryScope,
   type UpsertDeviceInput,
   type WorkspaceViewState,
 } from '../contract.ts'
@@ -187,8 +188,17 @@ const DEFAULT_UI_PREFERENCES: MultiDeviceUiPreferences = {
   crossHostReadState: false,
   crossHostUiState: false,
   taskbarSummary: false,
+  taskbarSummaryScope: 'active',
   maxKeepAlivePages: 6,
   keepAliveIdleMinutes: 30,
+}
+
+/** Unknown/absent scope values fall back to the sidebar-matching default. */
+export function sanitizeTaskbarSummaryScope(
+  value: unknown,
+  fallback: TaskbarSummaryScope = 'active',
+): TaskbarSummaryScope {
+  return value === 'all' || value === 'active' ? value : fallback
 }
 
 function sanitizeKeepAlivePages(value: unknown, fallback = 6): number {
@@ -2340,6 +2350,9 @@ export class DeviceRegistry {
       taskbarSummary: patch.taskbarSummary === undefined
         ? this.uiPreferences.taskbarSummary
         : patch.taskbarSummary === true,
+      taskbarSummaryScope: patch.taskbarSummaryScope === undefined
+        ? sanitizeTaskbarSummaryScope(this.uiPreferences.taskbarSummaryScope)
+        : sanitizeTaskbarSummaryScope(patch.taskbarSummaryScope, sanitizeTaskbarSummaryScope(this.uiPreferences.taskbarSummaryScope)),
       maxKeepAlivePages: patch.maxKeepAlivePages === undefined
         ? sanitizeKeepAlivePages(this.uiPreferences.maxKeepAlivePages)
         : sanitizeKeepAlivePages(patch.maxKeepAlivePages, sanitizeKeepAlivePages(this.uiPreferences.maxKeepAlivePages)),
@@ -2561,6 +2574,7 @@ export class DeviceRegistry {
           crossHostReadState: raw.ui.crossHostReadState === true,
           crossHostUiState: raw.ui.crossHostUiState === true,
           taskbarSummary: raw.ui.taskbarSummary === true,
+          taskbarSummaryScope: sanitizeTaskbarSummaryScope(raw.ui.taskbarSummaryScope),
           maxKeepAlivePages: sanitizeKeepAlivePages(raw.ui.maxKeepAlivePages),
           keepAliveIdleMinutes: sanitizeKeepAliveIdleMinutes(raw.ui.keepAliveIdleMinutes),
         }

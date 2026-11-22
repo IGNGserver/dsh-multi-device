@@ -27,6 +27,25 @@ import type { ControlPlaneRequest, DiagnosticsClientReport, MultiDeviceDiagnosti
  *   explicit device-tab override).
  */
 export declare function shouldApplySnapshot(current: Pick<MultiDeviceSnapshot, 'revision' | 'hostEpoch'>, next: Pick<MultiDeviceSnapshot, 'revision' | 'hostEpoch'>, force?: boolean): boolean;
+/**
+ * A live EventSource proves the socket is open, not that snapshots still
+ * arrive. The Host can sit in backpressure while the desktop window is hidden,
+ * so the Client must treat "no snapshot for a while" as a stall and refetch
+ * over HTTP instead of trusting `readyState === OPEN` forever.
+ */
+export declare const SNAPSHOT_STALL_MS = 20000;
+export declare const SNAPSHOT_STALL_REFETCH_MS = 10000;
+export interface SnapshotStallInput {
+    readonly now: number;
+    readonly lastSnapshotAt: number;
+    readonly lastRefetchAt: number;
+    readonly visible: boolean;
+    readonly sseOpen: boolean;
+    readonly stallMs?: number;
+    readonly refetchMs?: number;
+}
+/** True when a visible page with an open SSE stream has stopped receiving snapshots. */
+export declare function shouldRefetchStalledSnapshot(input: SnapshotStallInput): boolean;
 /** Map device connection lifecycle states to official DSH `StateDot` states. */
 export declare function deviceStateToDotState(state: DeviceConnectionState): StateDotState;
 /**
@@ -92,7 +111,11 @@ export declare class MultiDeviceClientStore {
     private readonly lastActiveAtByDevice;
     private readonly evictedSessionByDevice;
     private visibilityDocument;
+    private focusWindow;
+    private lastSnapshotAt;
+    private lastStallRefetchAt;
     private readonly onVisibilityChange;
+    private readonly onWindowFocus;
     /** Latest Session reported to the Host, used to dedupe mount/cleanup races. */
     private reportedSessionId;
     private hasReportedSession;
@@ -115,6 +138,16 @@ export declare class MultiDeviceClientStore {
     private isResponseCurrent;
     start(): () => void;
     private stop;
+    /** Visible unless a browser explicitly reports the page as hidden. */
+    private isDocumentVisible;
+    private sseIsOpen;
+    private stalledSnapshotNeedsRefetch;
+    /** Refetch once when the page becomes visible/focused after a silent stream stall. */
+    private ensureSnapshotFresh;
+    /** Age of the last accepted snapshot, for Diagnostics (`-1` before the first one). */
+    snapshotAgeMs(now?: number): number;
+    /** Whether the live event stream is currently open, for Diagnostics. */
+    sseOpen(): boolean;
     /** Final teardown (including HMR): a disposed store cannot be restarted. */
     dispose(): void;
     private maxKeepAlivePages;
