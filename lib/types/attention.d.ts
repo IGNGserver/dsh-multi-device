@@ -9,6 +9,8 @@ export interface SessionAttentionFact {
     readonly pendingInteractionKind?: string;
     readonly pendingRequestCount?: number;
     readonly runningSubagentCount?: number;
+    /** Workspace directory when the catalog exposes it; used by workspace-scoped totals. */
+    readonly cwd?: string;
 }
 /** Why one Session is counted as running: its own run, its children, or both. */
 export interface RunningDetail {
@@ -29,6 +31,12 @@ export interface DeviceAttentionView {
      * no visible running row of its own.
      */
     readonly runningDetails?: Readonly<Record<string, RunningDetail>>;
+    /**
+     * `cwd` for the Sessions in the three visible categories. Used only to
+     * restrict a workspace-scoped title; limited to members so a large catalog
+     * never turns into a path dump.
+     */
+    readonly cwdBySession?: Readonly<Record<string, string>>;
 }
 export interface AttentionPolicy {
     readonly currentSessionId?: string;

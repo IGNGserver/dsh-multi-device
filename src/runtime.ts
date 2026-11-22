@@ -296,8 +296,8 @@ export function validateControlPlanePayload(request: ControlPlaneRequest): void 
     case 'setUiPreferences':
       payloadBoolean(payload, 'crossHostReadState'); payloadBoolean(payload, 'crossHostUiState'); payloadBoolean(payload, 'taskbarSummary')
       if (payload.taskbarSummaryScope !== undefined &&
-          payload.taskbarSummaryScope !== 'all' && payload.taskbarSummaryScope !== 'active') {
-        throw new Error('taskbarSummaryScope must be "all" or "active"')
+          payload.taskbarSummaryScope !== 'all' && payload.taskbarSummaryScope !== 'active' && payload.taskbarSummaryScope !== 'workspace') {
+        throw new Error('taskbarSummaryScope must be "all", "active" or "workspace"')
       }
       if (payload.maxKeepAlivePages !== undefined && (!Number.isInteger(payload.maxKeepAlivePages) || (payload.maxKeepAlivePages as number) < 1 || (payload.maxKeepAlivePages as number) > 12)) {
         throw new Error('maxKeepAlivePages must be an optional integer from 1 to 12')
@@ -688,7 +688,7 @@ export class MultiDeviceControlPlane {
             ...(typeof payload.taskbarSummary === 'boolean'
               ? { taskbarSummary: payload.taskbarSummary }
               : {}),
-            ...(payload.taskbarSummaryScope === 'all' || payload.taskbarSummaryScope === 'active'
+            ...(payload.taskbarSummaryScope === 'all' || payload.taskbarSummaryScope === 'active' || payload.taskbarSummaryScope === 'workspace'
               ? { taskbarSummaryScope: payload.taskbarSummaryScope }
               : {}),
           })

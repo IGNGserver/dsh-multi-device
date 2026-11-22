@@ -9,6 +9,8 @@
 import { EventEmitter } from 'node:events'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { selectDeviceAttention, type SessionAttentionFact } from '../src/attention.ts'
+import { bindClientServices } from '../src/client/clientServices.ts'
+import { activeWorkspaceSessionIds } from '../src/client/windowTitle.ts'
 import { DeviceId, type MultiDeviceSnapshot } from '../src/contract.ts'
 import { ReadStateTracker } from '../src/host/read-state.ts'
 import type { DeviceRegistry } from '../src/host/registry.ts'
@@ -82,6 +84,58 @@ describe('running attribution', () => {
 
   it('omits attribution when nothing runs', () => {
     expect(selectDeviceAttention([fact('idle')], new Set()).local.runningDetails).toBeUndefined()
+  })
+
+  it('publishes cwd only for the visible categories', () => {
+    const view = selectDeviceAttention([
+      fact('run', { running: true, cwd: '/work' }),
+      fact('pending', { pendingRequestCount: 1, cwd: '/work' }),
+      fact('unread', { cwd: '/work' }),
+      fact('read', { cwd: '/work' }),
+    ], new Set(['unread'])).local
+    expect(view.cwdBySession).toEqual({ run: '/work', pending: '/work', unread: '/work' })
+  })
+})
+
+describe('workspace scoping', () => {
+  it('uses the local active session cwd and falls back when no cwd is known', () => {
+    const dispose = bindClientServices({
+      sessions: {
+        list: {
+          getSnapshot: () => ({
+            ids: ['a', 'b', 'c'],
+            byId: { a: { cwd: '/work' }, b: { cwd: '/work' }, c: { cwd: '/other' } },
+          }),
+        },
+      },
+    })
+    try {
+      const base = { snapshot: { revision: 1, devices: [], sshConfigHosts: [], unreadSessionIds: [] } as unknown as MultiDeviceSnapshot }
+      expect(activeWorkspaceSessionIds({ ...base, activeSessionId: 'a' })).toEqual(new Set(['a', 'b']))
+      expect(activeWorkspaceSessionIds({ ...base, activeSessionId: 'missing' })).toBeUndefined()
+      expect(activeWorkspaceSessionIds({ ...base, activeNativeDeviceId: DeviceId('dev-a') })).toBeUndefined()
+    } finally {
+      dispose()
+    }
+  })
+
+  it('maps a remote active session through its namespaced cwd metadata', () => {
+    const raw = 'raw-1'
+    const namespaced = `md~dev-a~${raw}`
+    const snapshot = {
+      revision: 1,
+      devices: [{ id: DeviceId('dev-a'), name: 'dev-a', enabled: true, state: 'connected', nativePaneSessionId: raw }],
+      sshConfigHosts: [],
+      unreadSessionIds: [],
+      attentionByDevice: {
+        'dev-a': {
+          eligibleSessionIds: [namespaced], runningSessionIds: [namespaced],
+          pendingSessionIds: [], unreadSessionIds: [], pendingRequestCount: 0, fresh: true,
+          cwdBySession: { [namespaced]: '/remote' },
+        },
+      },
+    } as unknown as MultiDeviceSnapshot
+    expect(activeWorkspaceSessionIds({ snapshot, activeNativeDeviceId: DeviceId('dev-a') })).toEqual(new Set([namespaced]))
   })
 })
 

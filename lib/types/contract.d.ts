@@ -440,10 +440,14 @@ export declare function sameWorkspaceViewState(left: WorkspaceViewState | undefi
  * - `active`: the device whose tab is on screen (本机 when no remote tab is
  *   selected). This is the default because the title sits next to the sidebar
  *   of that page and a global total reads like a counting bug there.
+ * - `workspace`: the active device, restricted to the active Session's `cwd`
+ *   when the Client can resolve it; the title gains a `·工作区` suffix. The
+ *   sidebar's selected group is not published by DSH, so this follows the
+ *   conversation on screen and falls back to `active` when no `cwd` is known.
  * - `all`: every enabled device, for users who treat the window title as a
  *   fleet-wide dashboard.
  */
-export type TaskbarSummaryScope = 'all' | 'active';
+export type TaskbarSummaryScope = 'all' | 'active' | 'workspace';
 /** Display preferences persisted by the Host. */
 export interface MultiDeviceUiPreferences {
     /**

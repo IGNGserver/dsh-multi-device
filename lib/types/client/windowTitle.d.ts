@@ -21,6 +21,7 @@
  */
 import { type DeviceId, type DeviceView, type MultiDeviceSnapshot } from '../contract.ts';
 import type { MultiDeviceLocaleKey } from './locales.ts';
+import { type MultiDeviceClientState } from './state.ts';
 import { type TaskbarTranslate } from './taskbarSummary.ts';
 /** Inputs the title depends on; kept as a narrow shape so it is easy to test. */
 export interface WindowTitleInput {
@@ -47,7 +48,17 @@ export declare function resolveWindowTitle(input: WindowTitleInput): string | un
  * a window title next to the 本机 sidebar must not silently include a remote
  * device, which is exactly how a correct `2跑 2结` used to read as `4跑`.
  */
-export declare function resolveTaskbarSummary(snapshot: MultiDeviceSnapshot, t: TaskbarTranslate, activeDeviceId?: DeviceId): string | undefined;
+export declare function resolveTaskbarSummary(snapshot: MultiDeviceSnapshot, t: TaskbarTranslate, activeDeviceId?: DeviceId, workspaceSessionIds?: ReadonlySet<string>): string | undefined;
+/**
+ * Session IDs in the active conversation's workspace on the active device.
+ *
+ * DSH does not publish the sidebar's selected group, so the active Session's
+ * `cwd` is the honest local proxy. Local Sessions have a full client-side list;
+ * a remote Session only has the Host's `cwdBySession` for attention members,
+ * and an unresolvable remote workspace deliberately falls back to `active`
+ * rather than inventing a filter.
+ */
+export declare function activeWorkspaceSessionIds(state: Pick<MultiDeviceClientState, 'snapshot' | 'activeNativeDeviceId' | 'activeSessionId'>): ReadonlySet<string> | undefined;
 /**
  * Override `document.title` without losing DSH's own value.
  *

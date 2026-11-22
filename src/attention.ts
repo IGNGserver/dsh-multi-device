@@ -9,6 +9,8 @@ export interface SessionAttentionFact {
   readonly pendingInteractionKind?: string
   readonly pendingRequestCount?: number
   readonly runningSubagentCount?: number
+  /** Workspace directory when the catalog exposes it; used by workspace-scoped totals. */
+  readonly cwd?: string
 }
 
 /** Why one Session is counted as running: its own run, its children, or both. */
@@ -31,6 +33,12 @@ export interface DeviceAttentionView {
    * no visible running row of its own.
    */
   readonly runningDetails?: Readonly<Record<string, RunningDetail>>
+  /**
+   * `cwd` for the Sessions in the three visible categories. Used only to
+   * restrict a workspace-scoped title; limited to members so a large catalog
+   * never turns into a path dump.
+   */
+  readonly cwdBySession?: Readonly<Record<string, string>>
 }
 
 export interface AttentionPolicy {
@@ -62,7 +70,7 @@ export function selectDeviceAttention(
 ): Record<string, DeviceAttentionView> {
   const devices = new Map<string, Map<string, {
     hidden: boolean; blank: boolean; running: boolean
-    runningSelf: boolean; runningChildren: number; pending: number
+    runningSelf: boolean; runningChildren: number; pending: number; cwd?: string
   }>>()
   for (const fact of facts) {
     let sessions = devices.get(fact.deviceId)
@@ -78,6 +86,9 @@ export function selectDeviceAttention(
       runningSelf,
       runningChildren,
       pending: Math.max(previous?.pending ?? 0, pending),
+      ...(previous?.cwd !== undefined
+        ? { cwd: previous.cwd }
+        : fact.cwd !== undefined && fact.cwd !== '' ? { cwd: fact.cwd } : {}),
     })
   }
   return Object.fromEntries([...devices.keys()].sort().map(deviceId => {
@@ -86,6 +97,7 @@ export function selectDeviceAttention(
     const pendingSessionIds: string[] = []
     const unreadSessionIds: string[] = []
     const runningDetails: Record<string, RunningDetail> = {}
+    const cwdBySession: Record<string, string> = {}
     let pendingRequestCount = 0
     for (const [sessionId, fact] of [...devices.get(deviceId)!].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
       if (fact.hidden || (fact.blank && sessionId !== policy.currentSessionId)) continue
@@ -93,15 +105,21 @@ export function selectDeviceAttention(
       if (fact.pending > 0) {
         pendingSessionIds.push(sessionId)
         pendingRequestCount += fact.pending
+        if (fact.cwd !== undefined) cwdBySession[sessionId] = fact.cwd
       } else if (fact.running) {
         runningSessionIds.push(sessionId)
         runningDetails[sessionId] = { self: fact.runningSelf, subagentCount: fact.runningChildren }
-      } else if (unread.has(sessionId)) unreadSessionIds.push(sessionId)
+        if (fact.cwd !== undefined) cwdBySession[sessionId] = fact.cwd
+      } else if (unread.has(sessionId)) {
+        unreadSessionIds.push(sessionId)
+        if (fact.cwd !== undefined) cwdBySession[sessionId] = fact.cwd
+      }
     }
     return [deviceId, {
       eligibleSessionIds, runningSessionIds, pendingSessionIds, unreadSessionIds,
       pendingRequestCount, fresh: policy.fresh !== false,
       ...(runningSessionIds.length === 0 ? {} : { runningDetails }),
+      ...(Object.keys(cwdBySession).length === 0 ? {} : { cwdBySession }),
     }]
   }))
 }

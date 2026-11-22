@@ -198,6 +198,22 @@ describe('window title', () => {
     )).toBeUndefined()
   })
 
+  it('filters a workspace title by the active conversation cwd and labels it', () => {
+    const attentionByDevice = {
+      local: attention({ runningSessionIds: ['a', 'b'], unreadSessionIds: ['c'] }),
+    }
+    const active = snapshot(
+      { crossHostReadState: false, taskbarSummary: true, taskbarSummaryScope: 'workspace' },
+      attentionByDevice,
+    )
+    const workspace = new Set(['a', 'c'])
+    expect(resolveTaskbarSummary(active, zhT, undefined, workspace)).toBe('本机·工作区 1跑 1结')
+    // No resolved workspace: fall back to the device scope, not a misleading
+    // "workspace" label.
+    expect(resolveTaskbarSummary(active, zhT)).toBe('本机 2跑 1结')
+    expect(resolveTaskbarSummary(active, zhT, undefined, new Set())).toBe('本机 2跑 1结')
+  })
+
   it('honours an explicit scope restriction in the tally and prefix formatting', () => {
     const input = {
       devices: [device({ id: DeviceId('dev-1'), runningSessionCount: 1 })],
@@ -225,19 +241,19 @@ describe('Host preference plumbing', () => {
     first.updateUiPreferences({ taskbarSummary: true })
     expect(first.ui()).toMatchObject({ taskbarSummary: true, taskbarSummaryScope: 'active', crossHostReadState: false })
     expect(first.snapshot().ui?.taskbarSummary).toBe(true)
-    first.updateUiPreferences({ taskbarSummaryScope: 'all' })
-    expect(first.snapshot().ui?.taskbarSummaryScope).toBe('all')
+    first.updateUiPreferences({ taskbarSummaryScope: 'workspace' })
+    expect(first.snapshot().ui?.taskbarSummaryScope).toBe('workspace')
     first.dispose()
     const reloaded = registry(dir)
     expect(reloaded.ui().taskbarSummary).toBe(true)
-    expect(reloaded.ui().taskbarSummaryScope).toBe('all')
+    expect(reloaded.ui().taskbarSummaryScope).toBe('workspace')
   })
 
   it('sanitizes an unknown scope back to the sidebar-matching default', () => {
     const dir = mkdtempSync(join(tmpdir(), 'taskbar-scope-'))
     dirs.push(dir)
     const first = registry(dir)
-    first.updateUiPreferences({ taskbarSummaryScope: 'workspace' as never })
+    first.updateUiPreferences({ taskbarSummaryScope: 'grid' as never })
     expect(first.ui().taskbarSummaryScope).toBe('active')
   })
 
@@ -246,9 +262,9 @@ describe('Host preference plumbing', () => {
       .toThrow('taskbarSummary must be an optional boolean')
     expect(() => parseControlPlaneRequest({ action: 'setUiPreferences', payload: { taskbarSummary: true } }))
       .not.toThrow()
+    expect(() => parseControlPlaneRequest({ action: 'setUiPreferences', payload: { taskbarSummaryScope: 'grid' } }))
+      .toThrow('taskbarSummaryScope must be "all", "active" or "workspace"')
     expect(() => parseControlPlaneRequest({ action: 'setUiPreferences', payload: { taskbarSummaryScope: 'workspace' } }))
-      .toThrow('taskbarSummaryScope must be "all" or "active"')
-    expect(() => parseControlPlaneRequest({ action: 'setUiPreferences', payload: { taskbarSummaryScope: 'all' } }))
       .not.toThrow()
   })
 })

@@ -737,10 +737,11 @@ export function MultiDeviceHubPanel({
             value={snapshot.ui?.taskbarSummaryScope ?? 'active'}
             options={[
               { value: 'active', label: t('taskbarScopeActive') },
+              { value: 'workspace', label: t('taskbarScopeWorkspace') },
               { value: 'all', label: t('taskbarScopeAll') },
             ]}
             onChange={(value) => {
-              if (value !== 'active' && value !== 'all') return
+              if (value !== 'active' && value !== 'workspace' && value !== 'all') return
               void clientStore.setUiPreferences({ taskbarSummaryScope: value as TaskbarSummaryScope }).then((res) => {
                 if (!res.ok) pushToast(`${t('actionFailed')}: ${res.error ?? ''}`, 'error')
               })

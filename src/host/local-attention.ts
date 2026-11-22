@@ -94,7 +94,7 @@ export async function readLocalAttentionCatalog(
     const values = session === undefined ? undefined : projection?.snapshot?.(
       session, ['sessionListMetadata', 'subagentCatalog'],
     ).values
-    const metadata = values?.sessionListMetadata as { blank?: boolean } | undefined
+    const metadata = values?.sessionListMetadata as { blank?: boolean; cwd?: string } | undefined
     const children = values?.subagentCatalog
     const runningSubagentCount = Array.isArray(children)
       ? children.filter(child => typeof child?.id === 'string' && running.has(child.id)).length
@@ -103,6 +103,7 @@ export async function readLocalAttentionCatalog(
       sessionId: id, deviceId: 'local', running: running.has(id), origin,
       blank: session === undefined ? false : metadata?.blank ?? session.seq === 0,
       runningSubagentCount,
+      ...(typeof metadata?.cwd === 'string' && metadata.cwd !== '' ? { cwd: metadata.cwd } : {}),
     }
   }
 

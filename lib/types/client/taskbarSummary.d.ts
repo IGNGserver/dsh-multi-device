@@ -59,6 +59,12 @@ export interface TaskbarTallyInput {
  */
 export interface TaskbarTallyOptions {
     readonly deviceIds?: ReadonlySet<string> | undefined;
+    /**
+     * Extra intersection applied inside each category. Workspace scope passes
+     * the Session IDs whose `cwd` matches the active conversation; `undefined`
+     * keeps every Session on the selected devices.
+     */
+    readonly sessionIds?: ReadonlySet<string> | undefined;
 }
 /**
  * Count every device's Sessions by category.

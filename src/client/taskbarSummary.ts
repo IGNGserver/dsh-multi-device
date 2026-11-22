@@ -67,6 +67,12 @@ export interface TaskbarTallyInput {
  */
 export interface TaskbarTallyOptions {
   readonly deviceIds?: ReadonlySet<string> | undefined
+  /**
+   * Extra intersection applied inside each category. Workspace scope passes
+   * the Session IDs whose `cwd` matches the active conversation; `undefined`
+   * keeps every Session on the selected devices.
+   */
+  readonly sessionIds?: ReadonlySet<string> | undefined
 }
 
 function finiteCount(value: number | undefined): number {
@@ -90,6 +96,8 @@ export function tallyTaskbarSessions(
 ): TaskbarTally {
   const inScope = (deviceId: string): boolean =>
     options.deviceIds === undefined || options.deviceIds.has(deviceId)
+  const includeSession = (sessionId: string): boolean =>
+    options.sessionIds === undefined || options.sessionIds.has(sessionId)
   const disabledDeviceIds = new Set(
     input.devices.filter(device => device.enabled === false).map(device => device.id),
   )
@@ -100,9 +108,9 @@ export function tallyTaskbarSessions(
     const unread = new Set<string>()
     for (const [deviceId, view] of Object.entries(attention)) {
       if (view === undefined || disabledDeviceIds.has(deviceId) || !inScope(deviceId)) continue
-      for (const sessionId of view.runningSessionIds) running.add(sessionId)
-      for (const sessionId of view.pendingSessionIds) pending.add(sessionId)
-      for (const sessionId of view.unreadSessionIds) unread.add(sessionId)
+      for (const sessionId of view.runningSessionIds) if (includeSession(sessionId)) running.add(sessionId)
+      for (const sessionId of view.pendingSessionIds) if (includeSession(sessionId)) pending.add(sessionId)
+      for (const sessionId of view.unreadSessionIds) if (includeSession(sessionId)) unread.add(sessionId)
     }
     return { running: running.size, pending: pending.size, unread: unread.size }
   }
@@ -111,7 +119,7 @@ export function tallyTaskbarSessions(
   const pending = enabledDevices.reduce((sum, device) => sum + finiteCount(device.pendingApprovalCount), 0)
   const visibleUnread = input.unreadSessionIds.filter(sessionId => {
     const decoded = decodeSessionId(sessionId)
-    if (!inScope(decoded.deviceId)) return false
+    if (!inScope(decoded.deviceId) || !includeSession(sessionId)) return false
     return !decoded.isRemote || !disabledDeviceIds.has(decoded.deviceId)
   })
   const unread = countableUnreadIds(
