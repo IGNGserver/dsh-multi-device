@@ -734,11 +734,11 @@ export function MultiDeviceHubPanel({
             ariaLabel={t('taskbarSummaryScopeTitle')}
             style={{ minWidth: 132 }}
             disabled={snapshot.ui?.taskbarSummary !== true}
-            value={snapshot.ui?.taskbarSummaryScope ?? 'active'}
+            value={snapshot.ui?.taskbarSummaryScope ?? 'all'}
             options={[
+              { value: 'all', label: t('taskbarScopeAll') },
               { value: 'active', label: t('taskbarScopeActive') },
               { value: 'workspace', label: t('taskbarScopeWorkspace') },
-              { value: 'all', label: t('taskbarScopeAll') },
             ]}
             onChange={(value) => {
               if (value !== 'active' && value !== 'workspace' && value !== 'all') return

@@ -121,14 +121,12 @@ export declare const zh: {
     readonly runningCount: "{count} 运行中";
     readonly unreadCount: "{count} 完成未读";
     readonly taskbarSummaryTitle: "窗口标题显示任务汇总";
-    readonly taskbarSummaryDesc: "开启后窗口与任务栏标题改为任务计数，与标签胶囊同一口径：蓝＝运行中、黄＝待回复、绿＝完成未读，例如「本机 1跑 2结」。没有成员的类别不显示，全部为零时仍显示会话名。默认关闭。";
+    readonly taskbarSummaryDesc: "开启后窗口与任务栏标题改为任务计数，与标签胶囊同一口径：蓝＝运行中、黄＝待回复、绿＝完成未读，例如「1跑 2结」。默认汇总所有设备；也可在下方改为当前设备或当前工作区。没有成员的类别不显示，全部为零时仍显示会话名。默认关闭。";
     readonly taskbarSummaryScopeTitle: "任务汇总范围";
-    readonly taskbarSummaryScopeDesc: "当前设备（默认）只汇总当前标签对应的设备，标题标注「本机」或设备名；当前工作区再按当前打开会话所在目录过滤（无法确定目录时回退当前设备），标题标注「·工作区」；全部设备汇总所有已启用设备并标注「全部」。";
+    readonly taskbarSummaryScopeDesc: "全部设备（默认）汇总所有已启用设备，标题就是总数；当前设备只汇总当前标签对应的设备；当前工作区按当前打开会话所在目录过滤（无法确定目录时回退当前设备）。标题不再加范围前缀。";
     readonly taskbarScopeActive: "当前设备";
     readonly taskbarScopeWorkspace: "当前工作区";
     readonly taskbarScopeAll: "全部设备";
-    readonly taskbarScopeAllTitle: "全部";
-    readonly taskbarScopeWorkspaceSuffix: "工作区";
     readonly taskbarRunningSegment: "{count}跑";
     readonly taskbarPendingSegment: "{count}待";
     readonly taskbarUnreadSegment: "{count}结";
