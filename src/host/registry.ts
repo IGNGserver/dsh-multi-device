@@ -198,7 +198,7 @@ export function sanitizeTaskbarSummaryScope(
   value: unknown,
   fallback: TaskbarSummaryScope = 'active',
 ): TaskbarSummaryScope {
-  return value === 'all' || value === 'active' ? value : fallback
+  return value === 'all' || value === 'active' || value === 'workspace' ? value : fallback
 }
 
 function sanitizeKeepAlivePages(value: unknown, fallback = 6): number {
@@ -2246,6 +2246,7 @@ export class DeviceRegistry {
           sessionId: namespacedId, deviceId: client.id, running: summary.running,
           blank: summary.blank, origin: summary.origin, archived: archived.has(summary.sessionId),
           runningSubagentCount: childrenByParent.get(summary.sessionId) ?? 0,
+          ...(summary.cwd !== undefined && summary.cwd !== '' ? { cwd: summary.cwd } : {}),
           ...(pending !== undefined ? { pendingInteractionKind: pending.kind, pendingRequestCount: pending.count } : {}),
         })
       }

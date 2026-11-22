@@ -20,11 +20,13 @@
  * @module dsh-multi-device/client/windowTitle
  */
 import {
+  encodeRemoteSessionId,
   LOCAL_DEVICE_ID,
   type DeviceId,
   type DeviceView,
   type MultiDeviceSnapshot,
 } from '../contract.ts'
+import { getClientServices } from './clientServices.ts'
 import type { MultiDeviceLocaleKey } from './locales.ts'
 import { clientStore, type MultiDeviceClientState } from './state.ts'
 import { formatTaskbarSummary, tallyTaskbarSessions, type TaskbarTranslate } from './taskbarSummary.ts'
@@ -83,6 +85,7 @@ export function resolveTaskbarSummary(
   snapshot: MultiDeviceSnapshot,
   t: TaskbarTranslate,
   activeDeviceId?: DeviceId,
+  workspaceSessionIds?: ReadonlySet<string>,
 ): string | undefined {
   if (snapshot.ui?.taskbarSummary !== true) return undefined
   if (snapshot.ui.taskbarSummaryScope === 'all') {
@@ -93,11 +96,55 @@ export function resolveTaskbarSummary(
     : snapshot.devices.find(device => device.id === activeDeviceId && device.enabled !== false)
   const deviceId = active?.id ?? LOCAL_DEVICE_ID
   const label = active?.name ?? t('nativeLocalTab')
+  if (snapshot.ui.taskbarSummaryScope === 'workspace' &&
+      workspaceSessionIds !== undefined && workspaceSessionIds.size > 0 &&
+      snapshot.attentionByDevice !== undefined) {
+    return formatTaskbarSummary(
+      tallyTaskbarSessions(snapshot, { deviceIds: new Set([deviceId]), sessionIds: workspaceSessionIds }),
+      t,
+      `${label}·${t('taskbarScopeWorkspaceSuffix')}`,
+    )
+  }
   return formatTaskbarSummary(
     tallyTaskbarSessions(snapshot, { deviceIds: new Set([deviceId]) }),
     t,
     label,
   )
+}
+
+/**
+ * Session IDs in the active conversation's workspace on the active device.
+ *
+ * DSH does not publish the sidebar's selected group, so the active Session's
+ * `cwd` is the honest local proxy. Local Sessions have a full client-side list;
+ * a remote Session only has the Host's `cwdBySession` for attention members,
+ * and an unresolvable remote workspace deliberately falls back to `active`
+ * rather than inventing a filter.
+ */
+export function activeWorkspaceSessionIds(
+  state: Pick<MultiDeviceClientState, 'snapshot' | 'activeNativeDeviceId' | 'activeSessionId'>,
+): ReadonlySet<string> | undefined {
+  const deviceId = state.activeNativeDeviceId
+  if (deviceId === undefined) {
+    const active = state.activeSessionId
+    const list = getClientServices().sessions?.list.getSnapshot()
+    if (active === undefined || list === undefined) return undefined
+    const cwd = list.byId[active]?.cwd
+    if (cwd === undefined || cwd === '') return undefined
+    const ids = list.ids.filter(id => list.byId[id]?.cwd === cwd)
+    return ids.length === 0 ? undefined : new Set(ids)
+  }
+  const device = state.snapshot.devices.find(candidate => candidate.id === deviceId && candidate.enabled !== false)
+  const raw = device?.nativePaneSessionId
+  const view = state.snapshot.attentionByDevice?.[deviceId]
+  if (raw === undefined || raw === '' || view?.cwdBySession === undefined) return undefined
+  const active = encodeRemoteSessionId(deviceId, raw)
+  const cwd = view.cwdBySession[active]
+  if (cwd === undefined || cwd === '') return undefined
+  const ids = Object.entries(view.cwdBySession)
+    .filter(([, value]) => value === cwd)
+    .map(([sessionId]) => sessionId)
+  return ids.length === 0 ? undefined : new Set(ids)
 }
 
 /**
@@ -231,7 +278,12 @@ export function installWindowTitle(t: (key: MultiDeviceLocaleKey) => string): ()
   const sync = (): void => {
     const state: MultiDeviceClientState = clientStore.getSnapshot()
     try {
-      const summary = resolveTaskbarSummary(state.snapshot, t, state.activeNativeDeviceId)
+      const summary = resolveTaskbarSummary(
+        state.snapshot,
+        t,
+        state.activeNativeDeviceId,
+        activeWorkspaceSessionIds(state),
+      )
       controller.apply(resolveWindowTitle({
         ...(state.activeNativeDeviceId !== undefined
           ? { activeNativeDeviceId: state.activeNativeDeviceId }
