@@ -73,7 +73,7 @@ export function discoverDefaultPrivateKeys(home = homedir()): string[] {
  * legacy `Proc-Type: 4,ENCRYPTED` marker); the authoritative check remains the
  * SSH client's prompt/agent.
  */
-export function listLocalSshKeys(home = homedir()): SshKeyEntry[] {
+export function listLocalSshKeys(home = homedir(), platform: NodeJS.Platform = process.platform): SshKeyEntry[] {
   const sshDir = join(home, '.ssh')
   if (!existsSync(sshDir)) return []
   const entries: SshKeyEntry[] = []
@@ -109,7 +109,8 @@ export function listLocalSshKeys(home = homedir()): SshKeyEntry[] {
         /-----BEGIN ENCRYPTED PRIVATE KEY-----/.test(text) ||
         /^Proc-Type:\s*4,ENCRYPTED/im.test(text) ||
         /ENCRYPTED/.test(text),
-      permissionsTooOpen: (mode & 0o077) !== 0,
+      // Windows NTFS ACLs are not represented by POSIX mode bits (Node reports 0666).
+      permissionsTooOpen: platform === 'win32' ? false : (mode & 0o077) !== 0,
     })
   }
 

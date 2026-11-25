@@ -426,8 +426,19 @@ export const NATIVE_BRIDGE_SCRIPT = String.raw`(function () {
     var wrapped = function (text) {
       var value = '';
       try { value = String(text); } catch (error) { value = ''; }
-      if (copyTextFallback(value)) return Promise.resolve();
-      return original.apply(this, arguments);
+      try {
+        var pending = original.apply(this, arguments);
+        if (pending && typeof pending.then === 'function') {
+          return pending.then(undefined, function (error) {
+            if (copyTextFallback(value)) return undefined;
+            throw error;
+          });
+        }
+        return pending;
+      } catch (error) {
+        if (copyTextFallback(value)) return Promise.resolve();
+        throw error;
+      }
     };
     wrapped.__dshMdClipboard = true;
     try {

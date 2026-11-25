@@ -76,13 +76,15 @@ export const Pill = ({ children, active, ...props }: AnyProps) =>
   React.createElement('button', { ...props, type: 'button', 'data-active': active === true ? 'true' : 'false' }, children)
 export const DisclosureRow = ({ title, open, children }: AnyProps) =>
   React.createElement('div', {}, title as ReactNode, open === true ? children as ReactNode : null)
-export const Modal = ({ open, title, description, footer, children }: AnyProps) =>
+export const Modal = ({ open, title, description, footer, children, className, contentClassName }: AnyProps) =>
   open === true
     ? React.createElement(
         'div',
-        { role: 'dialog', 'aria-label': title as string },
+        { role: 'dialog', 'aria-label': title as string, ...(className !== undefined ? { className: className as string } : {}) },
         description !== undefined ? React.createElement('p', {}, description as ReactNode) : null,
-        children,
+        contentClassName !== undefined
+          ? React.createElement('div', { className: contentClassName as string }, children)
+          : children,
         footer !== undefined ? React.createElement('div', { 'data-modal-footer': 'true' }, footer as ReactNode) : null,
       )
     : null

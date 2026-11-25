@@ -42,11 +42,13 @@ import {
 import { AuthRequiredPanel } from './AuthPanel.tsx'
 import {
   type BarLayout,
+  type HostPlatformChromeKind,
   describeObstruction,
   measureNativeBar,
   recordNativeBarMetrics,
   recordNativeBarObstruction,
   resolveBarLayout,
+  resolvePlatformBarChrome,
 } from './barMetrics.ts'
 import { attentionUnreadIds } from '../attention.ts'
 import { AttentionDetails } from './AttentionDetails.tsx'
@@ -73,13 +75,21 @@ function getDesktopBrowserBridge(): DesktopBrowserBridgeLike | undefined {
 
 function postWebviewVisibility(webview: HTMLElement, visible: boolean): void {
   try {
+    const code = visible
+      ? `window.postMessage(${JSON.stringify({ __dshMdVisibility: true, visible: true })}, '*'); try { window.dispatchEvent(new Event('resize')); } catch {}`
+      : `window.postMessage(${JSON.stringify({ __dshMdVisibility: true, visible: false })}, '*')`
     const pending = (webview as HTMLElement & {
       executeJavaScript?: (code: string) => Promise<unknown>
-    }).executeJavaScript?.(
-      `window.postMessage(${JSON.stringify({ __dshMdVisibility: true, visible })}, '*')`,
-    )
+    }).executeJavaScript?.(code)
     if (pending !== undefined) void pending.catch(() => { /* guest not ready */ })
   } catch { /* guest may not be attached yet */ }
+}
+
+function readHostThemeHint(): 'dark' | 'light' | undefined {
+  if (typeof document === 'undefined' || document.body == null || typeof document.body.hasAttribute !== 'function') {
+    return undefined
+  }
+  return document.body.hasAttribute('data-ds-dark-theme') ? 'dark' : 'light'
 }
 
 /**
@@ -106,10 +116,24 @@ export function KeepAliveDeviceFrame({
   })
   const embeddingError = access.status === 'available' ? undefined : access.message
   const proxyUrl = access.status === 'available' ? access.url : undefined
+  // Capture the host's dark/light theme once per mount or reload so status
+  // pages match manual DSH theme overrides without reloading live frames on
+  // subsequent theme switches.
+  const themeHintRef = useRef<{ readonly key: string; readonly theme: 'dark' | 'light' | undefined }>({
+    key: '',
+    theme: undefined,
+  })
+  const themeKey = `${device.id}:${proxyUrl ?? ''}:${reloadCount}`
+  if (themeHintRef.current.key !== themeKey) {
+    themeHintRef.current = { key: themeKey, theme: readHostThemeHint() }
+  }
   const targetUrl = proxyUrl === undefined ? undefined : (() => {
     try {
       const url = new URL(proxyUrl)
       url.searchParams.set('md_client', clientStore.clientId)
+      if (themeHintRef.current.theme !== undefined) {
+        url.searchParams.set('md_theme', themeHintRef.current.theme)
+      }
       return url.href
     } catch {
       return proxyUrl
@@ -332,7 +356,7 @@ export function NativeTabBar({
   const state = useMultiDeviceState()
   const { devices } = state.snapshot
   const visibleDevices = devices.filter(device => device.enabled !== false)
-  const [layout, setLayout] = useState<BarLayout | undefined>(undefined)
+  const [layout, setLayout] = useState<(BarLayout & { readonly platformChrome: HostPlatformChromeKind }) | undefined>(undefined)
   const [obstructed, setObstructed] = useState<string | undefined>(undefined)
   const barRef = useRef<HTMLDivElement | null>(null)
   const tabsRef = useRef<HTMLDivElement | null>(null)
@@ -366,22 +390,37 @@ export function NativeTabBar({
         frameObserver?.observe(next)
       }
       const rect = frame?.getBoundingClientRect()
-      const chromeTop = Number.parseFloat(
-        getComputedStyle(document.documentElement).getPropertyValue('--dsh-frame-chrome-top'),
-      )
-      const resolved = resolveBarLayout({
+      const root = document.documentElement
+      const rootStyle = getComputedStyle(root)
+      const hasWindowsTitlebar = root.hasAttribute('data-windows-titlebar')
+      const fullscreen = root.hasAttribute('data-fullscreen')
+      let chromeTop = Number.parseFloat(rootStyle.getPropertyValue('--dsh-frame-chrome-top'))
+      if ((!Number.isFinite(chromeTop) || chromeTop <= 0) && hasWindowsTitlebar && !fullscreen) {
+        const winHeight = Number.parseFloat(rootStyle.getPropertyValue('--dsh-windows-titlebar-height'))
+        if (Number.isFinite(winHeight) && winHeight > 0) chromeTop = winHeight
+      }
+      const platformChrome = resolvePlatformBarChrome({
+        platform: root.dataset.platform,
+        hasWindowsTitlebar,
+        fullscreen,
+        chromeTop: Number.isFinite(chromeTop) ? chromeTop : 0,
+      })
+      const baseLayout = resolveBarLayout({
         frameLeft: rect?.left ?? 0,
         frameTop: rect?.top ?? 0,
         frameWidth: rect?.width ?? 0,
         viewportWidth: window.innerWidth,
-        chromeTop: Number.isFinite(chromeTop) ? chromeTop : 0,
+        chromeTop: platformChrome.barTop,
       })
+      const resolved = { ...baseLayout, platformChrome: platformChrome.kind }
       setLayout(previous => (
         previous !== undefined
         && previous.left === resolved.left
         && previous.top === resolved.top
         && previous.width === resolved.width
         && previous.compact === resolved.compact
+        && previous.clipped === resolved.clipped
+        && previous.platformChrome === resolved.platformChrome
           ? previous
           : resolved
       ))
@@ -398,14 +437,15 @@ export function NativeTabBar({
 
     measure()
     window.addEventListener('resize', measure)
-    // Fullscreen toggles the Host's chrome height to 0; a sidebar collapse or a
-    // panel drag changes the frame without changing window.innerWidth.
+    // Fullscreen toggles the Host's chrome height to 0; Windows writes
+    // --dsh-windows-titlebar-height onto documentElement.style; a sidebar
+    // collapse or panel drag changes the frame without changing innerWidth.
     const hostObserver = typeof MutationObserver === 'undefined'
       ? undefined
       : new MutationObserver(measure)
     hostObserver?.observe(document.documentElement, {
       attributes: true,
-      attributeFilter: ['data-fullscreen', 'data-platform', 'data-windows-titlebar'],
+      attributeFilter: ['data-fullscreen', 'data-platform', 'data-windows-titlebar', 'style'],
     })
     return () => {
       window.removeEventListener('resize', measure)
@@ -481,6 +521,7 @@ export function NativeTabBar({
       data-compact={compact ? 'true' : 'false'}
       data-clipped={clipped ? 'true' : 'false'}
       data-obstructed={obstructed ?? 'false'}
+      data-platform-chrome={layout?.platformChrome ?? 'standard'}
       data-mode="native"
       style={layout === undefined
         ? undefined
@@ -709,6 +750,24 @@ export function NativeViewport({
   if (activeDevice !== undefined) mountedDeviceIds.add(activeDevice.id)
   const mountedDevices = visibleDevices.filter(device => mountedDeviceIds.has(device.id))
   const stageVisible = activeDevice !== undefined
+
+  // Switching from a remote device tab back to 本机 hides the remote
+  // iframe/webview, which can leave DOM focus stranded in the hidden guest.
+  // Hand focus back to the local window/composer so shortcuts and copy work immediately.
+  const previousActiveDeviceId = useRef<DeviceId | undefined>(activeDevice?.id)
+  useEffect(() => {
+    const prev = previousActiveDeviceId.current
+    previousActiveDeviceId.current = activeDevice?.id
+    if (prev === undefined || activeDevice !== undefined) return
+    if (typeof document === 'undefined') return
+    try {
+      const current = document.activeElement
+      if (current instanceof HTMLElement && stageRef.current?.contains(current)) {
+        current.blur()
+      }
+      window.focus()
+    } catch { /* focus restoration is best-effort */ }
+  }, [activeDevice?.id])
 
   return (
     <div

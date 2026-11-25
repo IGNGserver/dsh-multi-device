@@ -710,7 +710,7 @@ export function MultiDeviceHubPanel({
       {/* Global Preferences (aligned with DSH General Settings rows) */}
       <div className="dsh-md-pref-list">
         <div className="dsh-md-pref-row">
-          <div>
+          <div className="dsh-md-pref-text">
             <div className="dsh-md-pref-title">{t('taskbarSummaryTitle')}</div>
             <div className="dsh-md-pref-desc">{t('taskbarSummaryDesc')}</div>
           </div>
@@ -725,7 +725,7 @@ export function MultiDeviceHubPanel({
           />
         </div>
         <div className="dsh-md-pref-row">
-          <div>
+          <div className="dsh-md-pref-text">
             <div className="dsh-md-pref-title">{t('taskbarSummaryScopeTitle')}</div>
             <div className="dsh-md-pref-desc">{t('taskbarSummaryScopeDesc')}</div>
           </div>
@@ -749,7 +749,7 @@ export function MultiDeviceHubPanel({
           />
         </div>
         <div className="dsh-md-pref-row">
-          <div>
+          <div className="dsh-md-pref-text">
             <div className="dsh-md-pref-title">{t('crossHostReadStateTitle')}</div>
             <div className="dsh-md-pref-desc">{t('crossHostReadStateDesc')}</div>
           </div>
@@ -764,7 +764,7 @@ export function MultiDeviceHubPanel({
           />
         </div>
         <div className="dsh-md-pref-row">
-          <div>
+          <div className="dsh-md-pref-text">
             <div className="dsh-md-pref-title">{t('crossHostUiStateTitle')}</div>
             <div className="dsh-md-pref-desc">{t('crossHostUiStateDesc')}</div>
           </div>
@@ -779,7 +779,7 @@ export function MultiDeviceHubPanel({
           />
         </div>
         <div className="dsh-md-pref-row">
-          <div>
+          <div className="dsh-md-pref-text">
             <div className="dsh-md-pref-title">{t('keepAliveMaxPagesTitle')}</div>
             <div className="dsh-md-pref-desc">{t('keepAliveMaxPagesDesc')}</div>
           </div>
@@ -802,7 +802,7 @@ export function MultiDeviceHubPanel({
           />
         </div>
         <div className="dsh-md-pref-row">
-          <div>
+          <div className="dsh-md-pref-text">
             <div className="dsh-md-pref-title">{t('keepAliveIdleTitle')}</div>
             <div className="dsh-md-pref-desc">{t('keepAliveIdleDesc')}</div>
           </div>
@@ -1056,7 +1056,7 @@ export function MultiDeviceHubPanel({
           surface the user is looking at. */}
       <div className="dsh-md-diagnostics">
         <div className="dsh-md-pref-row">
-          <div>
+          <div className="dsh-md-pref-text">
             <div className="dsh-md-pref-title">{t('diagnosticsTitle')}</div>
             <div className="dsh-md-pref-desc">{t('diagnosticsDesc')}</div>
           </div>
