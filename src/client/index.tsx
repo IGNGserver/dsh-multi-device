@@ -49,16 +49,24 @@ function translateFallback(key: MultiDeviceLocaleKey): string {
   return fallbackDict[key] ?? en[key] ?? key
 }
 
+export interface SlotStoreLike {
+  readonly create?: () => {
+    readonly actions?: {
+      readonly openSection?: (id: string) => void
+    }
+  }
+  readonly actions?: {
+    readonly openSection?: (id: string) => void
+  }
+}
+
 export interface SlotEntryLike {
+  /** Official DSH 0.2 `SlotCore.register` attaches `store` directly on the entry. */
+  readonly store?: SlotStoreLike
   readonly options?: {
     readonly id?: string
-    readonly store?: {
-      readonly create?: () => {
-        readonly actions?: {
-          readonly openSection?: (id: string) => void
-        }
-      }
-    }
+    /** Legacy/test shape kept as a secondary lookup. */
+    readonly store?: SlotStoreLike
   }
 }
 
@@ -102,10 +110,13 @@ export function openSettingsSection(
 ): boolean {
   try {
     const entries = ctx.slots.entries?.('sidebar.settings')
-    const openSection = entries?.[0]?.options?.store?.create?.()?.actions?.openSection
-    if (typeof openSection === 'function') {
-      openSection(sectionId)
-      return true
+    for (const entry of entries ?? []) {
+      const store = entry?.store ?? entry?.options?.store
+      const openSection = store?.create?.()?.actions?.openSection ?? store?.actions?.openSection
+      if (typeof openSection === 'function') {
+        openSection(sectionId)
+        return true
+      }
     }
   } catch {
     // Fall back to the owned Modal below.

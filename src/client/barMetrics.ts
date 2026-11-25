@@ -23,8 +23,111 @@
  * @module dsh-multi-device/client/barMetrics
  */
 
-/** Width (CSS px) below which trailing controls move into the leading cluster. */
+/** Width (CSS px) below which trailing controls tighten their spacing. */
 export const COMPACT_BAR_WIDTH = 720
+
+/** Fixed height (CSS px) of the persistent device tab bar across all platforms. */
+export const NATIVE_BAR_HEIGHT = 42
+
+/**
+ * Leading inset (CSS px) on windowed macOS Desktop so the first tab pill clears
+ * Electron `hiddenInset` traffic lights (`x: ~16..68px`) with 12px of breathing room.
+ */
+export const DARWIN_TRAFFIC_LIGHT_INSET_START = 80
+
+/** Default leading/trailing inline padding (CSS px) on the device tab bar. */
+export const DEFAULT_BAR_INSET_START = 12
+
+/** Safe air (CSS px) between the bottom of the device tab bar and DSH overlays. */
+export const OVERLAY_SAFE_GAP = 12
+
+export type HostPlatformChromeKind =
+  | 'darwin-windowed'
+  | 'darwin-fullscreen'
+  | 'windows-titlebar'
+  | 'windows-fullscreen'
+  | 'standard'
+
+export interface PlatformChromeInput {
+  /** Value of `document.documentElement.dataset.platform` (set only by Desktop preload). */
+  readonly platform?: string
+  /** True when `document.documentElement.hasAttribute('data-windows-titlebar')`. */
+  readonly hasWindowsTitlebar: boolean
+  /** True when `document.documentElement.hasAttribute('data-fullscreen')`. */
+  readonly fullscreen: boolean
+  /** Host-published `--dsh-frame-chrome-top` (or `--dsh-windows-titlebar-height`), in CSS px. */
+  readonly chromeTop: number
+  /** Bar height override (defaults to {@link NATIVE_BAR_HEIGHT}). */
+  readonly barHeight?: number
+}
+
+export interface PlatformBarChrome {
+  readonly kind: HostPlatformChromeKind
+  /** Offset from viewport/frame top where the device tab bar begins. */
+  readonly barTop: number
+  /** Leading inline padding so tabs clear macOS traffic lights when present. */
+  readonly insetStart: number
+  /** Total top padding reserved inside the Host frame (`barTop + barHeight`). */
+  readonly frameReserveTop: number
+  /** Safe top inset (`frameReserveTop + 12`) published for DSH overlays/menus. */
+  readonly overlayTop: number
+  /** Whether empty space on the tab bar acts as a macOS window-drag region. */
+  readonly barDraggable: boolean
+}
+
+/**
+ * Single source of truth for cross-platform device tab bar placement.
+ *
+ * - **macOS Desktop (windowed)**: the 42px tab bar sits directly at `y = 0` as
+ *   the unified title/drag bar, reserving `80px` on the leading edge for the
+ *   `hiddenInset` traffic lights (`x: ~16..68px`). No extra 48px vibrancy gap.
+ * - **macOS Desktop (fullscreen)**: traffic lights are hidden by macOS, so the
+ *   leading inset shrinks back to `12px` while keeping `barTop = 0`.
+ * - **Windows Desktop (windowed)**: the OS caption bar owns `0..chromeTop`, so
+ *   the tab bar sits immediately below at `barTop = chromeTop`.
+ * - **Windows Desktop (fullscreen) / Linux Desktop / Web**: `barTop = 0`,
+ *   `insetStart = 12`.
+ */
+export function resolvePlatformBarChrome(input: PlatformChromeInput): PlatformBarChrome {
+  const barHeight = finiteNonNegative(input.barHeight ?? NATIVE_BAR_HEIGHT)
+  const rawChromeTop = finiteNonNegative(input.chromeTop)
+
+  if (input.platform === 'darwin') {
+    const frameReserveTop = barHeight
+    return {
+      kind: input.fullscreen ? 'darwin-fullscreen' : 'darwin-windowed',
+      barTop: 0,
+      insetStart: input.fullscreen ? DEFAULT_BAR_INSET_START : DARWIN_TRAFFIC_LIGHT_INSET_START,
+      frameReserveTop,
+      overlayTop: frameReserveTop + OVERLAY_SAFE_GAP,
+      barDraggable: !input.fullscreen,
+    }
+  }
+
+  if (input.hasWindowsTitlebar) {
+    const barTop = input.fullscreen ? 0 : rawChromeTop
+    const frameReserveTop = barTop + barHeight
+    return {
+      kind: input.fullscreen ? 'windows-fullscreen' : 'windows-titlebar',
+      barTop,
+      insetStart: DEFAULT_BAR_INSET_START,
+      frameReserveTop,
+      overlayTop: frameReserveTop + OVERLAY_SAFE_GAP,
+      barDraggable: false,
+    }
+  }
+
+  const barTop = input.fullscreen ? 0 : rawChromeTop
+  const frameReserveTop = barTop + barHeight
+  return {
+    kind: 'standard',
+    barTop,
+    insetStart: DEFAULT_BAR_INSET_START,
+    frameReserveTop,
+    overlayTop: frameReserveTop + OVERLAY_SAFE_GAP,
+    barDraggable: false,
+  }
+}
 
 /** Host frame box, in viewport pixels, as read from `getBoundingClientRect()`. */
 export interface BarLayoutInput {

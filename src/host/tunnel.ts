@@ -12,7 +12,7 @@
  * @module dsh-multi-device/host/tunnel
  */
 import { execFile, execFileSync, spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { access } from 'node:fs/promises'
 import { createConnection, createServer, type Server, type Socket } from 'node:net'
 import { homedir, tmpdir } from 'node:os'
@@ -33,32 +33,86 @@ const MAX_EXEC_STDERR_BYTES = 256 * 1024
 
 let cachedSshControlPath: string | null | undefined
 
+/** macOS `sockaddr_un.sun_path` is 104 bytes including NUL (103 usable bytes). */
+export const SSH_CONTROL_PATH_MAX_BYTES = 103
+/** OpenSSH expands `%C` to a 40-char hex SHA-1 digest. */
+const OPENSSH_PERCENT_C_BYTES = 40
+/** OpenSSH appends `.` + a 16-char random suffix while binding before rename(). */
+const OPENSSH_CONTROL_BIND_SUFFIX_BYTES = 18
+
+/**
+ * Compute worst-case UTF-8 byte length of an OpenSSH `ControlPath` template
+ * after `%C` expansion and temporary bind suffix.
+ */
+export function expandedSshControlPathBytes(template: string): number {
+  const expanded = template.replace(/%C/g, '0'.repeat(OPENSSH_PERCENT_C_BYTES))
+  return Buffer.byteLength(expanded, 'utf8') + OPENSSH_CONTROL_BIND_SUFFIX_BYTES
+}
+
+/**
+ * Select a private `0700` directory and `ControlPath` template whose expanded
+ * socket path stays safely below macOS's 104-byte `sun_path` ceiling.
+ *
+ * macOS's default `os.tmpdir()` (`/var/folders/xx/.../T`, ~49 bytes) pushes
+ * `<tmpdir>/dsh-md-ssh-<uid>/cm-%C` past 124 bytes once `%C` and OpenSSH's
+ * bind suffix expand. Trying `tmpdir()` first and falling back to `/tmp` keeps
+ * Linux `$TMPDIR` overrides working while guaranteeing macOS stays ~77 bytes.
+ */
+export function resolveSshControlPath(options?: {
+  readonly baseDirs?: readonly string[]
+  readonly uid?: number
+}): string | null {
+  const uid = options?.uid ?? (typeof process.getuid === 'function' ? process.getuid() : undefined)
+  const uidSuffix = uid !== undefined ? String(uid) : String(process.pid)
+  const rawBases = options?.baseDirs ?? [tmpdir(), '/tmp']
+  const seen = new Set<string>()
+  const baseDirs: string[] = []
+  for (const base of rawBases) {
+    if (base !== '' && !seen.has(base)) {
+      seen.add(base)
+      baseDirs.push(base)
+    }
+  }
+
+  for (const base of baseDirs) {
+    const dir = join(base, `dsh-md-${uidSuffix}`)
+    const candidate = join(dir, 'cm-%C')
+    if (candidate.length > 92 || expandedSshControlPathBytes(candidate) > SSH_CONTROL_PATH_MAX_BYTES) {
+      continue
+    }
+    try {
+      mkdirSync(dir, { recursive: true, mode: 0o700 })
+      try { chmodSync(dir, 0o700) } catch { /* ignore if restricted */ }
+      const stat = lstatSync(dir)
+      if (!stat.isDirectory()) continue
+      if (uid !== undefined && stat.uid !== uid) continue
+      if ((stat.mode & 0o077) !== 0) continue
+      return candidate
+    } catch {
+      continue
+    }
+  }
+  return null
+}
+
+/** Reset cached `ControlPath` resolution (test seam). */
+export function resetSshControlPathCacheForTest(): void {
+  cachedSshControlPath = undefined
+}
+
 /**
  * Return OpenSSH multiplexing CLI flags (`ControlMaster=auto`, `ControlPersist=60`,
  * `ControlPath=...`) on POSIX platforms so `execSshCommand` (credential read /
  * cross-Host sync) and `SshTunnel` share a single authenticated SSH connection.
  *
  * Uses `%C` (40-char SHA-1 of `%l%h%p%r`) inside a private `0700` per-UID temp dir
- * so total `sun_path` stays ~64 bytes (well below macOS 104B / Linux 108B limits).
+ * verified to stay below macOS's 104B / Linux's 108B `sun_path` limits after
+ * `%C` expansion and OpenSSH's bind suffix.
  */
 export function sshControlMultiplexArgs(): string[] {
   if (process.platform === 'win32') return []
   if (cachedSshControlPath === undefined) {
-    try {
-      const uidSuffix = typeof process.getuid === 'function' ? String(process.getuid()) : String(process.pid)
-      const dir = join(tmpdir(), `dsh-md-ssh-${uidSuffix}`)
-      mkdirSync(dir, { recursive: true, mode: 0o700 })
-      try { chmodSync(dir, 0o700) } catch { /* ignore if restricted */ }
-      const stat = statSync(dir)
-      if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) {
-        cachedSshControlPath = null
-      } else {
-        const candidate = join(dir, 'cm-%C')
-        cachedSshControlPath = candidate.length <= 92 ? candidate : null
-      }
-    } catch {
-      cachedSshControlPath = null
-    }
+    cachedSshControlPath = resolveSshControlPath()
   }
   if (cachedSshControlPath === null) return []
   return [
@@ -339,7 +393,7 @@ export async function execSshCommand(
     let stderrBytes = 0
     let settled = false
     let exitDrainTimer: ReturnType<typeof setTimeout> | undefined
-    const proc = spawn('ssh', args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    const proc = spawn('ssh', args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
     const onAbort = (): void => {
       try { proc.kill('SIGKILL') } catch { /* already exited */ }
       finish({ ok: false, error: 'ssh command aborted' })
@@ -753,7 +807,7 @@ export class SshTunnel {
     let stderr = ''
     let proc: ChildProcess
     try {
-      proc = spawn('ssh', args, { stdio: ['ignore', 'ignore', 'pipe'] })
+      proc = spawn('ssh', args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
     } catch (error) {
       this.fail(`System OpenSSH is required; install ssh and configure an SSH agent. ${error instanceof Error ? error.message : String(error)}`, generation, false)
       return false

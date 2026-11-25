@@ -16,13 +16,36 @@ import type { SshTransportConfig } from '../contract.ts';
 import { type ResolvedSshParameters } from './ssh-config.ts';
 export type TunnelState = 'connecting' | 'up' | 'error' | 'stopped';
 export declare const SSH2_MISSING_MESSAGE = "The optional ssh2 engine is not installed. Use system-ssh with an SSH agent, or explicitly install ssh2 in this DSH Profile through dsh plugin and approve only its reported build scripts.";
+/** macOS `sockaddr_un.sun_path` is 104 bytes including NUL (103 usable bytes). */
+export declare const SSH_CONTROL_PATH_MAX_BYTES = 103;
+/**
+ * Compute worst-case UTF-8 byte length of an OpenSSH `ControlPath` template
+ * after `%C` expansion and temporary bind suffix.
+ */
+export declare function expandedSshControlPathBytes(template: string): number;
+/**
+ * Select a private `0700` directory and `ControlPath` template whose expanded
+ * socket path stays safely below macOS's 104-byte `sun_path` ceiling.
+ *
+ * macOS's default `os.tmpdir()` (`/var/folders/xx/.../T`, ~49 bytes) pushes
+ * `<tmpdir>/dsh-md-ssh-<uid>/cm-%C` past 124 bytes once `%C` and OpenSSH's
+ * bind suffix expand. Trying `tmpdir()` first and falling back to `/tmp` keeps
+ * Linux `$TMPDIR` overrides working while guaranteeing macOS stays ~77 bytes.
+ */
+export declare function resolveSshControlPath(options?: {
+    readonly baseDirs?: readonly string[];
+    readonly uid?: number;
+}): string | null;
+/** Reset cached `ControlPath` resolution (test seam). */
+export declare function resetSshControlPathCacheForTest(): void;
 /**
  * Return OpenSSH multiplexing CLI flags (`ControlMaster=auto`, `ControlPersist=60`,
  * `ControlPath=...`) on POSIX platforms so `execSshCommand` (credential read /
  * cross-Host sync) and `SshTunnel` share a single authenticated SSH connection.
  *
  * Uses `%C` (40-char SHA-1 of `%l%h%p%r`) inside a private `0700` per-UID temp dir
- * so total `sun_path` stays ~64 bytes (well below macOS 104B / Linux 108B limits).
+ * verified to stay below macOS's 104B / Linux's 108B `sun_path` limits after
+ * `%C` expansion and OpenSSH's bind suffix.
  */
 export declare function sshControlMultiplexArgs(): string[];
 export interface TunnelStatus {

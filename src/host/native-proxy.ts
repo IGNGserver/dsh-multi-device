@@ -427,7 +427,7 @@ export class NativeDeviceProxy {
     this.startAbort = controller
     const server = createServer((req, res) => {
       void this.handleHttp(req, res).catch((error: unknown) => {
-        this.respondProxyError(res, error)
+        this.respondProxyError(res, error, parseStatusTheme(req.url))
       })
     })
     // Own the server before the first await: stop() must also cancel a pending bind.
@@ -744,19 +744,20 @@ export class NativeDeviceProxy {
     state.readyTimer = timer
   }
 
-  private respondProxyError(res: ServerResponse, error: unknown): void {
+  private respondProxyError(res: ServerResponse, error: unknown, theme?: StatusPageTheme): void {
     if (this.stopped || res.destroyed || res.writableEnded) return
     if (res.headersSent) { res.destroy(); return }
     res.writeHead(502, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
-    res.end(renderUnavailableHtml(this.device.name, error instanceof Error ? error.message : String(error)))
+    res.end(renderUnavailableHtml(this.device.name, error instanceof Error ? error.message : String(error), theme))
   }
 
   private async handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (this.stopped) { res.destroy(); return }
+    const statusTheme = parseStatusTheme(req.url)
     const upstreamBase = this.getUpstreamBaseUrl()
     if (upstreamBase === undefined) {
       res.writeHead(503, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
-      res.end(renderUnavailableHtml(this.device.name, 'Device tunnel or connection is not ready yet.'))
+      res.end(renderUnavailableHtml(this.device.name, 'Device tunnel or connection is not ready yet.', statusTheme))
       return
     }
 
@@ -797,14 +798,14 @@ export class NativeDeviceProxy {
     }
     if (cookieToken !== this.token) {
       res.writeHead(403, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
-      res.end(renderProxyRejectedHtml('代理访问令牌缺失或与当前页面不匹配。'))
+      res.end(renderProxyRejectedHtml('代理访问令牌缺失或与当前页面不匹配。', statusTheme))
       return
     }
     // SameSite=Lax already prevents this cookie on cross-site subresources;
     // reject an explicit cross-site fetch as a second line of defence.
     if (req.headers['sec-fetch-site'] === 'cross-site') {
       res.writeHead(403, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
-      res.end(renderProxyRejectedHtml('该请求来自跨站上下文，已被代理拒绝。'))
+      res.end(renderProxyRejectedHtml('该请求来自跨站上下文，已被代理拒绝。', statusTheme))
       return
     }
 
@@ -854,7 +855,7 @@ export class NativeDeviceProxy {
     const active = (): boolean => !cancelled && !this.stopped && !req.aborted && !res.destroyed && !res.writableEnded
     const fail = (error: unknown): void => {
       if (!active()) { cancel(); return }
-      this.respondProxyError(res, error)
+      this.respondProxyError(res, error, statusTheme)
       cancel()
     }
     this.cancelUpstreams.add(cancel)
@@ -941,7 +942,7 @@ export class NativeDeviceProxy {
                         forward(true)
                         return
                       }
-                      this.respondAuthRequired(res, status)
+                      this.respondAuthRequired(res, status, statusTheme)
                     })
                     .catch(fail)
                   return
@@ -959,7 +960,7 @@ export class NativeDeviceProxy {
                     )
                   }
                 }).catch(fail)
-                this.respondAuthRequired(res, status)
+                this.respondAuthRequired(res, status, statusTheme)
                 return
               }
 
@@ -1012,7 +1013,7 @@ export class NativeDeviceProxy {
               if (shouldInject) {
                 this.setBridgeState('loading', undefined, clientId)
                 this.armBridgeTimer(clientId)
-                cleanups.push(this.streamInjectedHtml(proxyRes, res, status, resHeaders, clientId))
+                cleanups.push(this.streamInjectedHtml(proxyRes, res, status, resHeaders, clientId, statusTheme))
                 return
               }
 
@@ -1051,6 +1052,7 @@ export class NativeDeviceProxy {
     status: number,
     baseHeaders: Record<string, string | string[]>,
     clientId: string,
+    statusTheme?: StatusPageTheme,
   ): () => void {
     const chunks: Buffer[] = []
     let size = 0
@@ -1081,7 +1083,7 @@ export class NativeDeviceProxy {
         this.resetBridgeSelection(clientId)
         this.setBridgeState('failed', 'the remote HTML document was too large to inject the native bridge', clientId)
         res.writeHead(502, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
-        res.end(renderUnavailableHtml(this.device.name, 'The remote page is too large to inject the native bridge.'))
+        res.end(renderUnavailableHtml(this.device.name, 'The remote page is too large to inject the native bridge.', statusTheme))
         proxyRes.destroy()
         return
       }
@@ -1132,7 +1134,7 @@ export class NativeDeviceProxy {
         this.setBridgeState('failed', 'the remote HTML document could not be decoded within its output limit', clientId)
         if (!res.destroyed && !res.headersSent && !this.stopped) {
           res.writeHead(502, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
-          res.end(renderUnavailableHtml(this.device.name, 'The remote page could not be decoded safely.'))
+          res.end(renderUnavailableHtml(this.device.name, 'The remote page could not be decoded safely.', statusTheme))
         }
       })
     }
@@ -1438,7 +1440,7 @@ export class NativeDeviceProxy {
     return promise
   }
 
-  private respondAuthRequired(res: ServerResponse, status: number): void {
+  private respondAuthRequired(res: ServerResponse, status: number, theme?: StatusPageTheme): void {
     if (this.stopped || res.destroyed || res.writableEnded) return
     if (res.headersSent) {
       res.destroy()
@@ -1449,7 +1451,7 @@ export class NativeDeviceProxy {
       'cache-control': 'no-store',
       'x-dsh-md-auth-required': '1',
     })
-    res.end(renderAuthRequiredHtml(this.device.name, status))
+    res.end(renderAuthRequiredHtml(this.device.name, status, theme))
   }
 
   private handleUpgrade(req: IncomingMessage, clientSocket: Duplex, head: Buffer): void {
@@ -1774,6 +1776,19 @@ function rewriteLocation(value: string, upstreamBase: string, proxyOrigin: strin
   }
 }
 
+type StatusPageTheme = 'dark' | 'light'
+
+function parseStatusTheme(rawUrl: string | undefined): StatusPageTheme | undefined {
+  if (typeof rawUrl !== 'string' || rawUrl === '') return undefined
+  try {
+    const value = new URL(rawUrl, 'http://native-proxy.invalid').searchParams.get('md_theme')
+    if (value === 'dark' || value === 'light') return value
+  } catch {
+    // Ignore malformed URLs; fall back to prefers-color-scheme.
+  }
+  return undefined
+}
+
 interface StatusPageOptions {
   readonly deviceName: string
   readonly badge: string
@@ -1781,18 +1796,21 @@ interface StatusPageOptions {
   readonly title: string
   readonly paragraphs: readonly string[]
   readonly retry?: boolean
+  readonly theme?: StatusPageTheme
 }
 
 /**
  * Shared, theme-aware status page for the framed proxy. DSH CSS variables do
- * not cross the frame boundary, so this page uses `prefers-color-scheme` and a
- * neutral palette that follows the host OS theme instead of a hardcoded dark
- * card in a light UI.
+ * not cross the frame boundary, so this page respects an explicit `md_theme`
+ * hint from the host shell and falls back to `prefers-color-scheme` so manual
+ * DSH dark/light overrides and OS themes both render cleanly.
  */
 function renderStatusPage(options: StatusPageOptions): string {
   const name = escapeHtml(options.deviceName)
   const title = escapeHtml(options.title)
   const badge = escapeHtml(options.badge)
+  const themeAttr = options.theme === undefined ? '' : ` data-theme="${options.theme}"`
+  const colorScheme = options.theme ?? 'light dark'
   const paragraphs = options.paragraphs
     .map((text) => `    <p>${escapeHtml(text)}</p>`)
     .join('\n')
@@ -1800,14 +1818,14 @@ function renderStatusPage(options: StatusPageOptions): string {
     ? ''
     : '    <button type="button" onclick="location.reload()">重试 / Retry</button>'
   return `<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN"${themeAttr}>
 <head>
 <meta charset="utf-8" />
-<meta name="color-scheme" content="light dark" />
+<meta name="color-scheme" content="${colorScheme}" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>${name} — ${title}</title>
 <style>
-  :root { color-scheme: light dark; }
+  :root { color-scheme: ${colorScheme}; }
   * { box-sizing: border-box; }
   body {
     margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
@@ -1830,12 +1848,17 @@ function renderStatusPage(options: StatusPageOptions): string {
     margin-top: 6px; padding: 7px 16px; border-radius: 8px; border: 1px solid #3b82f6;
     background: #2563eb; color: #fff; font: inherit; font-size: 13px; cursor: pointer;
   }
+  html[data-theme='dark'] body { background: #141518; color: #e5e7eb; }
+  html[data-theme='dark'] .card { background: #1e2025; border-color: #2e323b; box-shadow: none; }
+  html[data-theme='dark'] .badge.warn { color: #f0c674; background: #3a2f12; border-color: #5a4a1f; }
+  html[data-theme='dark'] .badge.error { color: #f2a3a3; background: #3a1c1c; border-color: #5a2a2a; }
+  html[data-theme='dark'] p { color: #9ca3af; }
   @media (prefers-color-scheme: dark) {
-    body { background: #141518; color: #e5e7eb; }
-    .card { background: #1e2025; border-color: #2e323b; box-shadow: none; }
-    .badge.warn { color: #f0c674; background: #3a2f12; border-color: #5a4a1f; }
-    .badge.error { color: #f2a3a3; background: #3a1c1c; border-color: #5a2a2a; }
-    p { color: #9ca3af; }
+    html:not([data-theme='light']) body { background: #141518; color: #e5e7eb; }
+    html:not([data-theme='light']) .card { background: #1e2025; border-color: #2e323b; box-shadow: none; }
+    html:not([data-theme='light']) .badge.warn { color: #f0c674; background: #3a2f12; border-color: #5a4a1f; }
+    html:not([data-theme='light']) .badge.error { color: #f2a3a3; background: #3a1c1c; border-color: #5a2a2a; }
+    html:not([data-theme='light']) p { color: #9ca3af; }
   }
 </style>
 </head>
@@ -1850,7 +1873,7 @@ ${retry}
 </html>`
 }
 
-function renderAuthRequiredHtml(deviceName: string, status: number): string {
+function renderAuthRequiredHtml(deviceName: string, status: number, theme?: StatusPageTheme): string {
   return renderStatusPage({
     deviceName,
     badge: '需要登录 · Sign-in required',
@@ -1861,10 +1884,11 @@ function renderAuthRequiredHtml(deviceName: string, status: number): string {
       '请在 DSH 中打开「设置 → 多设备」，选择该设备后输入 dsh web 启动链接/Token，或点击「通过 SSH 自动修复」重新签发 Cookie。',
       `The remote DSH rejected this credential (HTTP ${String(status)}). Open Settings → Multi-Device, pick this device, then paste a launch token or repair the cookie over SSH.`,
     ],
+    ...(theme === undefined ? {} : { theme }),
   })
 }
 
-function renderUnavailableHtml(deviceName: string, detail: string): string {
+function renderUnavailableHtml(deviceName: string, detail: string, theme?: StatusPageTheme): string {
   return renderStatusPage({
     deviceName,
     badge: '暂不可达 · Unavailable',
@@ -1875,10 +1899,11 @@ function renderUnavailableHtml(deviceName: string, detail: string): string {
       'SSH 隧道或远端 DSH 暂不可用。请确认远端 dsh web 正在运行，然后重试。',
       'The SSH tunnel or the remote DSH is not reachable right now. Confirm dsh web is running, then retry.',
     ],
+    ...(theme === undefined ? {} : { theme }),
   })
 }
 
-function renderProxyRejectedHtml(reason: string): string {
+function renderProxyRejectedHtml(reason: string, theme?: StatusPageTheme): string {
   return renderStatusPage({
     deviceName: '多设备代理',
     badge: '代理会话已失效 · Proxy session expired',
@@ -1890,6 +1915,7 @@ function renderProxyRejectedHtml(reason: string): string {
       'Reopen or reload the device from Settings → Multi-Device in DSH.',
     ],
     retry: false,
+    ...(theme === undefined ? {} : { theme }),
   })
 }
 

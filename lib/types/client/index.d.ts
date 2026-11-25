@@ -23,16 +23,23 @@ export declare const SETTINGS_SECTION_ID = "multi-device";
 /** Retained alias for backwards compatibility with external callers. */
 export declare const PANEL_ID = "multi-device";
 export declare const inject: string[];
+export interface SlotStoreLike {
+    readonly create?: () => {
+        readonly actions?: {
+            readonly openSection?: (id: string) => void;
+        };
+    };
+    readonly actions?: {
+        readonly openSection?: (id: string) => void;
+    };
+}
 export interface SlotEntryLike {
+    /** Official DSH 0.2 `SlotCore.register` attaches `store` directly on the entry. */
+    readonly store?: SlotStoreLike;
     readonly options?: {
         readonly id?: string;
-        readonly store?: {
-            readonly create?: () => {
-                readonly actions?: {
-                    readonly openSection?: (id: string) => void;
-                };
-            };
-        };
+        /** Legacy/test shape kept as a secondary lookup. */
+        readonly store?: SlotStoreLike;
     };
 }
 export interface ClientContextLike {

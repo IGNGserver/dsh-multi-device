@@ -49,10 +49,19 @@ const CSS_TEXT = `
   display: flex;
   align-items: center;
   justify-content: space-between;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 12px 24px;
   padding: 16px 0;
   border-bottom: 0.5px solid var(--dsw-alias-border-l2);
+}
+
+.dsh-md-pref-text {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.dsh-md-pref-row > :not(.dsh-md-pref-text) {
+  flex: none;
 }
 
 .dsh-md-pref-title {
@@ -102,7 +111,7 @@ const CSS_TEXT = `
   font-weight: 500;
   padding: 1px 7px;
   border-radius: 999px;
-  background: var(--dsw-alias-bg-layer-4, var(--dsw-alias-bg-layer-3));
+  background: var(--dsw-alias-bg-module-platform, var(--dsw-alias-bg-layer-3));
   color: var(--dsw-alias-label-secondary);
 }
 
@@ -194,17 +203,19 @@ const CSS_TEXT = `
   color: var(--dsw-alias-label-secondary);
 }
 
-.dsh-md-icon-btn:hover:not(:disabled) {
-  color: var(--dsw-alias-label-primary);
-}
-
 .dsh-md-icon-btn.isCompact {
   width: 22px;
   height: 22px;
 }
 
-.dsh-md-icon-btn.isDanger:hover:not(:disabled) {
-  color: var(--dsw-alias-state-error-primary, #ef4444);
+@media (hover: hover) {
+  .dsh-md-icon-btn:hover:not(:disabled) {
+    color: var(--dsw-alias-label-primary);
+  }
+
+  .dsh-md-icon-btn.isDanger:hover:not(:disabled) {
+    color: var(--dsw-alias-state-error-primary, #ef4444);
+  }
 }
 
 .dsh-md-icon-btn svg {
@@ -242,7 +253,7 @@ const CSS_TEXT = `
   font-weight: 500;
   padding: 1px 8px;
   border-radius: 999px;
-  background: var(--dsw-alias-interactive-bg-selected, rgba(103, 158, 254, 0.12));
+  background: var(--dsw-alias-state-business-tertiary, rgba(103, 158, 254, 0.12));
   color: var(--dsw-alias-state-business-primary, #679efe);
 }
 
@@ -251,7 +262,7 @@ const CSS_TEXT = `
   font-weight: 500;
   padding: 1px 6px;
   border-radius: var(--dsw-radius-xs, 4px);
-  background: var(--dsw-alias-interactive-bg-hover-warning, rgba(245, 158, 11, 0.12));
+  background: var(--dsw-alias-state-warn-tertiary, rgba(245, 158, 11, 0.12));
   color: var(--dsw-alias-state-warn-label, #f59e0b);
 }
 
@@ -361,9 +372,11 @@ const CSS_TEXT = `
   line-height: 18px;
 }
 
-.dsh-md-select-trigger:hover:not(:disabled) {
-  border-color: var(--dsw-alias-border-l1);
-  background: var(--dsw-alias-interactive-bg-hover);
+@media (hover: hover) {
+  .dsh-md-select-trigger:hover:not(:disabled) {
+    border-color: var(--dsw-alias-border-l1);
+    background: var(--dsw-alias-interactive-bg-hover);
+  }
 }
 
 .dsh-md-select-trigger:focus-visible,
@@ -416,10 +429,11 @@ const CSS_TEXT = `
   left: 0;
   min-width: 100%;
   width: max-content;
-  max-width: min(380px, 90vw);
+  max-width: min(380px, calc(100vw - 24px));
   max-height: 240px;
   overflow-y: auto;
-  z-index: 960;
+  overscroll-behavior: contain;
+  z-index: 1100;
   box-sizing: border-box;
   padding: 4px;
   border-radius: var(--dsw-radius-lg, 10px);
@@ -429,9 +443,15 @@ const CSS_TEXT = `
   display: flex;
   flex-direction: column;
   gap: 2px;
+  -webkit-app-region: no-drag;
 }
 
-.dsh-md-select-container.isCompact .dsh-md-select-dropdown {
+.dsh-md-select-dropdown.isPortalled {
+  position: fixed;
+  min-width: 0;
+}
+
+.dsh-md-select-container.isCompact .dsh-md-select-dropdown:not(.isPortalled) {
   left: auto;
   right: 0;
 }
@@ -446,6 +466,7 @@ const CSS_TEXT = `
 
 .dsh-md-select-option {
   box-sizing: border-box;
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -461,12 +482,18 @@ const CSS_TEXT = `
   transition: background-color 0.1s ease;
 }
 
-.dsh-md-select-option:hover:not(.isDisabled) {
+@media (hover: hover) {
+  .dsh-md-select-option:hover:not(.isDisabled) {
+    background: var(--dsw-alias-interactive-bg-hover);
+  }
+}
+
+.dsh-md-select-option.isActive:not(.isDisabled) {
   background: var(--dsw-alias-interactive-bg-hover);
 }
 
 .dsh-md-select-option.isSelected {
-  background: var(--dsw-alias-interactive-bg-selected, rgba(103, 158, 254, 0.08));
+  background: var(--dsw-specific-sidebar-nav-item-active, var(--dsw-alias-interactive-bg-active));
 }
 
 .dsh-md-select-option.isDisabled {
@@ -495,7 +522,7 @@ const CSS_TEXT = `
   font-size: 10px;
   padding: 1px 5px;
   border-radius: var(--dsw-radius-xs, 4px);
-  background: var(--dsw-alias-bg-layer-4);
+  background: var(--dsw-alias-bg-module-platform, var(--dsw-alias-bg-layer-3));
   color: var(--dsw-alias-label-secondary);
   flex: none;
 }
@@ -513,7 +540,7 @@ const CSS_TEXT = `
 .dsh-md-select-check-wrap {
   display: inline-flex;
   align-items: center;
-  color: var(--dsw-alias-brand-primary, #679efe);
+  color: var(--dsw-alias-state-business-primary, #679efe);
   flex: none;
   margin-left: auto;
 }
@@ -567,18 +594,82 @@ const CSS_TEXT = `
 html {
   --dsh-md-native-bar-height: 42px;
   --dsh-md-native-bar-top: var(--dsh-frame-chrome-top, 0px);
+  --dsh-md-native-bar-inset-start: 12px;
 }
 
-/* macOS Desktop keeps its traffic lights and the collapsed-sidebar leading
- * controls in the reserved title area; place the tab strip below that area.
- * Browser-hosted DSH on macOS has no such native title area and keeps 0. */
-html[data-platform='darwin'] .dsh-md-frame-native.dsh-md-frame-desktop {
-  --dsh-md-native-bar-top: var(--dsh-frame-top-clearance, 48px);
+/* macOS Desktop (Plan A): the 42px device tab strip sits at y = 0 as the
+ * unified title/drag bar, reserving 80px on the left for hiddenInset traffic
+ * lights (x: ~16..68px). Native fullscreen hides the traffic lights so the
+ * leading inset shrinks back to 12px. Browser-hosted DSH on macOS never sets
+ * data-platform='darwin' and keeps the standard 12px inset. */
+html[data-platform='darwin'] {
+  --dsh-md-native-bar-top: 0px;
+  --dsh-md-native-bar-inset-start: 80px;
 }
 
-/* Keep macOS collapsed-sidebar window-chrome controls above the overlay */
-[data-shell-leading] {
+html[data-platform='darwin'][data-fullscreen] {
+  --dsh-md-native-bar-inset-start: 12px;
+}
+
+html[data-windows-titlebar][data-fullscreen] {
+  --dsh-md-native-bar-top: 0px;
+}
+
+/* Publish the combined chrome + tab-strip safe top inset so DSH's own portalled
+ * Settings panel, menus, popovers and ContextMeter clear the strip on every OS
+ * in both windowed and fullscreen modes. */
+html.dsh-md-active,
+html.dsh-md-active[data-platform='darwin'],
+html.dsh-md-active[data-platform='darwin'][data-fullscreen],
+html.dsh-md-active[data-windows-titlebar],
+html.dsh-md-active[data-windows-titlebar][data-fullscreen] {
+  --dsh-frame-overlay-top: calc(var(--dsh-md-native-bar-top) + var(--dsh-md-native-bar-height) + 12px);
+}
+
+/* On macOS Desktop the frame already reserves the 42px strip above all columns,
+ * so in-frame entry pages (Plugin Manager, Tasks) do not need an extra 48px
+ * traffic-light clearance on top of it. */
+html[data-platform='darwin'] .dsh-md-frame-native {
+  --dsh-frame-top-clearance: 0px;
+}
+
+/* Position collapsed-sidebar / drawer leading controls below the tab strip so
+ * they never collide with the strip or macOS traffic lights. */
+.dsh-md-frame-native > [data-shell-leading] {
+  top: calc(var(--dsh-md-native-bar-top) + var(--dsh-md-native-bar-height) + 11px) !important;
   z-index: 25 !important;
+}
+
+/* On macOS Desktop the traffic lights live in the 42px tab strip above the
+ * frame content, so collapsed/drawer leading controls align at left: 12px with
+ * 84px header clearance (matching fullscreen and Linux). */
+html[data-platform='darwin'] .dsh-md-frame-native[data-sidebar-collapsed],
+html[data-platform='darwin'] .dsh-md-frame-native[data-sidebar-drawer] {
+  --dsh-frame-leading-clearance: 84px;
+}
+
+html[data-platform='darwin'] .dsh-md-frame-native > [data-shell-leading] {
+  left: 12px !important;
+}
+
+/* While a remote device page fills the stage, hide the local frame's collapsed-
+ * sidebar / drawer opener so it never floats over the remote device UI. */
+.dsh-md-frame-native[data-md-remote-active='true'] > [data-shell-leading] {
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
+/* Narrow-viewport (<768px) drawer mask and drawer sidebar slide out below the
+ * device tab strip so the strip stays visible and interactive on every screen. */
+.dsh-md-frame-native[data-sidebar-drawer] > [data-sidebar-mask],
+.dsh-md-frame-native[data-sidebar-drawer] > [data-sidebar-mask] + div {
+  top: calc(var(--dsh-md-native-bar-top) + var(--dsh-md-native-bar-height));
+}
+
+/* Traffic lights live in the tab strip above the frame content, so a fullscreen
+ * right panel's first dock column needs only the ordinary 10px inset on macOS. */
+html[data-platform='darwin'] .dsh-md-frame-native [data-sidebar-right-panel='fullscreen'] [data-dockkit-host='dock'][data-dockkit-column='0'] {
+  --dsh-dockkit-strip-inline-start: 10px;
 }
 
 /* While resizing the local sidebar/rightbar, prevent iframes from swallowing pointer events */
@@ -610,9 +701,10 @@ html[data-platform='darwin'] .dsh-md-frame-native.dsh-md-frame-desktop {
 .dsh-md-native-bar {
   /* Portalled onto <body>: the Host's shell overlay is a stacking context
    * (z-index 20) sitting under its own in-frame chrome (leading seat 25,
-   * sidebar toggle 30), and the frame clips overflow. Fixed positioning plus
-   * this z-index keeps the Settings entry above every in-frame seat while
-   * staying below Tooltip/HoverCard (100), Modal (1000) and Menu (1100).
+   * sidebar toggle 30, DockKit float 60, narrow drawer 70-71), and the frame
+   * clips overflow. Fixed positioning at z-index 80 keeps the strip and
+   * Settings entry above every in-frame surface while staying cleanly below
+   * Tooltip/HoverCard (100), Modal/Settings (1000) and Menu/Toast (1100).
    * left/top/width are written inline from the measured Host frame; the
    * values here are only the pre-measurement fallback. */
   position: fixed;
@@ -624,11 +716,13 @@ html[data-platform='darwin'] .dsh-md-frame-native.dsh-md-frame-desktop {
   max-width: 100vw;
   height: var(--dsh-md-native-bar-height);
   box-sizing: border-box;
-  z-index: 60;
+  z-index: 80;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 12px;
+  padding-block: 0;
+  padding-inline-start: var(--dsh-md-native-bar-inset-start, 12px);
+  padding-inline-end: 12px;
   border-bottom: 0.5px solid var(--dsw-alias-border-l2);
   background: var(--dsw-specific-sidebar-fill, var(--dsw-alias-bg-layer-1));
   color: var(--dsw-alias-label-primary);
@@ -636,12 +730,16 @@ html[data-platform='darwin'] .dsh-md-frame-native.dsh-md-frame-desktop {
   -webkit-app-region: no-drag;
 }
 
-/* Compact bars only tighten the gap and padding. The Settings entry stays in the
- * trailing cluster at every width: moving it across the strip at 720px re-flowed
- * every tab, and the bar's width is already clamped to the visible viewport. */
+/* Compact bars only tighten the gap and trailing/leading padding (preserving
+ * the 80px traffic-light inset on windowed macOS Desktop). The Settings entry
+ * stays in the trailing cluster at every width. */
 .dsh-md-native-bar[data-compact='true'] {
   gap: 6px;
-  padding: 0 8px;
+  padding-inline: 8px;
+}
+
+html[data-platform='darwin']:not([data-fullscreen]) .dsh-md-native-bar[data-compact='true'] {
+  padding-inline-start: var(--dsh-md-native-bar-inset-start, 80px);
 }
 
 .dsh-md-native-bar[data-compact='true'] .dsh-md-native-tabs {
@@ -699,7 +797,7 @@ html[data-platform='darwin'] .dsh-md-frame-native.dsh-md-frame-desktop {
   border-radius: var(--dsw-radius-md);
   background: var(--dsw-alias-bg-layer-1);
   color: var(--dsw-alias-label-primary);
-  font-family: var(--dsw-font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-family: var(--ds-font-family-code, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 11px;
   line-height: 16px;
   white-space: pre-wrap;
@@ -709,17 +807,20 @@ html[data-platform='darwin'] .dsh-md-frame-native.dsh-md-frame-desktop {
 /*
  * The bar is portalled onto <body>, where the Host forces
  * body > :not(#root) { -webkit-app-region: no-drag }. !important restores the
- * drag affordance this strip provides in place of the macOS title bar; the
- * buttons inside opt back out below.
+ * drag affordance this strip provides in place of the macOS title bar while
+ * windowed; interactive controls inside opt back out below.
  */
-html[data-platform='darwin'] body > .dsh-md-native-bar,
-html[data-platform='darwin'] .dsh-md-native-bar {
+html[data-platform='darwin']:not([data-fullscreen]) body > .dsh-md-native-bar,
+html[data-platform='darwin']:not([data-fullscreen]) .dsh-md-native-bar {
   -webkit-app-region: drag !important;
 }
 
 .dsh-md-native-bar button,
 .dsh-md-native-bar [role='button'],
-.dsh-md-native-bar [role='tab'] {
+.dsh-md-native-bar [role='tab'],
+.dsh-md-native-bar a,
+.dsh-md-native-bar input,
+.dsh-md-native-bar .dsh-md-tab-status {
   -webkit-app-region: no-drag;
 }
 
@@ -861,9 +962,14 @@ html[data-platform='darwin'] .dsh-md-native-bar {
   transition: opacity 0.12s ease;
 }
 
-.dsh-md-native-tab-item:hover .dsh-md-tab-release,
 .dsh-md-native-tab-item:focus-within .dsh-md-tab-release {
   opacity: 1;
+}
+
+@media (hover: hover) {
+  .dsh-md-native-tab-item:hover .dsh-md-tab-release {
+    opacity: 1;
+  }
 }
 
 .dsh-md-pill-inner {
@@ -896,7 +1002,7 @@ html[data-platform='darwin'] .dsh-md-native-bar {
 html {
   --dsh-md-tone-pending: var(--dsw-alias-state-warn-label, var(--dsw-alias-state-warn-primary, #f59e0b));
   --dsh-md-tone-running: var(--dsw-alias-state-business-primary, #679efe);
-  --dsh-md-tone-done: var(--dsw-alias-state-success-label, var(--dsw-alias-state-success-primary, #1f8b4c));
+  --dsh-md-tone-done: var(--dsw-alias-state-success-primary, #1f8b4c);
   --dsh-md-status-segment-width: 22px;
 }
 
@@ -998,12 +1104,14 @@ html {
   color: var(--dsh-md-tone-done);
 }
 
-.dsh-md-tab-status-seg:hover {
-  background: var(--dsw-alias-interactive-bg-hover);
+@media (hover: hover) {
+  .dsh-md-tab-status-seg:hover {
+    background: var(--dsw-alias-interactive-bg-hover);
+  }
 }
 
 .dsh-md-tab-status-seg[data-open='true'] {
-  background: var(--dsw-alias-interactive-bg-selected);
+  background: var(--dsw-alias-interactive-bg-active, var(--dsw-alias-interactive-bg-hover));
 }
 
 .dsh-md-tab-status-seg:focus-visible {
@@ -1032,7 +1140,7 @@ html {
 
 .dsh-md-attention-row-title.isId {
   color: var(--dsw-alias-label-tertiary);
-  font-family: var(--dsw-font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-family: var(--ds-font-family-code, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 11px;
 }
 
@@ -1235,11 +1343,23 @@ html {
 
 .dsh-md-fallback-modal {
   width: min(740px, 100%);
+  max-height: min(800px, calc(100dvh - 2 * max(24px, var(--dsh-frame-overlay-top, 24px))));
+}
+
+.dsh-md-fallback-modal-content {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 @media (max-width: 560px) {
   .dsh-md-pref-row {
+    flex-wrap: wrap;
     align-items: flex-start;
+  }
+
+  .dsh-md-pref-text {
+    flex: 1 1 100%;
   }
 
   .dsh-md-editor-top {

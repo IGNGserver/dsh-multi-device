@@ -691,6 +691,12 @@ export class MultiDeviceControlPlane {
             ...(payload.taskbarSummaryScope === 'all' || payload.taskbarSummaryScope === 'active' || payload.taskbarSummaryScope === 'workspace'
               ? { taskbarSummaryScope: payload.taskbarSummaryScope }
               : {}),
+            ...(typeof payload.maxKeepAlivePages === 'number'
+              ? { maxKeepAlivePages: payload.maxKeepAlivePages }
+              : {}),
+            ...(typeof payload.keepAliveIdleMinutes === 'number'
+              ? { keepAliveIdleMinutes: payload.keepAliveIdleMinutes }
+              : {}),
           })
           return { ok: true, value: this.registry.snapshot(clientId) }
         }

@@ -28,7 +28,7 @@ export declare function discoverDefaultPrivateKeys(home?: string): string[];
  * legacy `Proc-Type: 4,ENCRYPTED` marker); the authoritative check remains the
  * SSH client's prompt/agent.
  */
-export declare function listLocalSshKeys(home?: string): SshKeyEntry[];
+export declare function listLocalSshKeys(home?: string, platform?: NodeJS.Platform): SshKeyEntry[];
 /**
  * Parse a `user@host:port` or `ssh://user@host:port` shorthand into fields.
  */
